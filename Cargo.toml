@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["crates/dispatched-core"]
-default-members = ["crates/dispatched-core"]
+members = ["crates/dispatched-core", "crates/dispatched-cli"]
+default-members = ["crates/dispatched-core", "crates/dispatched-cli"]
 
 [workspace.package]
 version = "0.0.1"
