@@ -1,0 +1,15 @@
+name: Release
+on:
+  workflow_dispatch:
+  push:
+    tags: ["app-v*"]
+permissions:
+  contents: write
+jobs:
+  desktop:
+    uses: Horizon-Tech-doo/horizon-azure-kit/.github/workflows/tauri-release.yml@main
+    with:
+      app-name: Dispatched
+      project-path: app
+      cargo-workspace: "."
+    secrets: inherit

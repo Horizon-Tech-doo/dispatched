@@ -1,0 +1,76 @@
+name: CI
+on:
+  push: { branches: [main] }
+  pull_request: { branches: [main] }
+env:
+  CARGO_TERM_COLOR: always
+defaults:
+  run:
+    working-directory: dispatched
+jobs:
+  rust:
+    strategy:
+      fail-fast: false
+      matrix: { os: [ubuntu-latest, macos-latest, windows-latest] }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: dispatched }
+      - uses: actions/checkout@v4
+        with: { repository: Horizon-Tech-doo/horizon-azure-kit, path: horizon-azure-kit }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: "rustfmt, clippy" }
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: "dispatched -> target" }
+      - if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt --all --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy -p dispatched-core --all-targets --features test-support -- -D warnings
+      - run: cargo test
+  app:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: dispatched }
+      - uses: actions/checkout@v4
+        with: { repository: Horizon-Tech-doo/horizon-azure-kit, path: horizon-azure-kit }
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: clippy }
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: "dispatched -> target" }
+      # The Tauri crate embeds app/dist at compile time, so build the frontend first.
+      - run: npm ci && npm run build
+        working-directory: dispatched/app
+      - run: cargo clippy -p dispatched-app -- -D warnings && cargo test -p dispatched-app
+  emulator:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: dispatched }
+      - uses: actions/checkout@v4
+        with: { repository: Horizon-Tech-doo/horizon-azure-kit, path: horizon-azure-kit }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: "dispatched -> target" }
+      # ubuntu runners are x86_64, so emulator.sh uses only the default compose file.
+      - run: testing/emulator/emulator.sh up
+      - name: Run the M0 gate test
+        shell: bash
+        run: |
+          set -o pipefail
+          DISPATCHED_EMULATOR=1 cargo test -p dispatched-core --features test-support --test emulator_m0 -- --nocapture 2>&1 | tee emulator-gate.log
+          # The gate test prints "skipped: ..." and passes when the emulator is
+          # not enabled; that must never count as a green gate.
+          if grep -q 'skipped:' emulator-gate.log; then
+            echo "::error::Emulator gate test skipped itself; the gate did not run."
+            exit 1
+          fi
+      - if: always()
+        run: |
+          testing/emulator/emulator.sh logs || true
+          testing/emulator/emulator.sh down

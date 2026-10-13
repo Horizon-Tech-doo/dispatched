@@ -1,0 +1,16 @@
+Dispatched
+Copyright (c) 2026 Horizon Tech d.o.o.
+
+This product is licensed under the Apache License, Version 2.0.
+
+Protocol details for Azure Service Bus over AMQP 1.0 (management request
+shapes, CBS token types, message annotation keys) were cross-checked against
+the `azservicebus` crate (https://crates.io/crates/azservicebus),
+Copyright (c) minghuaw, MIT License, itself a port of the Azure SDK for .NET
+(Copyright (c) Microsoft Corporation, MIT License).
+
+AMQP 1.0 is provided by the fe2o3-amqp crates (MIT OR Apache-2.0).
+
+Dispatched is not affiliated with, endorsed by, or sponsored by Microsoft
+Corporation. "Microsoft", "Azure" and "Azure Service Bus" are trademarks of
+Microsoft Corporation.
