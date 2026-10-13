@@ -23,6 +23,7 @@ clap = { version = "4.6", features = ["derive", "env"] }
 dirs = "6"
 fe2o3-amqp = { version = "0.18.2", features = ["rustls"] }
 fe2o3-amqp-cbs = "0.18"
+fe2o3-amqp-management = "0.18"
 fe2o3-amqp-types = "0.18"
 mockito = "1"
 open = "5"

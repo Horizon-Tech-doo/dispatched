@@ -161,7 +161,9 @@ fn map_http_error(status: u16, body: &str, retry_after: Option<Duration>, url: &
         .and_then(|n| n.text_of("Detail").map(str::to_string))
         .unwrap_or_else(|| body.trim().chars().take(500).collect());
     match status {
-        401 => Error::Auth(detail),
+        // Service Bus answers missing Manage claims with 401, so a 401 that
+        // names claims is an authorization problem, not a rejected credential.
+        401 => unauthorized(detail),
         403 => Error::Forbidden {
             needed: needed_claims(&detail),
             detail,
@@ -172,9 +174,42 @@ fn map_http_error(status: u16, body: &str, retry_after: Option<Duration>, url: &
     }
 }
 
-/// Extract the missing rights from Service Bus error detail text, e.g.
-/// "Manage,EntityRead claims required for this operation." → `Manage,EntityRead`.
+/// A 401-style answer: `Forbidden` when the detail names the missing claims,
+/// otherwise the credential itself was rejected (`Auth`).
+pub(crate) fn unauthorized(detail: String) -> Error {
+    match needed_claims(&detail) {
+        Some(needed) => Error::Forbidden {
+            needed: Some(needed),
+            detail,
+        },
+        None => Error::Auth(detail),
+    }
+}
+
+/// Extract the missing rights from Service Bus error detail text. Recognises
+/// the HTTP wording ("Manage,EntityRead claims required for this operation.")
+/// and the AMQP wording ("'Listen' claim(s) are required to perform this
+/// operation", `"Manage,EntityRead" claim(s) are required ...`).
 pub fn needed_claims(detail: &str) -> Option<String> {
+    for marker in [" claim(s) are required", " claims are required"] {
+        if let Some(idx) = detail.find(marker) {
+            let before = detail[..idx].trim_end();
+            let claims = match before.chars().last() {
+                Some(q @ ('\'' | '"')) => {
+                    let inner = &before[..before.len() - 1];
+                    inner.rfind(q).map(|i| &inner[i + 1..])
+                }
+                _ => before
+                    .rsplit(|c: char| c.is_whitespace() || c == ':')
+                    .next(),
+            }
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+            if let Some(claims) = claims {
+                return Some(claims.to_string());
+            }
+        }
+    }
     if let Some(idx) = detail.find(" claims required") {
         let before = &detail[..idx];
         let start = before.rfind([' ', ':']).map(|i| i + 1).unwrap_or(0);
@@ -398,5 +433,49 @@ mod tests {
             Some("Listen")
         );
         assert_eq!(needed_claims("something else"), None);
+    }
+
+    #[test]
+    fn needed_claims_recognises_the_amqp_wording() {
+        assert_eq!(
+            needed_claims(
+                "Unauthorized access. 'Listen' claim(s) are required to perform this operation. Resource: 'sb://ns.servicebus.windows.net/q'."
+            )
+            .as_deref(),
+            Some("Listen")
+        );
+        assert_eq!(
+            needed_claims(
+                r#"Unauthorized access. "Manage,EntityRead" claim(s) are required to perform this operation."#
+            )
+            .as_deref(),
+            Some("Manage,EntityRead")
+        );
+        assert_eq!(
+            needed_claims("Listen claim(s) are required").as_deref(),
+            Some("Listen")
+        );
+        assert_eq!(
+            needed_claims("Manage,EntityRead claims are required").as_deref(),
+            Some("Manage,EntityRead")
+        );
+    }
+
+    #[tokio::test]
+    async fn unauthorized_with_missing_claims_is_forbidden() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/$Resources/queues")
+            .match_query(Matcher::Any)
+            .with_status(401)
+            .with_body("<Error><Code>401</Code><Detail>Unauthorized access. Manage,EntityRead claims required for this operation. TrackingId:abc</Detail></Error>")
+            .create_async()
+            .await;
+        match client(&server).list_queues().await.unwrap_err() {
+            Error::Forbidden { needed, .. } => {
+                assert_eq!(needed.as_deref(), Some("Manage,EntityRead"))
+            }
+            other => panic!("expected Forbidden, got {other}"),
+        }
     }
 }

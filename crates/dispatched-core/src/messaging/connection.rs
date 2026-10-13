@@ -1,7 +1,7 @@
 //! One AMQP connection per namespace: connection + session + CBS client,
 //! plus cached management links per entity address.
 
-use super::management::{ManagementLink, SETUP_TIMEOUT};
+use super::management::{ManagementLink, SETUP_TIMEOUT, map_put_token_error};
 use crate::namespace::Namespace;
 use crate::{Error, Result};
 use fe2o3_amqp::connection::ConnectionHandle;
@@ -13,6 +13,10 @@ use fe2o3_amqp_cbs::client::CbsClient;
 use fe2o3_amqp_cbs::token::CbsToken;
 use secrecy::ExposeSecret;
 use std::collections::HashMap;
+use std::time::Duration;
+
+/// Upper bound for the whole close sequence; an unresponsive peer must not hang callers.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// An open AMQP connection to a Service Bus namespace (or the emulator).
 pub struct ServiceBusConnection {
@@ -75,7 +79,7 @@ impl ServiceBusConnection {
         )
         .await
         .map_err(|_| Error::Timeout(format!("putting the token for {audience} timed out")))?
-        .map_err(|e| Error::Auth(format!("token for {audience} was rejected: {e}")))
+        .map_err(|e| map_put_token_error(&audience, address, e))
     }
 
     /// The management link for `address`, attached and authorized on first use.
@@ -94,16 +98,29 @@ impl ServiceBusConnection {
         &mut self.session
     }
 
-    /// Close links, session and connection.
+    /// Close links, session and connection, bounded by a 5 s overall timeout.
+    /// Closing is best effort: if the peer does not answer in time, the
+    /// half-closed handles are dropped (which tears the transport down) and
+    /// this returns `Ok(())` rather than `Error::Timeout`, since callers only
+    /// close to get rid of the connection.
     pub async fn close(mut self) -> Result<()> {
-        for (_, link) in self.management.drain() {
-            link.close().await;
+        let sequence = async {
+            for (_, link) in self.management.drain() {
+                link.close().await;
+            }
+            let _ = self.cbs.close().await;
+            let _ = self.session.end().await;
+            self.connection
+                .close()
+                .await
+                .map_err(|e| Error::Network(format!("close AMQP connection: {e}")))
+        };
+        match tokio::time::timeout(CLOSE_TIMEOUT, sequence).await {
+            Ok(result) => result,
+            Err(_) => {
+                tracing::warn!("closing the AMQP connection timed out; dropped it");
+                Ok(())
+            }
         }
-        let _ = self.cbs.close().await;
-        let _ = self.session.end().await;
-        self.connection
-            .close()
-            .await
-            .map_err(|e| Error::Network(format!("close AMQP connection: {e}")))
     }
 }

@@ -59,10 +59,7 @@ impl Explorer {
         }
         let conn = guard.as_mut().expect("opened above");
         let result = peek_all(conn, &address, from_sequence, max).await;
-        if matches!(
-            result,
-            Err(Error::Network(_) | Error::Protocol(_) | Error::Timeout(_))
-        ) {
+        if result.as_ref().is_err_and(breaks_connection) {
             // Drop a possibly broken connection; the next call reconnects.
             if let Some(conn) = guard.take() {
                 let _ = conn.close().await;
@@ -77,6 +74,15 @@ impl Explorer {
             let _ = conn.close().await;
         }
     }
+}
+
+/// Only transport-level failures poison the cached connection; `Forbidden`,
+/// `NotFound` and friends are answers from a healthy service.
+fn breaks_connection(e: &Error) -> bool {
+    matches!(
+        e,
+        Error::Network(_) | Error::Protocol(_) | Error::Timeout(_)
+    )
 }
 
 async fn peek_all(
@@ -100,4 +106,22 @@ async fn peek_all(
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_transport_failures_drop_the_connection() {
+        assert!(breaks_connection(&Error::Network("x".into())));
+        assert!(breaks_connection(&Error::Protocol("x".into())));
+        assert!(breaks_connection(&Error::Timeout("x".into())));
+        assert!(!breaks_connection(&Error::Forbidden {
+            needed: Some("Listen".into()),
+            detail: "x".into()
+        }));
+        assert!(!breaks_connection(&Error::NotFound("q".into())));
+        assert!(!breaks_connection(&Error::Auth("x".into())));
+    }
 }

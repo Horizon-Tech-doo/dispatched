@@ -72,7 +72,9 @@ impl From<KitError> for Error {
                 408 | 504 => Error::Timeout(format!("service returned {status}")),
                 _ => Error::Protocol(format!("service returned {status}: {body}")),
             },
-            KitError::SecretStore(m) => Error::Auth(format!("secret store: {m}")),
+            KitError::SecretStore(m) => Error::Auth(format!(
+                "the OS keychain is unavailable ({m}); on Linux start a Secret Service such as gnome-keyring"
+            )),
             KitError::PolicyDenied(m) => Error::Invalid(format!("denied: {m}")),
             KitError::Cancelled => Error::Cancelled,
             KitError::Invalid(m) => Error::Invalid(m),
@@ -126,6 +128,14 @@ mod tests {
         }
         .into();
         assert!(matches!(other, Error::Protocol(ref m) if m == "service returned 500: boom"));
+    }
+
+    #[test]
+    fn secret_store_failure_says_what_to_do() {
+        let e: Error = KitError::SecretStore("no secret service".into()).into();
+        assert!(
+            matches!(e, Error::Auth(ref m) if m.contains("no secret service") && m.contains("gnome-keyring"))
+        );
     }
 
     #[test]
