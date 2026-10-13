@@ -26,6 +26,7 @@ fe2o3-amqp-cbs = "0.18"
 fe2o3-amqp-types = "0.18"
 mockito = "1"
 open = "5"
+percent-encoding = "2"
 quick-xml = "0.36"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "charset", "system-proxy", "json", "form", "query"] }
 secrecy = "0.10"

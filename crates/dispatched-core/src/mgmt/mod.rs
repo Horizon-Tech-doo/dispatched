@@ -9,12 +9,28 @@ use crate::namespace::Namespace;
 use crate::tokens::TokenSource;
 use crate::{Error, Result};
 use models::{entries, queue_from_entry, subscription_from_entry, topic_from_entry};
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use xml::Node;
 
 const API_VERSION: &str = "2024-05";
 const PAGE_SIZE: usize = 100;
+/// Hard cap on pages per listing, so a misbehaving server cannot loop forever.
+const MAX_PAGES: usize = 1000;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Path segment encoding: everything except unreserved characters.
+const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
+
+fn segment(name: &str) -> String {
+    utf8_percent_encode(name, SEGMENT).to_string()
+}
 
 /// Read-side management client (M0). Create/update/delete arrive in M3.
 #[derive(Clone)]
@@ -32,8 +48,13 @@ impl ManagementClient {
 
     /// Client for an explicit base URL (tests).
     pub fn with_base(base: impl Into<String>, tokens: Arc<dyn TokenSource>) -> Self {
+        let http = reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .expect("reqwest client builds");
         Self {
-            http: reqwest::Client::new(),
+            http,
             base: base.into().trim_end_matches('/').to_string(),
             tokens,
         }
@@ -51,7 +72,7 @@ impl ManagementClient {
 
     /// Subscriptions of `topic` with counts.
     pub async fn list_subscriptions(&self, topic: &str) -> Result<Vec<SubscriptionInfo>> {
-        self.list(&format!("{topic}/Subscriptions"), |e| {
+        self.list(&format!("{}/Subscriptions", segment(topic)), |e| {
             subscription_from_entry(topic, e)
         })
         .await
@@ -59,33 +80,49 @@ impl ManagementClient {
 
     /// One queue. A missing queue is `NotFound` (the service answers 200 + empty feed).
     pub async fn get_queue(&self, name: &str) -> Result<QueueInfo> {
-        let root = self.get(name, &[("enrich", "false")]).await?;
+        let root = self.get(&segment(name), &[("enrich", "true")]).await?;
         entries(&root)
             .into_iter()
             .find_map(queue_from_entry)
             .ok_or_else(|| Error::NotFound(format!("queue `{name}`")))
     }
 
+    /// Page through a feed. Stops on a short page, on a page with no names
+    /// not already seen (a server ignoring `$skip`), or fails after `MAX_PAGES`.
     async fn list<T>(&self, path: &str, map: impl Fn(&Node) -> Option<T>) -> Result<Vec<T>> {
         let mut out = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
         let mut skip = 0usize;
-        loop {
+        for _ in 0..MAX_PAGES {
             let skip_s = skip.to_string();
             let top_s = PAGE_SIZE.to_string();
             let root = self
                 .get(
                     path,
-                    &[("enrich", "false"), ("$skip", &skip_s), ("$top", &top_s)],
+                    &[("enrich", "true"), ("$skip", &skip_s), ("$top", &top_s)],
                 )
                 .await?;
             let page = entries(&root);
             let n = page.len();
-            out.extend(page.into_iter().filter_map(&map));
-            if n < PAGE_SIZE {
+            let mut new_names = 0usize;
+            for entry in page {
+                let Some(name) = entry.text_of("title") else {
+                    continue;
+                };
+                if !seen.insert(name.to_string()) {
+                    continue;
+                }
+                new_names += 1;
+                out.extend(map(entry));
+            }
+            if n < PAGE_SIZE || new_names == 0 {
                 return Ok(out);
             }
             skip += n;
         }
+        Err(Error::Protocol(
+            "management API paging did not terminate".into(),
+        ))
     }
 
     async fn get(&self, path: &str, query: &[(&str, &str)]) -> Result<Node> {
@@ -187,6 +224,7 @@ mod tests {
             .match_query(Matcher::AllOf(vec![
                 Matcher::UrlEncoded("api-version".into(), "2024-05".into()),
                 Matcher::UrlEncoded("$top".into(), "100".into()),
+                Matcher::UrlEncoded("enrich".into(), "true".into()),
             ]))
             .match_header(
                 "authorization",
@@ -233,6 +271,68 @@ mod tests {
             .create_async()
             .await;
         assert_eq!(client(&server).list_queues().await.unwrap().len(), 101);
+    }
+
+    #[tokio::test]
+    async fn exact_page_then_empty_page_yields_100() {
+        let mut server = mockito::Server::new_async().await;
+        let entry = |i: usize| {
+            format!(
+                r#"<entry><title>q{i}</title><content><QueueDescription><Status>Active</Status></QueueDescription></content></entry>"#
+            )
+        };
+        let page1 = format!("<feed>{}</feed>", (0..100).map(entry).collect::<String>());
+        let _p1 = server
+            .mock("GET", "/$Resources/queues")
+            .match_query(Matcher::UrlEncoded("$skip".into(), "0".into()))
+            .with_status(200)
+            .with_body(page1)
+            .create_async()
+            .await;
+        let _p2 = server
+            .mock("GET", "/$Resources/queues")
+            .match_query(Matcher::UrlEncoded("$skip".into(), "100".into()))
+            .with_status(200)
+            .with_body("<feed></feed>")
+            .create_async()
+            .await;
+        assert_eq!(client(&server).list_queues().await.unwrap().len(), 100);
+    }
+
+    #[tokio::test]
+    async fn server_ignoring_skip_terminates_without_duplicates() {
+        let mut server = mockito::Server::new_async().await;
+        let entry = |i: usize| {
+            format!(
+                r#"<entry><title>q{i}</title><content><QueueDescription><Status>Active</Status></QueueDescription></content></entry>"#
+            )
+        };
+        let page = format!("<feed>{}</feed>", (0..100).map(entry).collect::<String>());
+        let mock = server
+            .mock("GET", "/$Resources/queues")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(page)
+            .expect(2)
+            .create_async()
+            .await;
+        let queues = client(&server).list_queues().await.unwrap();
+        assert_eq!(queues.len(), 100);
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn entity_names_are_percent_encoded_in_the_path() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/a%20b%3Fc")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(r#"<entry><title>a b?c</title><content><QueueDescription><Status>Active</Status></QueueDescription></content></entry>"#)
+            .create_async()
+            .await;
+        let q = client(&server).get_queue("a b?c").await.unwrap();
+        assert_eq!(q.name, "a b?c");
     }
 
     #[tokio::test]

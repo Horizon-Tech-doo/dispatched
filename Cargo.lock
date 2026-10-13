@@ -564,6 +564,7 @@ dependencies = [
  "fe2o3-amqp-types",
  "horizon-azure-kit",
  "mockito",
+ "percent-encoding",
  "quick-xml",
  "reqwest",
  "secrecy",
