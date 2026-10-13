@@ -17,7 +17,7 @@ pub mod tokens;
 pub use connstr::ConnectionString;
 pub use error::{Error, Result};
 pub use explorer::Explorer;
-pub use messaging::{MessageBody, PeekedMessage, PropValue};
+pub use messaging::{MessageBody, MessageState, PeekedMessage, PropValue};
 pub use mgmt::{EntityCounts, ManagementClient, QueueInfo, SubscriptionInfo, TopicInfo};
 pub use namespace::{EmulatorPorts, EntityPath, Namespace, SubQueue};
 pub use tokens::{ServiceBusToken, TokenKind, TokenSource};

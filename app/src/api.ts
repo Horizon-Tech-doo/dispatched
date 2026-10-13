@@ -13,6 +13,7 @@ export type MessageBody =
   | { kind: "empty" };
 export interface PeekedMessage {
   sequence_number: number;
+  state: "active" | "deferred" | "scheduled";
   message_id: string | null;
   subject: string | null;
   enqueued_time: string | null;

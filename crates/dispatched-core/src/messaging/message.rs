@@ -13,11 +13,36 @@ use std::collections::BTreeMap;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+/// Broker-side state of a message (`x-opt-message-state`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageState {
+    /// Available for receipt.
+    Active,
+    /// Set aside by a receiver; only receivable by sequence number.
+    Deferred,
+    /// Not yet enqueued (scheduled for later).
+    Scheduled,
+}
+
+impl MessageState {
+    /// Lowercase name, as used in filters and JSON.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MessageState::Active => "active",
+            MessageState::Deferred => "deferred",
+            MessageState::Scheduled => "scheduled",
+        }
+    }
+}
+
 /// A message as shown to users and agents (peeked; no lock held).
 #[derive(Debug, Clone, Serialize)]
 pub struct PeekedMessage {
     /// Broker-assigned sequence number.
     pub sequence_number: i64,
+    /// Active, deferred or scheduled.
+    pub state: MessageState,
     /// `MessageId`.
     pub message_id: Option<String>,
     /// `CorrelationId`.
@@ -244,6 +269,20 @@ fn annotation<'a>(m: &'a Message<Body<Value>>, key: &str) -> Option<&'a Value> {
         .and_then(|ma| ma.get(&key as &dyn AnnotationKey))
 }
 
+fn value_as_i64(v: &Value) -> Option<i64> {
+    match v {
+        Value::Byte(n) => Some(i64::from(*n)),
+        Value::Short(n) => Some(i64::from(*n)),
+        Value::Int(n) => Some(i64::from(*n)),
+        Value::Long(n) => Some(*n),
+        Value::Ubyte(n) => Some(i64::from(*n)),
+        Value::Ushort(n) => Some(i64::from(*n)),
+        Value::Uint(n) => Some(i64::from(*n)),
+        Value::Ulong(n) => i64::try_from(*n).ok(),
+        _ => None,
+    }
+}
+
 fn annotation_time(m: &Message<Body<Value>>, key: &str) -> Option<OffsetDateTime> {
     match annotation(m, key)? {
         Value::Timestamp(t) => timestamp_to_datetime(t),
@@ -264,6 +303,11 @@ pub fn decode_message(m: Message<Body<Value>>) -> PeekedMessage {
     let sequence_number = match annotation(&m, "x-opt-sequence-number") {
         Some(Value::Long(n)) => *n,
         _ => -1,
+    };
+    let state = match annotation(&m, "x-opt-message-state").and_then(value_as_i64) {
+        Some(1) => MessageState::Deferred,
+        Some(2) => MessageState::Scheduled,
+        _ => MessageState::Active,
     };
     let props = m.properties.as_ref();
     let header = m.header.as_ref();
@@ -308,6 +352,7 @@ pub fn decode_message(m: Message<Body<Value>>) -> PeekedMessage {
     };
     PeekedMessage {
         sequence_number,
+        state,
         message_id: props
             .and_then(|p| p.message_id.as_ref())
             .map(message_id_string),
@@ -339,6 +384,33 @@ pub fn decode_bytes(bytes: &[u8]) -> Result<PeekedMessage> {
     let decoded: Deserializable<Message<Body<Value>>> = serde_amqp::from_slice(bytes)
         .map_err(|e| Error::Protocol(format!("cannot decode AMQP message: {e}")))?;
     Ok(decode_message(decoded.0))
+}
+
+#[cfg(test)]
+// Shared fixture for later M1a tests; no caller yet.
+#[allow(dead_code)]
+pub(crate) fn test_message(seq: i64) -> PeekedMessage {
+    PeekedMessage {
+        sequence_number: seq,
+        state: MessageState::Active,
+        message_id: None,
+        correlation_id: None,
+        session_id: None,
+        subject: None,
+        content_type: None,
+        to: None,
+        reply_to: None,
+        enqueued_time: None,
+        scheduled_enqueue_time: None,
+        locked_until: None,
+        delivery_count: 0,
+        time_to_live_ms: None,
+        dead_letter_reason: None,
+        dead_letter_description: None,
+        dead_letter_source: None,
+        application_properties: BTreeMap::new(),
+        body: MessageBody::Text(String::new()),
+    }
 }
 
 #[cfg(test)]
@@ -381,6 +453,49 @@ mod tests {
             body,
             footer: None,
         }
+    }
+
+    fn with_state(state: Option<i32>) -> Message<Body<Value>> {
+        let mut ann = MessageAnnotations::builder().insert("x-opt-sequence-number", 5i64);
+        if let Some(s) = state {
+            ann = ann.insert("x-opt-message-state", s);
+        }
+        Message {
+            header: None,
+            delivery_annotations: None,
+            message_annotations: Some(ann.build()),
+            properties: None,
+            application_properties: None,
+            body: Body::Data(Batch::from(vec![Data::from(b"x".to_vec())])),
+            footer: None,
+        }
+    }
+
+    #[test]
+    fn message_state_comes_from_annotation() {
+        assert_eq!(decode_message(with_state(None)).state, MessageState::Active);
+        assert_eq!(
+            decode_message(with_state(Some(0))).state,
+            MessageState::Active
+        );
+        assert_eq!(
+            decode_message(with_state(Some(1))).state,
+            MessageState::Deferred
+        );
+        assert_eq!(
+            decode_message(with_state(Some(2))).state,
+            MessageState::Scheduled
+        );
+        assert_eq!(
+            decode_message(with_state(Some(9))).state,
+            MessageState::Active
+        );
+    }
+
+    #[test]
+    fn message_state_serialises_lowercase() {
+        let json = serde_json::to_value(decode_message(with_state(Some(2)))).unwrap();
+        assert_eq!(json["state"], "scheduled");
     }
 
     #[test]

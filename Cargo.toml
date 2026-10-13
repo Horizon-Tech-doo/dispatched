@@ -14,7 +14,7 @@ homepage = "https://github.com/Horizon-Tech-doo/dispatched"
 
 [workspace.dependencies]
 # Local checkout during development; the version is what crates.io publishing uses.
-horizon-azure-kit = { version = "0.1", path = "../horizon-azure-kit/crates/horizon-azure-kit" }
+horizon-azure-kit = { version = "0.2", path = "../horizon-azure-kit/crates/horizon-azure-kit" }
 dispatched-core = { version = "0.0.1", path = "crates/dispatched-core" }
 anyhow = "1"
 async-trait = "0.1"

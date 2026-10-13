@@ -9,4 +9,6 @@ pub mod testing;
 
 pub use connection::ServiceBusConnection;
 pub use management::{ManagementLink, MgmtResponse};
-pub use message::{MessageBody, PeekedMessage, PropValue, decode_bytes, decode_message};
+pub use message::{
+    MessageBody, MessageState, PeekedMessage, PropValue, decode_bytes, decode_message,
+};
