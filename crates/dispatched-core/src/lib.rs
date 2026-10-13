@@ -7,6 +7,7 @@
 
 pub mod connstr;
 pub mod error;
+pub mod explorer;
 pub mod messaging;
 pub mod mgmt;
 pub mod namespace;
@@ -14,6 +15,7 @@ pub mod tokens;
 
 pub use connstr::ConnectionString;
 pub use error::{Error, Result};
+pub use explorer::Explorer;
 pub use messaging::{MessageBody, PeekedMessage, PropValue};
 pub use mgmt::{EntityCounts, ManagementClient, QueueInfo, SubscriptionInfo, TopicInfo};
 pub use namespace::{EmulatorPorts, EntityPath, Namespace, SubQueue};

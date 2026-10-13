@@ -37,4 +37,5 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 mockito = { workspace = true }
+serde_bytes = "0.11"
 tokio = { version = "1", features = ["full"] }

@@ -570,6 +570,7 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_amqp",
+ "serde_bytes",
  "serde_json",
  "thiserror",
  "time",
