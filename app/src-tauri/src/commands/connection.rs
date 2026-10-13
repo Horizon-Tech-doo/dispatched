@@ -36,7 +36,9 @@ pub async fn connect_connection_string(
 
 #[tauri::command]
 pub async fn disconnect(state: State<'_, AppState>) -> Result<(), CommandError> {
-    if let Some(old) = state.explorer.write().await.take() {
+    // Take it out first so the write lock is not held while closing.
+    let old = state.explorer.write().await.take();
+    if let Some(old) = old {
         old.close().await;
     }
     Ok(())

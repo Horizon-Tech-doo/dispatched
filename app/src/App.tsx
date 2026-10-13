@@ -30,14 +30,24 @@ export default function App() {
     guarded(async () => {
       const i = await api.connectConnectionString(connectionString);
       setInfo(i);
+      setConnectionString(""); // the secret must not linger in the UI once connected
       setQueues(await api.listQueues());
     });
 
   const open = (name: string, sq: api.SubQueue) =>
     guarded(async () => {
-      setSelected(name);
-      setSubQueue(sq);
-      setMessages(await api.peek(name, sq));
+      try {
+        // Peek first; heading, sub-queue and rows change together or not at all.
+        const peeked = await api.peek(name, sq);
+        setSelected(name);
+        setSubQueue(sq);
+        setMessages(peeked);
+      } catch (e) {
+        // Never show the previous entity's rows under a new heading.
+        setSelected(null);
+        setMessages([]);
+        throw e;
+      }
     });
 
   return (
@@ -47,14 +57,14 @@ export default function App() {
         <form onSubmit={(e) => { e.preventDefault(); void connect(); }}>
           <label>
             Connection string{" "}
-            <input type="password" value={connectionString} onChange={(e) => setConnectionString(e.target.value)} size={80} />
+            <input type="password" value={connectionString} onChange={(e) => setConnectionString(e.target.value)} size={80} autoComplete="off" />
           </label>{" "}
           <button type="submit" disabled={busy || !connectionString}>Connect</button>
         </form>
       ) : (
         <p>
           Connected to <strong>{info.host}</strong> {info.emulator ? "(emulator)" : ""} via {info.auth}.{" "}
-          <button onClick={() => guarded(async () => { await api.disconnect(); setInfo(null); setQueues([]); setMessages([]); })}>Disconnect</button>
+          <button onClick={() => guarded(async () => { await api.disconnect(); setInfo(null); setQueues([]); setMessages([]); setSelected(null); setError(null); })}>Disconnect</button>
         </p>
       )}
       {error && <p role="alert">Error: {error}</p>}
