@@ -7,6 +7,10 @@
 
 pub mod connstr;
 pub mod error;
+pub mod namespace;
+pub mod tokens;
 
 pub use connstr::ConnectionString;
 pub use error::{Error, Result};
+pub use namespace::{EmulatorPorts, EntityPath, Namespace, SubQueue};
+pub use tokens::{ServiceBusToken, TokenKind, TokenSource};
