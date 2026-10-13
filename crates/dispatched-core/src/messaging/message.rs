@@ -6,10 +6,12 @@ use base64::engine::general_purpose::STANDARD;
 use fe2o3_amqp::types::messaging::annotations::AnnotationKey;
 use fe2o3_amqp::types::messaging::message::__private::Deserializable;
 use fe2o3_amqp::types::messaging::{Body, Message, MessageId};
-use fe2o3_amqp::types::primitives::{SimpleValue, Value};
+use fe2o3_amqp::types::primitives::{SimpleValue, Timestamp, Value};
 use serde::{Serialize, Serializer};
+use serde_amqp::descriptor::Descriptor;
 use std::collections::BTreeMap;
 use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 /// A message as shown to users and agents (peeked; no lock held).
 #[derive(Debug, Clone, Serialize)]
@@ -63,10 +65,10 @@ pub enum MessageBody {
     Binary(#[serde(serialize_with = "as_base64")] Vec<u8>),
     /// AMQP-value string body.
     Text(String),
-    /// Other AMQP-value body, rendered for display.
-    Value(String),
-    /// AMQP-sequence body, rendered for display.
-    Sequence(String),
+    /// Other AMQP-value body, converted to JSON for display.
+    Value(serde_json::Value),
+    /// AMQP-sequence body (one JSON array per section), converted to JSON for display.
+    Sequence(serde_json::Value),
     /// No body.
     Empty,
 }
@@ -80,18 +82,18 @@ impl MessageBody {
     pub fn as_text(&self) -> Option<String> {
         match self {
             MessageBody::Binary(b) => String::from_utf8(b.clone()).ok(),
-            MessageBody::Text(s) | MessageBody::Value(s) | MessageBody::Sequence(s) => {
-                Some(s.clone())
-            }
+            MessageBody::Text(s) => Some(s.clone()),
+            MessageBody::Value(j) | MessageBody::Sequence(j) => Some(j.to_string()),
             MessageBody::Empty => None,
         }
     }
 
-    /// Size in bytes (UTF-8 length for text forms).
+    /// Size in bytes (UTF-8 length for text forms; compact JSON length for value/sequence).
     pub fn len(&self) -> usize {
         match self {
             MessageBody::Binary(b) => b.len(),
-            MessageBody::Text(s) | MessageBody::Value(s) | MessageBody::Sequence(s) => s.len(),
+            MessageBody::Text(s) => s.len(),
+            MessageBody::Value(j) | MessageBody::Sequence(j) => j.to_string().len(),
             MessageBody::Empty => 0,
         }
     }
@@ -139,6 +141,68 @@ impl PropValue {
     }
 }
 
+/// Convert an AMQP timestamp without panicking; `None` when the (sender-controlled)
+/// value falls outside years 0..=9999, which RFC 3339 can represent.
+fn timestamp_to_datetime(ts: &Timestamp) -> Option<OffsetDateTime> {
+    let nanos = i128::from(ts.milliseconds()) * 1_000_000;
+    let dt = OffsetDateTime::from_unix_timestamp_nanos(nanos).ok()?;
+    (0..=9999).contains(&dt.year()).then_some(dt)
+}
+
+/// Render an AMQP value as JSON for display. Never panics.
+fn amqp_to_json(v: &Value) -> serde_json::Value {
+    use serde_json::Value as J;
+    fn float(f: f64) -> J {
+        serde_json::Number::from_f64(f).map_or_else(|| J::String(f.to_string()), J::Number)
+    }
+    match v {
+        Value::Null => J::Null,
+        Value::Bool(b) => J::Bool(*b),
+        Value::Ubyte(n) => J::from(*n),
+        Value::Ushort(n) => J::from(*n),
+        Value::Uint(n) => J::from(*n),
+        Value::Ulong(n) => J::from(*n),
+        Value::Byte(n) => J::from(*n),
+        Value::Short(n) => J::from(*n),
+        Value::Int(n) => J::from(*n),
+        Value::Long(n) => J::from(*n),
+        Value::Float(f) => float(f64::from(f.into_inner())),
+        Value::Double(f) => float(f.into_inner()),
+        Value::String(s) => J::String(s.clone()),
+        Value::Symbol(s) => J::String(s.0.clone()),
+        Value::Binary(b) => J::String(STANDARD.encode(b.as_slice())),
+        Value::Timestamp(t) => {
+            match timestamp_to_datetime(t).and_then(|dt| dt.format(&Rfc3339).ok()) {
+                Some(s) => J::String(s),
+                None => J::from(t.milliseconds()),
+            }
+        }
+        Value::Uuid(u) => J::String(uuid::Uuid::from(u.clone()).to_string()),
+        Value::List(items) => J::Array(items.iter().map(amqp_to_json).collect()),
+        Value::Array(items) => J::Array(items.0.iter().map(amqp_to_json).collect()),
+        Value::Map(map) => J::Object(
+            map.iter()
+                .map(|(k, val)| {
+                    let key = match k {
+                        Value::String(s) => s.clone(),
+                        Value::Symbol(s) => s.0.clone(),
+                        other => amqp_to_json(other).to_string(),
+                    };
+                    (key, amqp_to_json(val))
+                })
+                .collect(),
+        ),
+        Value::Described(d) => {
+            let descriptor = match &d.descriptor {
+                Descriptor::Name(s) => J::String(s.0.clone()),
+                Descriptor::Code(c) => J::from(*c),
+            };
+            serde_json::json!({ "descriptor": descriptor, "value": amqp_to_json(&d.value) })
+        }
+        other => J::String(format!("{other:?}")),
+    }
+}
+
 fn simple_to_prop(v: &SimpleValue) -> PropValue {
     match v {
         SimpleValue::Null => PropValue::Null,
@@ -155,7 +219,10 @@ fn simple_to_prop(v: &SimpleValue) -> PropValue {
         SimpleValue::Double(f) => PropValue::Double(f.into_inner()),
         SimpleValue::String(s) => PropValue::String(s.clone()),
         SimpleValue::Symbol(s) => PropValue::String(s.0.clone()),
-        SimpleValue::Timestamp(t) => PropValue::Timestamp(OffsetDateTime::from(t.clone())),
+        SimpleValue::Timestamp(t) => match timestamp_to_datetime(t) {
+            Some(dt) => PropValue::Timestamp(dt),
+            None => PropValue::Int(t.milliseconds()),
+        },
         SimpleValue::Uuid(u) => PropValue::Uuid(uuid::Uuid::from(u.clone()).to_string()),
         SimpleValue::Binary(b) => PropValue::Binary(b.to_vec()),
         other => PropValue::Other(format!("{other:?}")),
@@ -179,7 +246,7 @@ fn annotation<'a>(m: &'a Message<Body<Value>>, key: &str) -> Option<&'a Value> {
 
 fn annotation_time(m: &Message<Body<Value>>, key: &str) -> Option<OffsetDateTime> {
     match annotation(m, key)? {
-        Value::Timestamp(t) => Some(OffsetDateTime::from(t.clone())),
+        Value::Timestamp(t) => timestamp_to_datetime(t),
         _ => None,
     }
 }
@@ -216,14 +283,27 @@ pub fn decode_message(m: Message<Body<Value>>) -> PeekedMessage {
         .map(str::to_string);
     let body = match &m.body {
         Body::Data(batch) => {
-            MessageBody::Binary(batch.iter().flat_map(|d| d.0.iter().copied()).collect())
+            let bytes: Vec<u8> = batch.iter().flat_map(|d| d.0.iter().copied()).collect();
+            if bytes.is_empty() {
+                MessageBody::Empty
+            } else {
+                MessageBody::Binary(bytes)
+            }
         }
         Body::Value(v) => match &v.0 {
             Value::String(s) => MessageBody::Text(s.clone()),
+            Value::Symbol(s) => MessageBody::Text(s.0.clone()),
+            Value::Binary(b) => MessageBody::Binary(b.to_vec()),
             Value::Null => MessageBody::Empty,
-            other => MessageBody::Value(format!("{other:?}")),
+            other => MessageBody::Value(amqp_to_json(other)),
         },
-        Body::Sequence(seq) => MessageBody::Sequence(format!("{seq:?}")),
+        Body::Sequence(seq) => MessageBody::Sequence(serde_json::Value::Array(
+            seq.iter()
+                .map(|section| {
+                    serde_json::Value::Array(section.0.iter().map(amqp_to_json).collect())
+                })
+                .collect(),
+        )),
         Body::Empty => MessageBody::Empty,
     };
     PeekedMessage {
@@ -394,15 +474,208 @@ mod tests {
     }
 
     #[test]
-    fn non_string_value_and_sequence_bodies_display_without_panicking() {
+    fn non_string_value_and_sequence_bodies_render_as_json() {
         let v = decode_message(base(Body::Value(AmqpValue(Value::Long(5)))));
-        assert!(matches!(v.body, MessageBody::Value(_)));
-        assert!(v.body.as_text().is_some());
+        assert_eq!(v.body, MessageBody::Value(serde_json::json!(5)));
+        assert_eq!(v.body.as_text().as_deref(), Some("5"));
+        assert_eq!(v.body.len(), 1);
+
+        let mut map = OrderedMap::new();
+        map.insert(
+            Value::String("k".into()),
+            Value::List(vec![Value::Bool(true), Value::Null]),
+        );
+        map.insert(Value::Int(2), Value::Double(f64::NAN.into()));
+        map.insert(
+            Value::Symbol("sym".into()),
+            Value::Binary(vec![1, 2, 3].into()),
+        );
+        let m = decode_message(base(Body::Value(AmqpValue(Value::Map(map)))));
+        assert_eq!(
+            m.body,
+            MessageBody::Value(serde_json::json!({"k": [true, null], "2": "NaN", "sym": "AQID"}))
+        );
+
         let s = decode_message(base(Body::Sequence(Batch::from(vec![AmqpSequence(vec![
             Value::Long(1),
+            Value::String("x".into()),
         ])]))));
-        assert!(matches!(s.body, MessageBody::Sequence(_)));
+        assert_eq!(s.body, MessageBody::Sequence(serde_json::json!([[1, "x"]])));
+        assert_eq!(s.body.as_text().as_deref(), Some(r#"[[1,"x"]]"#));
+
+        let t = decode_message(base(Body::Value(AmqpValue(Value::Symbol("sy".into())))));
+        assert_eq!(t.body, MessageBody::Text("sy".into()));
+        let b = decode_message(base(Body::Value(AmqpValue(Value::Binary(
+            vec![9, 8].into(),
+        )))));
+        assert_eq!(b.body, MessageBody::Binary(vec![9, 8]));
+        let n = decode_message(base(Body::Value(AmqpValue(Value::Null))));
+        assert_eq!(n.body, MessageBody::Empty);
+    }
+
+    #[test]
+    fn empty_data_sections_are_an_empty_body() {
         let e = decode_message(base(Body::Data(Batch::from(Vec::<Data>::new()))));
-        assert!(e.body.is_empty());
+        assert_eq!(e.body, MessageBody::Empty);
+        let e = decode_message(base(Body::Data(Batch::from(vec![
+            Data::from(Vec::new()),
+            Data::from(Vec::new()),
+        ]))));
+        assert_eq!(e.body, MessageBody::Empty);
+        assert_eq!(
+            serde_json::to_value(&e).unwrap()["body"],
+            serde_json::json!({"kind": "empty"})
+        );
+    }
+
+    #[test]
+    fn out_of_range_timestamps_do_not_panic() {
+        let ts = |ms: i64| Timestamp::from(ms);
+        let mut msg = base(Body::Value(AmqpValue(Value::Timestamp(ts(i64::MAX)))));
+        msg.message_annotations = Some(
+            MessageAnnotations::builder()
+                .insert("x-opt-enqueued-time", ts(i64::MAX))
+                .insert("x-opt-scheduled-enqueue-time", ts(i64::MIN))
+                .insert("x-opt-locked-until", ts(300_000_000_000_000)) // year > 9999
+                .build(),
+        );
+        let mut app = OrderedMap::new();
+        app.insert("max".to_string(), SimpleValue::Timestamp(ts(i64::MAX)));
+        app.insert("min".to_string(), SimpleValue::Timestamp(ts(i64::MIN)));
+        app.insert(
+            "far".to_string(),
+            SimpleValue::Timestamp(ts(300_000_000_000_000)),
+        );
+        app.insert(
+            "ok".to_string(),
+            SimpleValue::Timestamp(ts(1_700_000_000_000)),
+        );
+        msg.application_properties = Some(ApplicationProperties(app));
+        let m = decode_message(msg);
+        assert_eq!(m.enqueued_time, None);
+        assert_eq!(m.scheduled_enqueue_time, None);
+        assert_eq!(m.locked_until, None);
+        assert_eq!(m.application_properties["max"], PropValue::Int(i64::MAX));
+        assert_eq!(m.application_properties["min"], PropValue::Int(i64::MIN));
+        assert_eq!(
+            m.application_properties["far"],
+            PropValue::Int(300_000_000_000_000)
+        );
+        assert!(matches!(
+            m.application_properties["ok"],
+            PropValue::Timestamp(_)
+        ));
+        assert_eq!(m.body, MessageBody::Value(serde_json::json!(i64::MAX)));
+        let json = serde_json::to_value(&m).unwrap();
+        assert_eq!(
+            json["application_properties"]["ok"]["value"],
+            "2023-11-14T22:13:20Z"
+        );
+        assert!(json["enqueued_time"].is_null());
+    }
+
+    #[test]
+    fn wire_roundtrip_extracts_every_field() {
+        let enq = 1_700_000_000_000_i64;
+        let ts = |ms: i64| Timestamp::from(ms);
+        let uuid = uuid::Uuid::parse_str("67e55044-10b1-426f-9247-bb680e5fe0c8").unwrap();
+        let mut app = OrderedMap::new();
+        app.insert(
+            "DeadLetterReason".to_string(),
+            SimpleValue::String("why".into()),
+        );
+        app.insert(
+            "DeadLetterErrorDescription".to_string(),
+            SimpleValue::String("desc".into()),
+        );
+        app.insert("when".to_string(), SimpleValue::Timestamp(ts(enq)));
+        app.insert("id".to_string(), SimpleValue::Uuid(uuid.into()));
+        app.insert(
+            "blob".to_string(),
+            SimpleValue::Binary(vec![1, 2, 3].into()),
+        );
+        app.insert("nothing".to_string(), SimpleValue::Null);
+        let build = |id: MessageId| Message::<Body<Value>> {
+            header: Some(Header {
+                delivery_count: 4,
+                ttl: Some(60_000),
+                ..Default::default()
+            }),
+            delivery_annotations: None,
+            message_annotations: Some(
+                MessageAnnotations::builder()
+                    .insert("x-opt-sequence-number", 99i64)
+                    .insert("x-opt-enqueued-time", ts(enq))
+                    .insert("x-opt-scheduled-enqueue-time", ts(enq + 1000))
+                    .insert("x-opt-locked-until", ts(enq + 2000))
+                    .insert("x-opt-deadletter-source", "orders")
+                    .build(),
+            ),
+            properties: Some(
+                Properties::builder()
+                    .message_id(id)
+                    .correlation_id(String::from("corr-1"))
+                    .group_id(Some("sess-1".to_string()))
+                    .subject("subj")
+                    .content_type("text/plain")
+                    .to("to-addr")
+                    .reply_to("reply-addr")
+                    .build(),
+            ),
+            application_properties: Some(ApplicationProperties(app.clone())),
+            body: Body::Data(Batch::from(vec![Data::from(b"hi".to_vec())])),
+            footer: None,
+        };
+        let decode = |id| {
+            let bytes = serde_amqp::to_vec(&Serializable(build(id))).unwrap();
+            decode_bytes(&bytes).unwrap()
+        };
+
+        let m = decode(MessageId::Ulong(12345));
+        assert_eq!(m.message_id.as_deref(), Some("12345"));
+        assert_eq!(m.sequence_number, 99);
+        assert_eq!(m.correlation_id.as_deref(), Some("corr-1"));
+        assert_eq!(m.session_id.as_deref(), Some("sess-1"));
+        assert_eq!(m.subject.as_deref(), Some("subj"));
+        assert_eq!(m.content_type.as_deref(), Some("text/plain"));
+        assert_eq!(m.to.as_deref(), Some("to-addr"));
+        assert_eq!(m.reply_to.as_deref(), Some("reply-addr"));
+        assert_eq!(m.time_to_live_ms, Some(60_000));
+        assert_eq!(m.delivery_count, 4);
+        let at = |ms: i64| OffsetDateTime::from_unix_timestamp(ms / 1000).unwrap();
+        assert_eq!(m.enqueued_time, Some(at(enq)));
+        assert_eq!(m.scheduled_enqueue_time, Some(at(enq + 1000)));
+        assert_eq!(m.locked_until, Some(at(enq + 2000)));
+        assert_eq!(m.dead_letter_source.as_deref(), Some("orders"));
+        assert_eq!(m.dead_letter_reason.as_deref(), Some("why"));
+        assert_eq!(m.dead_letter_description.as_deref(), Some("desc"));
+        assert_eq!(
+            m.application_properties["when"],
+            PropValue::Timestamp(at(enq))
+        );
+        assert_eq!(
+            m.application_properties["id"],
+            PropValue::Uuid(uuid.to_string())
+        );
+        assert_eq!(
+            m.application_properties["blob"],
+            PropValue::Binary(vec![1, 2, 3])
+        );
+        assert_eq!(m.application_properties["nothing"], PropValue::Null);
+        assert_eq!(m.body.as_text().as_deref(), Some("hi"));
+
+        let json = serde_json::to_value(&m).unwrap();
+        assert_eq!(
+            json["application_properties"]["nothing"],
+            serde_json::json!({"type": "null"})
+        );
+        assert_eq!(
+            json["application_properties"]["when"]["value"],
+            "2023-11-14T22:13:20Z"
+        );
+        assert_eq!(json["enqueued_time"], "2023-11-14T22:13:20Z");
+
+        let m = decode(MessageId::Uuid(uuid.into()));
+        assert_eq!(m.message_id.as_deref(), Some(uuid.to_string().as_str()));
     }
 }
