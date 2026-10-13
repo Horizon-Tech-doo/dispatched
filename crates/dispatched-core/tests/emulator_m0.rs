@@ -18,6 +18,8 @@ fn run_of(m: &PeekedMessage) -> Option<&str> {
 #[tokio::test(flavor = "multi_thread")]
 async fn m0_gate_flow_against_emulator() {
     if !enabled() {
+        // CI (.github/workflows/ci.yml, emulator job) greps the log for
+        // "skipped:" to fail a gate that skipped itself; keep this wording.
         eprintln!("skipped: set DISPATCHED_EMULATOR=1 and start testing/emulator/emulator.sh up");
         return;
     }
