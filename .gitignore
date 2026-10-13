@@ -1,0 +1,9 @@
+/target
+node_modules/
+/app/dist/
+/app/src-tauri/gen/
+/testing/emulator/.env
+.DS_Store
+.idea/
+.vscode/
+/.claude/

@@ -1,0 +1,37 @@
+[package]
+name = "dispatched-core"
+description = "Core library for Dispatched, a cross-platform Azure Service Bus explorer."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+# Seeding helpers used by integration tests (send, dead-letter, drain).
+test-support = []
+
+[dependencies]
+horizon-azure-kit = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+fe2o3-amqp = { workspace = true }
+fe2o3-amqp-cbs = { workspace = true }
+fe2o3-amqp-types = { workspace = true }
+quick-xml = { workspace = true }
+reqwest = { workspace = true }
+secrecy = { workspace = true }
+serde = { workspace = true }
+serde_amqp = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+mockito = { workspace = true }
+tokio = { version = "1", features = ["full"] }

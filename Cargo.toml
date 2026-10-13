@@ -1,0 +1,45 @@
+[workspace]
+resolver = "3"
+members = ["crates/dispatched-core"]
+default-members = ["crates/dispatched-core"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+authors = ["Hamza Abdagić <hamza.abdagic@horizon-tech.io>", "Horizon Tech d.o.o."]
+repository = "https://github.com/Horizon-Tech-doo/dispatched"
+homepage = "https://github.com/Horizon-Tech-doo/dispatched"
+
+[workspace.dependencies]
+# Local checkout during development; the version is what crates.io publishing uses.
+horizon-azure-kit = { version = "0.1", path = "../horizon-azure-kit/crates/horizon-azure-kit" }
+dispatched-core = { version = "0.0.1", path = "crates/dispatched-core" }
+anyhow = "1"
+async-trait = "0.1"
+base64 = "0.22"
+clap = { version = "4.6", features = ["derive", "env"] }
+dirs = "6"
+fe2o3-amqp = { version = "0.18.2", features = ["rustls"] }
+fe2o3-amqp-cbs = "0.18"
+fe2o3-amqp-types = "0.18"
+mockito = "1"
+open = "5"
+quick-xml = "0.36"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "charset", "system-proxy", "json", "form", "query"] }
+secrecy = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_amqp = { version = "0.18", features = ["time", "uuid"] }
+serde_json = "1"
+thiserror = "2"
+time = { version = "0.3", features = ["serde", "serde-well-known", "formatting"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
+tracing = "0.1"
+url = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
