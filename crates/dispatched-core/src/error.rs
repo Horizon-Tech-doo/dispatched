@@ -67,9 +67,11 @@ impl From<KitError> for Error {
                 detail: m,
             },
             KitError::Network(m) => Error::Network(m),
-            KitError::Remote { status, body } => {
-                Error::Protocol(format!("service returned {status}: {body}"))
-            }
+            KitError::Remote { status, body } => match status {
+                429 | 503 => Error::Throttled { retry_after: None },
+                408 | 504 => Error::Timeout(format!("service returned {status}")),
+                _ => Error::Protocol(format!("service returned {status}: {body}")),
+            },
             KitError::SecretStore(m) => Error::Auth(format!("secret store: {m}")),
             KitError::PolicyDenied(m) => Error::Invalid(format!("denied: {m}")),
             KitError::Cancelled => Error::Cancelled,
@@ -90,6 +92,40 @@ mod tests {
             detail: "Unauthorized".into(),
         };
         assert_eq!(e.to_string(), "access denied (needs Listen): Unauthorized");
+    }
+
+    #[test]
+    fn remote_throttling_and_timeout_statuses_are_mapped() {
+        let busy: Error = KitError::Remote {
+            status: 429,
+            body: "slow down".into(),
+        }
+        .into();
+        assert!(matches!(busy, Error::Throttled { retry_after: None }));
+        let unavailable: Error = KitError::Remote {
+            status: 503,
+            body: String::new(),
+        }
+        .into();
+        assert!(matches!(unavailable, Error::Throttled { .. }));
+        let gateway: Error = KitError::Remote {
+            status: 504,
+            body: String::new(),
+        }
+        .into();
+        assert!(matches!(gateway, Error::Timeout(ref m) if m == "service returned 504"));
+        let request: Error = KitError::Remote {
+            status: 408,
+            body: String::new(),
+        }
+        .into();
+        assert!(matches!(request, Error::Timeout(_)));
+        let other: Error = KitError::Remote {
+            status: 500,
+            body: "boom".into(),
+        }
+        .into();
+        assert!(matches!(other, Error::Protocol(ref m) if m == "service returned 500: boom"));
     }
 
     #[test]

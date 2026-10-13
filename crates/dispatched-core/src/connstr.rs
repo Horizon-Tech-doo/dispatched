@@ -4,6 +4,9 @@
 use crate::{Error, Result};
 use secrecy::SecretString;
 
+/// URL schemes accepted for `Endpoint`.
+const ALLOWED_SCHEMES: [&str; 4] = ["sb", "amqps", "amqp", "https"];
+
 /// A parsed connection string. Unknown keys (e.g. `TransportType`) are ignored.
 #[derive(Debug, Clone)]
 pub struct ConnectionString {
@@ -25,6 +28,9 @@ pub struct ConnectionString {
 
 impl ConnectionString {
     /// Parse `input`. Keys are case-insensitive; values keep their case.
+    ///
+    /// Error messages never echo segment or `Endpoint` content, because either
+    /// may hold key material or credentials.
     pub fn parse(input: &str) -> Result<Self> {
         let mut endpoint = None;
         let mut key_name = None;
@@ -32,37 +38,43 @@ impl ConnectionString {
         let mut sas = None;
         let mut entity_path = None;
         let mut emulator = false;
-        for segment in input.trim().split(';') {
+        for (index, segment) in input.trim().split(';').enumerate() {
             let segment = segment.trim();
             if segment.is_empty() {
                 continue;
             }
             let Some((k, v)) = segment.split_once('=') else {
                 return Err(Error::Invalid(format!(
-                    "connection string segment `{}` has no `=`",
-                    segment.chars().take(24).collect::<String>()
+                    "connection string segment {} is not `Key=Value`",
+                    index + 1
                 )));
             };
             let v = v.trim();
+            // Empty values count as absent.
+            let non_empty = (!v.is_empty()).then_some(v);
             match k.trim().to_ascii_lowercase().as_str() {
                 "endpoint" => endpoint = Some(v.to_string()),
-                "sharedaccesskeyname" => key_name = Some(v.to_string()),
-                "sharedaccesskey" => key = Some(SecretString::from(v.to_string())),
-                "sharedaccesssignature" => sas = Some(SecretString::from(v.to_string())),
-                "entitypath" => entity_path = Some(v.to_string()).filter(|s| !s.is_empty()),
+                "sharedaccesskeyname" => key_name = non_empty.map(str::to_string),
+                "sharedaccesskey" => key = non_empty.map(|s| SecretString::from(s.to_string())),
+                "sharedaccesssignature" => {
+                    sas = non_empty.map(|s| SecretString::from(s.to_string()));
+                }
+                "entitypath" => entity_path = non_empty.map(str::to_string),
                 "usedevelopmentemulator" => emulator = v.eq_ignore_ascii_case("true"),
                 _ => {}
             }
         }
         let endpoint = endpoint
             .ok_or_else(|| Error::Invalid("connection string has no `Endpoint=`".into()))?;
-        let url = url::Url::parse(&endpoint).map_err(|e| {
-            Error::Invalid(format!("`Endpoint={endpoint}` is not a valid URL: {e}"))
-        })?;
+        let url = url::Url::parse(&endpoint)
+            .map_err(|e| Error::Invalid(format!("Endpoint is not a valid URL ({e})")))?;
+        if !ALLOWED_SCHEMES.contains(&url.scheme()) {
+            return Err(Error::Invalid("Endpoint must start with sb://".into()));
+        }
         let host = url
             .host_str()
             .filter(|h| !h.is_empty())
-            .ok_or_else(|| Error::Invalid(format!("`Endpoint={endpoint}` has no host")))?
+            .ok_or_else(|| Error::Invalid("Endpoint has no host".into()))?
             .to_ascii_lowercase();
         if sas.is_none() && (key_name.is_none() || key.is_none()) {
             return Err(Error::Invalid(
@@ -160,11 +172,46 @@ mod tests {
     }
 
     #[test]
-    fn garbage_segment_is_rejected_without_echoing_secrets() {
+    fn bare_key_segment_is_rejected_without_echoing_it() {
+        // A 44-char base64 key with no `=`, as pasted by mistake after the endpoint.
+        let key = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789+/AbCdEF";
+        assert_eq!(key.len(), 44);
+        let input = format!("Endpoint=sb://ns/;{key}");
+        let err = ConnectionString::parse(&input).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("segment 2 is not `Key=Value`"), "{msg}");
+        let bytes = key.as_bytes();
+        for window in bytes.windows(6) {
+            let w = std::str::from_utf8(window).unwrap();
+            assert!(!msg.contains(w), "error leaks key material `{w}`: {msg}");
+        }
+    }
+
+    #[test]
+    fn empty_shared_access_key_counts_as_missing() {
         let err = ConnectionString::parse(
-            "Endpoint=sb://ns/;thisisnotakeyvaluepairbutlongsecretmaterial",
+            "Endpoint=sb://ns.servicebus.windows.net/;SharedAccessKeyName=k;SharedAccessKey=",
         )
         .unwrap_err();
-        assert!(!err.to_string().contains("secretmaterial"), "{err}");
+        assert!(err.to_string().contains("SharedAccessKey"), "{err}");
+    }
+
+    #[test]
+    fn non_service_bus_scheme_is_rejected() {
+        let err =
+            ConnectionString::parse("Endpoint=ftp://x;SharedAccessKeyName=k;SharedAccessKey=v")
+                .unwrap_err();
+        assert!(err.to_string().contains("sb://"), "{err}");
+    }
+
+    #[test]
+    fn endpoint_errors_do_not_echo_userinfo() {
+        for input in [
+            "Endpoint=sb://user:pass@ns:notaport/;SharedAccessKeyName=k;SharedAccessKey=v",
+            "Endpoint=sb://user:pass@/;SharedAccessKeyName=k;SharedAccessKey=v",
+        ] {
+            let err = ConnectionString::parse(input).unwrap_err();
+            assert!(!err.to_string().contains("pass"), "{err}");
+        }
     }
 }
