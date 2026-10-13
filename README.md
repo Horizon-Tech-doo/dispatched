@@ -17,7 +17,7 @@ dispatched --namespace myns ls --topics
 dispatched --namespace myns peek orders --dlq
 ```
 
-With a connection string (SAS or emulator):
+With a connection string (SAS or emulator). Prefer the `DISPATCHED_CONNECTION_STRING` environment variable over `--connection-string`: command-line arguments are visible in shell history and process lists.
 
 ```bash
 export DISPATCHED_CONNECTION_STRING='Endpoint=sb://localhost;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;'

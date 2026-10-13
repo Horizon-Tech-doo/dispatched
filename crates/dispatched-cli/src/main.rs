@@ -21,7 +21,9 @@ use time::format_description::well_known::Rfc3339;
     about = "Fast, cross-platform Azure Service Bus explorer"
 )]
 struct Cli {
-    /// Service Bus connection string (SAS or emulator).
+    /// Service Bus connection string (SAS or emulator). Prefer the
+    /// DISPATCHED_CONNECTION_STRING environment variable: arguments are visible
+    /// in shell history and process lists.
     #[arg(
         long,
         env = "DISPATCHED_CONNECTION_STRING",
@@ -92,10 +94,30 @@ async fn main() -> ExitCode {
     match run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("error: {e:#}");
+            eprintln!("error: {}", format_error(&e));
             ExitCode::FAILURE
         }
     }
+}
+
+const LOGIN_HINT: &str = "run `dispatched login`";
+
+/// One-line, terminal-safe error text. A not-signed-in root cause gets the
+/// login hint appended; control characters from remote text are neutralised.
+fn format_error(e: &anyhow::Error) -> String {
+    let mut text = format!("{e:#}");
+    let not_signed_in = matches!(
+        e.root_cause().downcast_ref::<dispatched_core::Error>(),
+        Some(dispatched_core::Error::NotSignedIn(_))
+    ) || matches!(
+        e.root_cause().downcast_ref::<horizon_azure_kit::KitError>(),
+        Some(horizon_azure_kit::KitError::NotSignedIn(_))
+    );
+    if not_signed_in && !text.contains("dispatched login") {
+        text.push_str("; ");
+        text.push_str(LOGIN_HINT);
+    }
+    output::sanitize(&text)
 }
 
 fn count_cell(n: Option<u64>) -> String {
@@ -148,6 +170,16 @@ fn print_messages(messages: &[PeekedMessage], format: Format, dlq: bool) -> anyh
 async fn run(cli: Cli) -> anyhow::Result<()> {
     let session = state::entra_session();
     let mut st = state::load();
+    let uses_stored_sign_in = match &cli.command {
+        Command::Whoami | Command::Namespaces => true,
+        Command::Ls { .. } | Command::Peek { .. } => {
+            cli.connection_string.is_none() && cli.namespace.is_some()
+        }
+        Command::Login { .. } | Command::Logout => false,
+    };
+    if uses_stored_sign_in {
+        state::prune_stale_sign_in(&session, &mut st, &state::state_path())?;
+    }
     match cli.command {
         Command::Login {
             device_code,
@@ -194,13 +226,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Command::Whoami => match &st.sign_in {
             Some(s) => println!("{} (tenant {})", s.user_principal, s.tenant_id),
-            None => println!("Not signed in."),
+            None => println!("Not signed in; {LOGIN_HINT}."),
         },
         Command::Namespaces => {
             let sign_in = st
                 .sign_in
                 .clone()
-                .context("not signed in: run `dispatched login`")?;
+                .context(format!("not signed in; {LOGIN_HINT}"))?;
             let token = session
                 .token_for(&sign_in, None, &AzureCloud::Public.arm_scope())
                 .await?;
@@ -333,4 +365,41 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dispatched_core::Error as CoreError;
+    use horizon_azure_kit::KitError;
+
+    #[test]
+    fn core_not_signed_in_gets_the_login_hint() {
+        let e = anyhow::Error::from(CoreError::NotSignedIn("a@x.io is not signed in".into()));
+        assert_eq!(
+            format_error(&e),
+            "not signed in: a@x.io is not signed in; run `dispatched login`"
+        );
+    }
+
+    #[test]
+    fn kit_not_signed_in_gets_the_login_hint_even_with_context() {
+        let e = anyhow::Error::from(KitError::NotSignedIn("session expired".into()))
+            .context("listing namespaces");
+        assert!(format_error(&e).ends_with("; run `dispatched login`"));
+    }
+
+    #[test]
+    fn other_errors_get_no_hint_and_are_sanitised() {
+        let e = anyhow::Error::from(CoreError::Protocol("bad\x1b[31m\nthing".into()));
+        let text = format_error(&e);
+        assert!(!text.contains("login"));
+        assert!(!text.contains('\x1b') && !text.contains('\n'));
+    }
+
+    #[test]
+    fn hint_is_not_duplicated() {
+        let e = anyhow::anyhow!("not signed in; run `dispatched login`");
+        assert_eq!(format_error(&e), "not signed in; run `dispatched login`");
+    }
 }
