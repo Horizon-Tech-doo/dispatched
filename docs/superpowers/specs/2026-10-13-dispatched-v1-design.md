@@ -32,7 +32,7 @@ Dispatched keeps what users like (the explorer workflow, DLQ repair and resubmit
 - No ACP host in v1.
 - No code shared with Arkived for now. Patterns and code are copied and adapted. A shared `horizon-azure-*` crate is reconsidered once two real users of it exist.
 - The load-test harness is deferred until after v1.
-- The UI takes Arkived's *structure* and ServiceBusExplorer's *layout*, with Arkived's generic "AI-slop" look explicitly rejected. The **impeccable** and **taste** skills govern UI work (section 6).
+- UI: ServiceBusExplorer is the reference for *features and workflows*, not for UI design. The UI is designed fresh, may improve on both the incumbent and Arkived, and explicitly rejects Arkived's generic "AI-slop" look. The **impeccable** and **taste** skills govern UI work (section 6).
 
 ## 2. Architecture
 
@@ -228,7 +228,7 @@ Incumbent issue numbers are in parentheses.
 
 ## 6. Desktop app
 
-**Layout** (taken from ServiceBusExplorer, structure from Arkived):
+**Layout.** ServiceBusExplorer defines *which workflows* must be covered, not how the UI looks. We are free to design a better UI. The baseline below is a starting point, and the impeccable and taste process may change it wherever that gives a clearer, faster tool:
 - **Top bar:**
   - connection selector with a status indicator
   - **PROD** badge on production profiles
