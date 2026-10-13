@@ -1,0 +1,38 @@
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title type="text">Queues</title>
+  <id>feed-id</id>
+  <updated>2020-12-05T07:17:21Z</updated>
+  <entry xml:base="https://foo.servicebus.windows.net/$Resources/queues?api-version=2024-05">
+    <id>https://foo.servicebus.windows.net/orders?api-version=2024-05</id>
+    <title type="text">orders</title>
+    <content type="application/xml">
+      <QueueDescription xmlns="http://schemas.microsoft.com/netservices/2010/10/servicebus/connect" xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+        <LockDuration>PT1M</LockDuration>
+        <MaxSizeInMegabytes>1024</MaxSizeInMegabytes>
+        <RequiresSession>false</RequiresSession>
+        <DeadLetteringOnMessageExpiration>true</DeadLetteringOnMessageExpiration>
+        <MaxDeliveryCount>10</MaxDeliveryCount>
+        <SizeInBytes>542</SizeInBytes>
+        <MessageCount>4</MessageCount>
+        <Status>Active</Status>
+        <CountDetails xmlns:d2p1="http://schemas.microsoft.com/netservices/2011/06/servicebus">
+          <d2p1:ActiveMessageCount>3</d2p1:ActiveMessageCount>
+          <d2p1:DeadLetterMessageCount>1</d2p1:DeadLetterMessageCount>
+          <d2p1:ScheduledMessageCount>0</d2p1:ScheduledMessageCount>
+          <d2p1:TransferMessageCount>0</d2p1:TransferMessageCount>
+          <d2p1:TransferDeadLetterMessageCount>0</d2p1:TransferDeadLetterMessageCount>
+        </CountDetails>
+        <ForwardTo i:nil="true"/>
+      </QueueDescription>
+    </content>
+  </entry>
+  <entry>
+    <title type="text">sessions-q</title>
+    <content type="application/xml">
+      <QueueDescription xmlns="http://schemas.microsoft.com/netservices/2010/10/servicebus/connect">
+        <RequiresSession>true</RequiresSession>
+        <Status>Active</Status>
+      </QueueDescription>
+    </content>
+  </entry>
+</feed>
