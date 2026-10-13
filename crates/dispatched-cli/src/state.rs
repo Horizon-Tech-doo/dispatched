@@ -4,7 +4,7 @@ use horizon_azure_kit::AzureCloud;
 use horizon_azure_kit::auth::{EntraSession, SignIn};
 use horizon_azure_kit::secrets::OsKeychain;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub const KEYCHAIN_SERVICE: &str = "io.horizon-tech.dispatched";
@@ -29,20 +29,27 @@ fn state_path() -> PathBuf {
     config_dir().join("cli-state.json")
 }
 
-pub fn load() -> CliState {
-    std::fs::read_to_string(state_path())
+pub fn load_from(path: &Path) -> CliState {
+    std::fs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
 }
 
-pub fn save(state: &CliState) -> anyhow::Result<()> {
-    let path = state_path();
+pub fn save_to(path: &Path, state: &CliState) -> anyhow::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     std::fs::write(path, serde_json::to_string_pretty(state)?)?;
     Ok(())
+}
+
+pub fn load() -> CliState {
+    load_from(&state_path())
+}
+
+pub fn save(state: &CliState) -> anyhow::Result<()> {
+    save_to(&state_path(), state)
 }
 
 pub fn entra_session() -> Arc<EntraSession> {
@@ -58,11 +65,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn state_roundtrips_in_custom_dir() {
+    fn state_roundtrips_in_custom_path() {
         let dir = tempfile::tempdir().unwrap();
-        // SAFETY: single-threaded test; edition 2024 requires `unsafe` for set_var.
-        unsafe { std::env::set_var("DISPATCHED_CONFIG_DIR", dir.path()) };
-        assert!(load().sign_in.is_none());
+        let path = dir.path().join("nested").join("cli-state.json");
+        assert!(load_from(&path).sign_in.is_none());
         let state = CliState {
             sign_in: Some(SignIn {
                 id: "o".into(),
@@ -72,8 +78,7 @@ mod tests {
                 cloud: AzureCloud::Public,
             }),
         };
-        save(&state).unwrap();
-        assert_eq!(load().sign_in.unwrap().user_principal, "a@x.io");
-        unsafe { std::env::remove_var("DISPATCHED_CONFIG_DIR") };
+        save_to(&path, &state).unwrap();
+        assert_eq!(load_from(&path).sign_in.unwrap().user_principal, "a@x.io");
     }
 }

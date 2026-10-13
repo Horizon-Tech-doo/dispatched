@@ -171,6 +171,15 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 "Signed in as {} (tenant {}).",
                 sign_in.user_principal, sign_in.tenant_id
             );
+            if let Some(old) = st.sign_in.take().filter(|old| old.id != sign_in.id)
+                && let Err(e) = session.logout(&old)
+                && !matches!(e, horizon_azure_kit::KitError::NotFound(_))
+            {
+                eprintln!(
+                    "note: could not clear the previous sign-in for {}: {e}",
+                    old.user_principal
+                );
+            }
             st.sign_in = Some(sign_in);
             state::save(&st)?;
         }
@@ -200,7 +209,15 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             if let Format::Json = cli.format {
                 println!("{}", serde_json::to_string_pretty(&found)?);
             } else {
+                for s in &found.skipped {
+                    eprintln!(
+                        "warning: skipped subscription {}: {}",
+                        ellipsize(&s.subscription_name, 80),
+                        ellipsize(&s.reason, 200)
+                    );
+                }
                 let rows: Vec<Vec<String>> = found
+                    .namespaces
                     .iter()
                     .map(|n| {
                         vec![

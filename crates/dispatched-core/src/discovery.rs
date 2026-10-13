@@ -76,14 +76,49 @@ fn map(sub: &Subscription, raw: RawNamespace) -> DiscoveredNamespace {
     }
 }
 
-/// All namespaces in all enabled subscriptions the token can read.
-/// Subscriptions that deny access are skipped.
-pub async fn discover_namespaces(arm: &ArmClient) -> Result<Vec<DiscoveredNamespace>> {
-    let mut out = Vec::new();
+/// A subscription that could not be listed (for example no access).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SkippedSubscription {
+    /// Subscription id.
+    pub subscription_id: String,
+    /// Subscription display name.
+    pub subscription_name: String,
+    /// Why it was skipped.
+    pub reason: String,
+}
+
+/// Result of a discovery run: what was found and what was skipped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Discovery {
+    /// Namespaces found, sorted by name.
+    pub namespaces: Vec<DiscoveredNamespace>,
+    /// Subscriptions that failed to list.
+    pub skipped: Vec<SkippedSubscription>,
+}
+
+fn is_usable(state: Option<&str>) -> bool {
+    match state {
+        None => true,
+        Some(s) => ["enabled", "warned", "pastdue"]
+            .iter()
+            .any(|u| s.eq_ignore_ascii_case(u)),
+    }
+}
+
+/// All namespaces in all usable subscriptions (state absent, Enabled, Warned
+/// or PastDue). A subscription that fails to list is recorded in `skipped`;
+/// only when every usable subscription failed is the first error returned.
+pub async fn discover_namespaces(arm: &ArmClient) -> Result<Discovery> {
+    let mut namespaces = Vec::new();
+    let mut skipped = Vec::new();
+    let mut first_error: Option<KitError> = None;
+    let mut usable = 0usize;
+    let mut succeeded = 0usize;
     for sub in arm.list_subscriptions().await? {
-        if sub.state.as_deref() == Some("Disabled") {
+        if !is_usable(sub.state.as_deref()) {
             continue;
         }
+        usable += 1;
         match arm
             .list_by_provider::<RawNamespace>(
                 &sub.subscription_id,
@@ -92,13 +127,31 @@ pub async fn discover_namespaces(arm: &ArmClient) -> Result<Vec<DiscoveredNamesp
             )
             .await
         {
-            Ok(list) => out.extend(list.into_iter().map(|raw| map(&sub, raw))),
-            Err(KitError::Forbidden(_)) => continue,
-            Err(e) => return Err(e.into()),
+            Ok(list) => {
+                succeeded += 1;
+                namespaces.extend(list.into_iter().map(|raw| map(&sub, raw)));
+            }
+            Err(e) => {
+                skipped.push(SkippedSubscription {
+                    subscription_id: sub.subscription_id.clone(),
+                    subscription_name: sub.display_name.clone(),
+                    reason: e.to_string(),
+                });
+                first_error.get_or_insert(e);
+            }
         }
     }
-    out.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(out)
+    if usable > 0
+        && succeeded == 0
+        && let Some(e) = first_error
+    {
+        return Err(e.into());
+    }
+    namespaces.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(Discovery {
+        namespaces,
+        skipped,
+    })
 }
 
 #[cfg(test)]
@@ -107,39 +160,101 @@ mod tests {
     use mockito::Matcher;
     use secrecy::SecretString;
 
-    #[tokio::test]
-    async fn discovers_namespaces_and_skips_forbidden_subscriptions() {
-        let mut server = mockito::Server::new_async().await;
-        let _subs = server
+    const NS_BODY: &str = r#"{"value":[{"id":"/subscriptions/s1/resourceGroups/rg/providers/Microsoft.ServiceBus/namespaces/SBPremium","name":"SBPremium","location":"West Europe","sku":{"name":"Premium","tier":"Premium"},"properties":{"serviceBusEndpoint":"https://SBPremium.servicebus.windows.net:443/","disableLocalAuth":true}}]}"#;
+
+    async fn subs_mock(server: &mut mockito::ServerGuard, body: &str) -> mockito::Mock {
+        server
             .mock("GET", "/subscriptions")
             .match_query(Matcher::Any)
             .with_status(200)
-            .with_body(r#"{"value":[{"subscriptionId":"s1","displayName":"Prod"},{"subscriptionId":"s2","displayName":"Locked"}]}"#)
+            .with_body(body)
             .create_async()
-            .await;
-        let _ns = server
-            .mock("GET", "/subscriptions/s1/providers/Microsoft.ServiceBus/namespaces")
-            .match_query(Matcher::Any)
-            .with_status(200)
-            .with_body(r#"{"value":[{"id":"/subscriptions/s1/resourceGroups/rg/providers/Microsoft.ServiceBus/namespaces/SBPremium","name":"SBPremium","location":"West Europe","sku":{"name":"Premium","tier":"Premium"},"properties":{"serviceBusEndpoint":"https://SBPremium.servicebus.windows.net:443/","disableLocalAuth":true}}]}"#)
-            .create_async()
-            .await;
-        let _denied = server
+            .await
+    }
+
+    async fn ns_mock(
+        server: &mut mockito::ServerGuard,
+        sub: &str,
+        status: usize,
+        body: &str,
+        expect: usize,
+    ) -> mockito::Mock {
+        server
             .mock(
                 "GET",
-                "/subscriptions/s2/providers/Microsoft.ServiceBus/namespaces",
+                format!("/subscriptions/{sub}/providers/Microsoft.ServiceBus/namespaces").as_str(),
             )
             .match_query(Matcher::Any)
-            .with_status(403)
-            .with_body("AuthorizationFailed")
+            .with_status(status)
+            .with_body(body)
+            .expect(expect)
             .create_async()
-            .await;
-        let arm = ArmClient::with_base(server.url(), SecretString::from("tok"));
-        let found = discover_namespaces(&arm).await.unwrap();
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].host, "sbpremium.servicebus.windows.net");
-        assert_eq!(found[0].tier.as_deref(), Some("Premium"));
-        assert!(found[0].local_auth_disabled);
-        assert_eq!(found[0].subscription_name, "Prod");
+            .await
+    }
+
+    fn arm(server: &mockito::ServerGuard) -> ArmClient {
+        ArmClient::with_base(server.url(), SecretString::from("tok"))
+    }
+
+    #[tokio::test]
+    async fn discovers_namespaces_and_records_forbidden_subscriptions() {
+        let mut server = mockito::Server::new_async().await;
+        let _subs = subs_mock(&mut server, r#"{"value":[{"subscriptionId":"s1","displayName":"Prod"},{"subscriptionId":"s2","displayName":"Locked"}]}"#).await;
+        let _ns = ns_mock(&mut server, "s1", 200, NS_BODY, 1).await;
+        let _denied = ns_mock(&mut server, "s2", 403, "AuthorizationFailed", 1).await;
+        let found = discover_namespaces(&arm(&server)).await.unwrap();
+        assert_eq!(found.namespaces.len(), 1);
+        let ns = &found.namespaces[0];
+        assert_eq!(ns.host, "sbpremium.servicebus.windows.net");
+        assert_eq!(ns.tier.as_deref(), Some("Premium"));
+        assert!(ns.local_auth_disabled);
+        assert_eq!(ns.subscription_name, "Prod");
+        assert_eq!(found.skipped.len(), 1);
+        assert_eq!(found.skipped[0].subscription_id, "s2");
+        assert_eq!(found.skipped[0].subscription_name, "Locked");
+        assert!(
+            found.skipped[0].reason.contains("forbidden"),
+            "{}",
+            found.skipped[0].reason
+        );
+    }
+
+    #[tokio::test]
+    async fn other_failures_in_one_subscription_do_not_abort() {
+        let mut server = mockito::Server::new_async().await;
+        let _subs = subs_mock(&mut server, r#"{"value":[{"subscriptionId":"s1","displayName":"Prod"},{"subscriptionId":"s2","displayName":"Flaky"},{"subscriptionId":"s3","displayName":"Conflict"}]}"#).await;
+        let _ns = ns_mock(&mut server, "s1", 200, NS_BODY, 1).await;
+        let _boom = ns_mock(&mut server, "s2", 500, "boom", 1).await;
+        let _conflict = ns_mock(&mut server, "s3", 409, "conflict", 1).await;
+        let found = discover_namespaces(&arm(&server)).await.unwrap();
+        assert_eq!(found.namespaces.len(), 1);
+        assert_eq!(found.skipped.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn all_subscriptions_failing_is_an_error() {
+        let mut server = mockito::Server::new_async().await;
+        let _subs = subs_mock(&mut server, r#"{"value":[{"subscriptionId":"s1","displayName":"A"},{"subscriptionId":"s2","displayName":"B"}]}"#).await;
+        let _a = ns_mock(&mut server, "s1", 500, "boom", 1).await;
+        let _b = ns_mock(&mut server, "s2", 403, "denied", 1).await;
+        assert!(discover_namespaces(&arm(&server)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn unusable_subscriptions_are_not_queried() {
+        let mut server = mockito::Server::new_async().await;
+        let _subs = subs_mock(
+            &mut server,
+            r#"{"value":[{"subscriptionId":"s1","displayName":"Prod","state":"Enabled"},{"subscriptionId":"s2","displayName":"Gone","state":"Deleted"},{"subscriptionId":"s3","displayName":"Off","state":"disabled"}]}"#,
+        )
+        .await;
+        let _ns = ns_mock(&mut server, "s1", 200, NS_BODY, 1).await;
+        let gone = ns_mock(&mut server, "s2", 200, r#"{"value":[]}"#, 0).await;
+        let off = ns_mock(&mut server, "s3", 200, r#"{"value":[]}"#, 0).await;
+        let found = discover_namespaces(&arm(&server)).await.unwrap();
+        assert_eq!(found.namespaces.len(), 1);
+        assert!(found.skipped.is_empty());
+        gone.assert_async().await;
+        off.assert_async().await;
     }
 }
