@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/dispatched-core", "crates/dispatched-cli"]
+members = ["crates/dispatched-core", "crates/dispatched-cli", "app/src-tauri"]
 default-members = ["crates/dispatched-core", "crates/dispatched-cli"]
 
 [workspace.package]
