@@ -1,0 +1,16 @@
+# Apple Silicon / arm64 override. Use together with the default file:
+#   docker compose -f docker-compose.yml -f docker-compose.arm64.yml up -d
+# emulator.sh adds this file automatically on arm64 hosts (set
+# DISPATCHED_EMULATOR_COMPOSE_ARM64=0 to opt out).
+#
+# Why: mcr.microsoft.com/mssql/server:2022-latest is amd64-only and segfaults
+# under emulation (qemu) on Apple Silicon. Azure SQL Edge is retired, but it runs
+# natively on arm64 and is fine as the Service Bus Emulator's backing store for
+# local tests. CI runs on ubuntu amd64 and uses the default file only.
+#
+# ACCEPT_EULA and MSSQL_SA_PASSWORD are inherited from the base file's mssql
+# environment; Azure SQL Edge reads the same variables.
+services:
+  mssql:
+    image: mcr.microsoft.com/azure-sql-edge:latest
+    platform: linux/arm64
