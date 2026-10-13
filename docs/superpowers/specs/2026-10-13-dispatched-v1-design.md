@@ -1,6 +1,6 @@
 # Dispatched v1 — Design
 
-**Status:** Approved design, pending spec review · **Date:** 2026-10-13 · **Owner:** Hamza Abdagić (Horizon Tech d.o.o.)
+**Status:** Approved (revised 2026-10-13: shared kit, fe2o3-amqp) · **Date:** 2026-10-13 · **Owner:** Hamza Abdagić (Horizon Tech d.o.o.)
 **Source idea:** Notion → Ideas → "Service Bus Explorer — Rust/Tauri" (and its sub-pages)
 **Reference product:** [paolosalvatori/ServiceBusExplorer](https://github.com/paolosalvatori/ServiceBusExplorer), release 6.3.1
 
@@ -28,32 +28,55 @@ Dispatched keeps what users like (the explorer workflow, DLQ repair and resubmit
 - Standalone sibling to Arkived (its own repo, name and release cycle), not a module inside Arkived.
 - Service Bus only in v1. Event Hubs is the first v2 candidate.
 - Name: **Dispatched**. The crates `dispatched`, `dispatched-core`, `dispatched-mcp` and `dispatched-cli` were all free when checked.
-- Client layer: our own Service Bus layer on Microsoft's official `azure_core_amqp` (approach A, section 3).
+- Client layer: our own Service Bus layer built directly on `fe2o3-amqp`, plus ATOM REST for management and ARM for discovery (approach A′, section 3). This revises approach A: research showed `azure_core_amqp` 1.1.0 cannot carry the Service Bus management protocol, receive-and-delete, dead-letter reasons or WebSockets.
 - No ACP host in v1.
-- No code shared with Arkived for now. Patterns and code are copied and adapted. A shared `horizon-azure-*` crate is reconsidered once two real users of it exist.
+- Shared code goes in a separate kit repo, **`Horizon-Tech-doo/horizon-azure-kit`** (crate `horizon-azure-kit`, published to crates.io). It holds the cross-product plumbing (auth, secrets, ARM, SAS, safety and jobs). Dispatched's M0 creates the kit by extracting Arkived's code. Arkived moves onto the kit in its own later plan. A shared UI package comes after Dispatched's M1 (section 2.1).
 - The load-test harness is deferred until after v1.
 - UI: ServiceBusExplorer is the reference for *features and workflows*, not for UI design. The UI is designed fresh, may improve on both the incumbent and Arkived, and explicitly rejects Arkived's generic "AI-slop" look. The **impeccable** and **taste** skills govern UI work (section 6).
 
 ## 2. Architecture
 
+### 2.1 Shared kit
+
+```
+horizon-azure-kit/               Apache-2.0, Horizon-Tech-doo/horizon-azure-kit, published to crates.io
+├── crates/horizon-azure-kit/    one crate, modules gated by cargo features
+│   ├── auth/      Entra device code + browser (PKCE loopback), refresh-token cache, JWT claims,
+│   │              cloud endpoints, `token_for(scope)` exchange (one sign-in → ARM / Storage / Service Bus)
+│   ├── secrets/   CredentialStore trait, chunked OS keychain, in-memory fake for tests
+│   ├── arm/       paged ARM client: subscriptions, list resources by provider type
+│   ├── sas/       SAS token signing (HMAC-SHA256 over the URL-encoded audience)
+│   └── safety/    Policy + ConfirmRequest + production check, CancellationToken,
+│                  Job / JobEvent progress model, Audit trait + SQLite audit log
+└── .github/workflows/tauri-release.yml   reusable release workflow, called by each app
+```
+
+- The kit contains only code that **both** products need. No Service Bus or Storage domain logic goes in it.
+- Errors are a `KitError` enum. Each product converts it into its own error type with `From`.
+- **During development**, products point at the local kit checkout through `[patch.crates-io]` (a path override, never a git dependency), so their own crates.io publishing still works.
+- The kit is published as `0.1.0` before Dispatched's first crates.io release.
+- **UI sharing:** once Dispatched's new design system settles (end of M1), its tokens and components are extracted into an npm package `@horizon-tech/explorer-ui`. Arkived's restyle onto it is separate work.
+
+### 2.2 Dispatched
+
 ```
 dispatched/                      Apache-2.0, Horizon-Tech-doo/dispatched
 ├── crates/
 │   ├── dispatched-core/         all logic, no UI
-│   │   ├── auth/                Entra (browser, device code, Azure CLI, env/service principal),
-│   │   │                        SAS connection strings (namespace and entity level), emulator
-│   │   ├── profiles/            saved connections: SQLite metadata, secrets in the OS keychain
-│   │   ├── arm/                 Entra discovery: tenants → subscriptions → namespaces
+│   │   ├── connstr/             Service Bus connection strings (namespace, EntityPath, emulator)
+│   │   ├── profiles/            saved connections: SQLite metadata, secrets via kit `secrets`
+│   │   ├── discovery/           Entra: subscriptions → Service Bus namespaces (via kit `arm`)
 │   │   ├── mgmt/                ATOM REST management: entity CRUD, runtime counts, XML import/export
 │   │   ├── messaging/           MessagingBackend trait + AMQP implementation
 │   │   ├── ops/                 multi-step jobs (DLQ resubmit/move, purge, bulk delete, export/import, listen)
-│   │   ├── policy/              Policy trait: destructive-op confirmation, production checks
-│   │   └── audit/               activity log tagged with origin (gui | cli | mcp)
+│   │   └── safety.rs            Service Bus operation kinds mapped onto kit `safety` (Policy, Job, Audit)
 │   ├── dispatched-cli/          `dispatched` binary (clap)
 │   └── dispatched-mcp/          MCP server library, launched by `dispatched mcp`
 └── app/                         Tauri 2 + React/TypeScript + Vite
     └── src-tauri/src/commands/  one module per area; each command only translates and calls core
 ```
+
+`app/src-tauri` is a **member of the root Cargo workspace**, so the repo has one `target/` (Arkived keeps two).
 
 Principles:
 
@@ -67,35 +90,48 @@ Principles:
 4. **No god files.** Arkived's Tauri layer grew into one 7k-line `commands.rs`. In Dispatched, the Tauri commands are split by area and contain no business logic. Core modules stay small and focused.
 5. **One read/write gate.** Core labels every operation as `Read` or `Mutating(kind)`. Mutating ops call `Policy::confirm(ConfirmRequest)` before touching the broker. Production profiles add a second, typed confirmation.
 
-## 3. Service Bus client layer (approach A)
+## 3. Service Bus client layer (approach A′)
 
-No Service Bus crate is both published and maintained:
-- Microsoft's new `azure_messaging_servicebus` lives in `Azure/azure-sdk-for-rust` with `publish = false` and the status "0.1.0 Unreleased".
-- The 0.21 on crates.io is the deprecated 2024 crate.
-- The community `azservicebus` crate has not had a release since 2025-07.
+No Service Bus crate is both published and usable:
+- Microsoft's `azure_messaging_servicebus` in `Azure/azure-sdk-for-rust` is `publish = false` and marked "not production ready". Its management, peek decoding, lock tokens, settlement and scheduling are placeholders, so **nothing is ported from it**.
+- The `azure_messaging_servicebus` 0.21 on crates.io is the deprecated 2024 REST crate.
+- The community `azservicebus` crate (built on fe2o3) has not had a release since 2025-07. It is a *reference* for the protocol, not a dependency.
+- `azure_core_amqp` 1.1.0 can't do enough for this tool:
+  - It can't set the target of the `$management` response link.
+  - Its receiver settle mode is hard-coded, so there is no receive-and-delete.
+  - Dead-letter can't carry a reason, and abandon doesn't increment the delivery count.
+  - No WebSockets in any published release.
 
 So:
 
 | Plane | Mechanism | Covers |
 |---|---|---|
-| Message plane | AMQP 1.0 via **`azure_core_amqp` 1.x** (official, stable). Service Bus semantics (management link `$management`, CBS auth, settlement, sessions) implemented in `messaging/`. Code is ported from Microsoft's unpublished MIT-licensed crate where useful, with attribution in `NOTICE`. | send / batch send, schedule / cancel, peek (from a sequence number), receive (peek-lock / receive-and-delete), complete / abandon / defer / dead-letter, receive deferred by sequence number, renew lock, sessions (accept, state get/set), DLQ and transfer-DLQ sub-queues, AMQP over WebSockets + proxy |
-| Management plane | Service Bus **ATOM REST API** (`https://{ns}/{entity}?api-version=…`). Works with SAS, Entra and the emulator. | create, read, update and delete of queues, topics, subscriptions, rules (SQL filter, correlation filter, SQL action), entity SAS policies; runtime counts (active, DLQ, scheduled, transfer, transfer-DLQ, size) |
-| Discovery | **ARM** (copied from Arkived's `arm.rs`) | Entra: list tenants, subscriptions, namespaces and their tier |
+| Message plane | AMQP 1.0 via **`fe2o3-amqp` 0.18** with `fe2o3-amqp-cbs` (token put), `fe2o3-amqp-management` or our own request/response link pair on `{entity}/$management`, and `fe2o3-amqp-ws` (WebSockets). The Service Bus semantics live in `messaging/`. | send / batch send, schedule / cancel, peek (from a sequence number), receive (peek-lock, and receive-and-delete via a sender-settled link), complete / abandon / defer / dead-letter with reason, receive deferred by sequence number, renew lock, session receivers (`com.microsoft:session-filter`) and session state, DLQ and transfer-DLQ sub-queues, AMQP over WebSockets |
+| Management plane | Service Bus **ATOM REST API**, `api-version=2024-05`. Cloud: `https://{ns}/…`. Emulator: `http://{host}:5300/…`. Auth: SAS header or Entra bearer token (scope `https://servicebus.azure.net/.default`). | create, read, update and delete of queues, topics, subscriptions, rules (SQL filter, correlation filter, SQL action), entity SAS policies; counts from `CountDetails` (active, DLQ, scheduled, transfer, transfer-DLQ) and `SizeInBytes` |
+| Discovery | **ARM** via kit `arm`, `Microsoft.ServiceBus/namespaces`, `api-version=2024-01-01` | Entra: subscriptions → namespaces, with SKU tier, endpoint and `disableLocalAuth` (when it's true, the SAS option is hidden) |
 
-- `MessagingBackend` is a crate-internal trait. When Microsoft publishes the official crate, we evaluate swapping it in behind that trait. The public API stays the same.
+- **Swappable backend.** `MessagingBackend` is a crate-internal trait. If Microsoft ships a real Service Bus crate, we evaluate swapping it in behind that trait. The public API stays the same.
+- **Protocol facts the implementation must respect** (from research, 2026-10-13):
+  - SAS signing uses the **raw UTF-8 key bytes**, not base64-decoded, over the lowercased, percent-encoded audience followed by `"\n"` and the expiry.
+  - CBS token types: `jwt` (Entra) and `servicebus.windows.net:sastoken` (SAS). Tokens are re-put before they expire, because the broker drops links when a token expires.
+  - Management requests carry an `operation=com.microsoft:<op>` application property and an AMQP-value **map** body. Responses are matched by correlation-id, with `statusCode` in the application properties. Peek returns a list *or* array of `{message: binary}` maps. Each one is decoded as a full AMQP message.
+  - A message's sequence number, enqueued time, lock token and locked-until come from the `x-opt-*` annotations. Dead-letter reason and description are the application properties `DeadLetterReason` and `DeadLetterErrorDescription`.
+  - ATOM: a GET for a missing entity returns **200 with an empty `<feed>`**, which must map to `NotFound`. Pages hold at most `$top=100`. Parse on local XML names, leniently, with defaults for every field.
 - **Least privilege:**
   - If a key or role lacks Manage rights, the tree falls back to entities named in the connection string or added by hand.
   - Message operations still work if the key has Listen and/or Send rights. This solves #615, #707 and #723.
-  - `Forbidden` errors name the right that is missing.
-- **Emulator:**
-  - `UseDevelopmentEmulator=true` connection strings are supported first-class: plain AMQP on localhost and emulator management endpoints (#814).
-  - The emulator's own limits (no management API on some versions) show up as clear capability flags, not as errors.
+  - `Forbidden` errors name the right that is missing, parsed from the ATOM `<Detail>` text, for example "Manage,EntityRead claims required".
+- **Emulator** (#814):
+  - `UseDevelopmentEmulator=true` connection strings are supported first-class.
+  - Connections use **plain AMQP** `amqp://{host}:5672`, with no TLS and no WebSockets.
+  - The management API is at `http://{host}:{port or 5300}`.
+  - The well-known key is `SAS_KEY_VALUE`.
+  - The emulator's own limits show up as capability flags, not errors: a 1 h max TTL, at most 10 connections, configuration only through Config.json, and possibly unreliable `CountDetails`. When counts are unreliable, Dispatched counts by peeking and labels the number as "approximate".
 
-**M0 gate (go/no-go for approach A).** Before M1 starts, a spike must work against **both** the emulator and a real namespace:
-- Entra sign-in → list queues → peek messages → peek DLQ with reasons.
-- The same flow with a SAS connection string.
+**M0 gate (go/no-go for approach A′).** Before M1 starts, a spike must pass the same flow against **both** the emulator and a real namespace, once with Entra and once with a SAS connection string:
+- list queues (ATOM) → peek messages (`$management` peek) → peek the DLQ, showing the dead-letter reason.
 
-If `azure_core_amqp` cannot carry the `$management` request/response pattern with map bodies, fall back to `fe2o3-amqp` directly for that link only.
+If `fe2o3-amqp-management` cannot carry Service Bus map bodies, use a hand-rolled sender and receiver link pair with source and target set to the reply-to address. That pattern is proven in `azservicebus`.
 
 ## 4. Feature scope (v1.0)
 
@@ -107,7 +143,7 @@ Incumbent issue numbers are in parentheses.
   - Multiple tenants, plus cloud selection: public, China, US Gov.
 - SAS connection strings at namespace level and entity level (`EntityPath`), or built from endpoint, key name and key.
 - Service Bus Emulator.
-- Transport: AMQP or AMQP over WebSockets. HTTP/HTTPS proxy settings.
+- Transport: AMQP, or AMQP over WebSockets (cloud only). HTTP/HTTPS proxy settings, which apply to the WebSocket transport and to HTTPS management/ARM calls.
 - Saved profiles:
   - name, colour, **production flag**, per-profile tree filters (#706), default entity view
   - secrets only in the OS keychain
@@ -315,8 +351,13 @@ Incumbent issue numbers are in parentheses.
   - recorded ATOM XML fixtures for the management API
   - SAS signing and connection-string parsing tests (ported from Arkived)
 - **Integration tests:**
-  - against the official **Service Bus Emulator** in Docker
-  - run in CI on Linux, with a seeded config file listing the test entities
+  - against the official **Service Bus Emulator** in Docker:
+    - pinned image `mcr.microsoft.com/azure-messaging/servicebus-emulator:2.0.1` + `mcr.microsoft.com/mssql/server:2022-latest`
+    - wait on `GET /health` (up to 3 min)
+    - SA password without semicolons
+  - run in CI on Linux, with a seeded `Config.json` (namespace `sbemulatorns`) listing the test entities
+  - the mssql image is amd64-only; on Apple Silicon it runs under Rosetta and is best-effort for local runs
+  - gated behind `DISPATCHED_EMULATOR=1`, so a plain `cargo test` stays hermetic
   - cover peek, receive, settle, DLQ flows, sessions, scheduled and deferred messages, and purge
 - **Live checklist (manual, per milestone):**
   - a real namespace with Entra and with SAS
@@ -336,7 +377,7 @@ Incumbent issue numbers are in parentheses.
   - fmt, clippy (`-D warnings`), unit tests on ubuntu, macos and windows
   - emulator integration tests on ubuntu
   - frontend typecheck and build
-- **Release** (`release.yml`, adapted from Arkived, triggered by an `app-v*` tag) builds:
+- **Release** (`release.yml`, triggered by an `app-v*` tag) calls the kit's reusable `tauri-release.yml` workflow, which builds:
   - Windows x64 and ARM64: NSIS + MSI
   - macOS universal: DMG, signed and notarized when secrets are present
   - Linux x86_64 and aarch64: AppImage, deb, rpm
@@ -349,7 +390,7 @@ Every milestone ends with a tagged release and a live-verification note.
 
 | Milestone | Delivers |
 |---|---|
-| **M0 — Spike + skeleton** | Repo, workspace, CI, release workflow wired up. Entra + SAS + emulator connect → list queues → peek → DLQ peek. **Go/no-go for approach A.** |
+| **M0 — Kit + spike + skeleton** | `horizon-azure-kit` repo created by extracting Arkived's auth, secrets, ARM, SAS and safety code (with tests). Dispatched repo, workspace, CI, emulator harness, release workflow wired up. Entra + SAS + emulator connect → list queues → peek → DLQ peek, in the CLI and in a minimal desktop window. **Go/no-go for approach A′.** |
 | **M1 — Browse** | Profiles, lazy tree, search, counts and colouring, dashboard, entity Overview, all peek views, filters (property and body), viewer, export. App shell and visual system set (impeccable and taste). |
 | **M2 — Operate** | Receive and settle, composer, clone & resend, DLQ resubmit/move/delete, purge, scheduled cancel, deferred, sessions and session state, Jobs drawer, Activity log, production checks. |
 | **M3 — Manage** | Full entity, rule and SAS-policy CRUD; status changes; duplicate and rename; XML import/export (incumbent-compatible); listener. |
