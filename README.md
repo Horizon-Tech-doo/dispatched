@@ -5,7 +5,7 @@
 Dispatched is an open-source alternative to [ServiceBusExplorer](https://github.com/paolosalvatori/ServiceBusExplorer) that runs on Windows, macOS and Linux, signs in with Microsoft Entra ID, works with the Service Bus Emulator, and (soon) exposes an MCP server so agents can inspect and operate your messaging safely.
 
 > **Status:** M0 (spike and skeleton). Browse-only. Not ready for production use.
-> Auto-update: pending (signing key not yet configured).
+> Auto-update: release builds are signed and publish an updater manifest (the in-app update prompt arrives with the M1 shell).
 
 ## Try it (CLI)
 

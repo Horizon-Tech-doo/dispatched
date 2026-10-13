@@ -11,20 +11,54 @@
   },
   "app": {
     "windows": [
-      { "title": "Dispatched", "width": 1280, "height": 800, "minWidth": 900, "minHeight": 560 }
+      {
+        "title": "Dispatched",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 560
+      }
     ],
-    "security": { "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost" }
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost"
+    }
   },
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
     "copyright": "Copyright (c) 2026 Horizon Tech d.o.o.",
     "category": "DeveloperTool",
     "shortDescription": "Azure Service Bus explorer, agent-ready.",
     "longDescription": "Dispatched — a fast, cross-platform explorer for Azure Service Bus.",
     "publisher": "Horizon Tech d.o.o.",
-    "windows": { "nsis": { "installMode": "currentUser" } },
-    "linux": { "deb": { "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0"] } }
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    },
+    "linux": {
+      "deb": {
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0"
+        ]
+      }
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/Horizon-Tech-doo/dispatched/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE4RDJFNzExRDMwM0ZDRjkKUldUNS9BUFRFZWZTR0dwL3RvbWswTSswMC82L3gvYkJpWFFzcHZLNks0Z3Y5MW94ZmR0aGJwdXgK"
+    }
   }
 }
