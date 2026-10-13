@@ -7,6 +7,7 @@
 
 pub mod connstr;
 pub mod error;
+pub mod messaging;
 pub mod mgmt;
 pub mod namespace;
 pub mod tokens;
