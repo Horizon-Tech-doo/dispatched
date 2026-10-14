@@ -6,6 +6,8 @@ use crate::namespace::{EntityPath, Namespace, PeekView, Transport};
 use crate::{Error, Result};
 use async_trait::async_trait;
 use serde::Serialize;
+use std::future::Future;
+use std::time::Duration;
 
 /// Stable error category (shared with the desktop app and JSON output).
 /// The match is exhaustive on purpose: a new `Error` variant must pick a kind.
@@ -26,7 +28,8 @@ pub fn error_kind(e: &Error) -> &'static str {
     }
 }
 
-/// Every kind `error_kind` can return (the frontend's error-kind union).
+/// Every kind `error_kind` can return. The desktop app and the CLI branch on
+/// these exact strings, so they are a stable contract.
 pub const ERROR_KINDS: [&str; 12] = [
     "auth",
     "not_signed_in",
@@ -123,13 +126,27 @@ fn failed(e: &Error) -> Check {
     }
 }
 
+/// Longest one probe call may take before its check is reported as timed out.
+const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Bound one probe call so a single hang cannot stall the whole report.
+async fn bounded<T>(what: &str, fut: impl Future<Output = Result<T>>) -> Result<T> {
+    match tokio::time::timeout(CHECK_TIMEOUT, fut).await {
+        Ok(r) => r,
+        Err(_) => Err(Error::Timeout(format!(
+            "{what} did not answer within {} s",
+            CHECK_TIMEOUT.as_secs()
+        ))),
+    }
+}
+
 /// Run the checks.
 pub async fn test_connection(
     probe: &(impl Probe + ?Sized),
     entity: Option<&EntityPath>,
 ) -> ConnectionReport {
     let ns = probe.namespace();
-    let listed = probe.list_queue_names().await;
+    let listed = bounded("listing queues", probe.list_queue_names()).await;
     let management = match &listed {
         Ok(names) => Check::Ok {
             detail: format!("listed {} queue(s) (Manage)", names.len()),
@@ -148,9 +165,14 @@ pub async fn test_connection(
         });
     let messaging = match target {
         None => Check::Skipped {
-            reason: "no entity to probe; pass one".into(),
+            reason: if listed.is_err() {
+                "no queue could be discovered because the management check failed; pass an entity to test Listen"
+            } else {
+                "no entity to probe; pass one"
+            }
+            .into(),
         },
-        Some(e) => match probe.peek_one(&e).await {
+        Some(e) => match bounded("peeking", probe.peek_one(&e)).await {
             Ok(n) => Check::Ok {
                 detail: format!("peeked {e} ({n} message(s) visible; Listen)"),
             },
@@ -176,6 +198,9 @@ mod tests {
         ns: Namespace,
         list: std::result::Result<Vec<String>, &'static str>,
         peek: std::result::Result<usize, &'static str>,
+        hang_list: bool,
+        hang_peek: bool,
+        peeked: std::sync::Mutex<Option<String>>,
     }
 
     #[async_trait]
@@ -184,12 +209,19 @@ mod tests {
             &self.ns
         }
         async fn list_queue_names(&self) -> Result<Vec<String>> {
+            if self.hang_list {
+                std::future::pending::<()>().await;
+            }
             self.list.clone().map_err(|d| Error::Forbidden {
                 needed: Some("Manage,EntityRead".into()),
                 detail: d.into(),
             })
         }
-        async fn peek_one(&self, _e: &EntityPath) -> Result<usize> {
+        async fn peek_one(&self, e: &EntityPath) -> Result<usize> {
+            *self.peeked.lock().unwrap() = Some(e.to_string());
+            if self.hang_peek {
+                std::future::pending::<()>().await;
+            }
             self.peek.map_err(|d| Error::Forbidden {
                 needed: Some("Listen".into()),
                 detail: d.into(),
@@ -202,39 +234,39 @@ mod tests {
     }
 
     #[test]
-    fn every_error_variant_maps_to_a_distinct_documented_kind() {
-        let all = [
-            Error::Auth(String::new()),
-            Error::NotSignedIn(String::new()),
-            Error::Forbidden {
-                needed: None,
-                detail: String::new(),
-            },
-            Error::NotFound(String::new()),
-            Error::Throttled { retry_after: None },
-            Error::Timeout(String::new()),
-            Error::Cancelled,
-            Error::Unsupported {
-                capability: String::new(),
-            },
-            Error::Invalid(String::new()),
-            Error::Network(String::new()),
-            Error::Protocol(String::new()),
-            Error::Io(String::new()),
+    fn every_error_variant_maps_to_its_pinned_kind() {
+        let table: [(Error, &str); 12] = [
+            (Error::Auth(String::new()), "auth"),
+            (Error::NotSignedIn(String::new()), "not_signed_in"),
+            (
+                Error::Forbidden {
+                    needed: None,
+                    detail: String::new(),
+                },
+                "forbidden",
+            ),
+            (Error::NotFound(String::new()), "not_found"),
+            (Error::Throttled { retry_after: None }, "throttled"),
+            (Error::Timeout(String::new()), "timeout"),
+            (Error::Cancelled, "cancelled"),
+            (
+                Error::Unsupported {
+                    capability: String::new(),
+                },
+                "unsupported",
+            ),
+            (Error::Invalid(String::new()), "invalid"),
+            (Error::Network(String::new()), "network"),
+            (Error::Protocol(String::new()), "protocol"),
+            (Error::Io(String::new()), "io"),
         ];
-        let kinds: Vec<&str> = all.iter().map(error_kind).collect();
-        let distinct: std::collections::HashSet<_> = kinds.iter().collect();
-        assert_eq!(
-            distinct.len(),
-            all.len(),
-            "kinds must be distinct: {kinds:?}"
-        );
-        for k in &kinds {
-            assert!(ERROR_KINDS.contains(k), "undocumented kind {k}");
+        for (e, expected) in &table {
+            assert_eq!(error_kind(e), *expected, "{e:?}");
         }
-        assert_eq!(ERROR_KINDS.len(), distinct.len());
-        assert_eq!(error_kind(&Error::Io("x".into())), "io");
-        assert_eq!(error_kind(&Error::Protocol("x".into())), "protocol");
+        let kinds: std::collections::HashSet<&str> = table.iter().map(|(_, k)| *k).collect();
+        assert_eq!(kinds.len(), table.len(), "kinds must be distinct");
+        let documented: std::collections::HashSet<&str> = ERROR_KINDS.iter().copied().collect();
+        assert_eq!(kinds, documented);
     }
 
     #[tokio::test]
@@ -245,6 +277,9 @@ mod tests {
             ),
             list: Err("claims required"),
             peek: Err("claims required"),
+            hang_list: false,
+            hang_peek: false,
+            peeked: Default::default(),
         };
         let r = test_connection(&f, Some(&EntityPath::queue("q"))).await;
         let json = serde_json::to_string(&r).unwrap();
@@ -266,6 +301,9 @@ mod tests {
             ),
             list: Ok(vec!["orders".into()]),
             peek: Ok(1),
+            hang_list: false,
+            hang_peek: false,
+            peeked: Default::default(),
         };
         let r = test_connection(&f, None).await;
         assert!(matches!(r.management, Check::Ok { .. }));
@@ -281,6 +319,9 @@ mod tests {
             ),
             list: Err("claims required"),
             peek: Ok(0),
+            hang_list: false,
+            hang_peek: false,
+            peeked: Default::default(),
         };
         let r = test_connection(&f, None).await;
         assert!(matches!(
@@ -303,10 +344,89 @@ mod tests {
             ),
             list: Err("no"),
             peek: Ok(0),
+            hang_list: false,
+            hang_peek: false,
+            peeked: Default::default(),
         };
         assert!(matches!(
             test_connection(&f, None).await.messaging,
             Check::Skipped { .. }
+        ));
+    }
+
+    const SAS: &str =
+        "Endpoint=sb://n.servicebus.windows.net/;SharedAccessKeyName=Root;SharedAccessKey=k";
+
+    fn fake(ns_: Namespace) -> Fake {
+        Fake {
+            ns: ns_,
+            list: Ok(vec!["first".into()]),
+            peek: Ok(0),
+            hang_list: false,
+            hang_peek: false,
+            peeked: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn manage_ok_but_listen_forbidden() {
+        let mut f = fake(ns(SAS));
+        f.peek = Err("no listen claim");
+        let r = test_connection(&f, None).await;
+        assert!(matches!(r.management, Check::Ok { .. }));
+        assert!(matches!(
+            &r.messaging,
+            Check::Failed { kind: "forbidden", message } if message.contains("needs Listen")
+        ));
+    }
+
+    #[tokio::test]
+    async fn explicit_entity_wins_over_namespace_path_and_first_queue() {
+        let f = fake(ns(&format!("{SAS};EntityPath=from-conn-string")));
+        let given = EntityPath::queue("explicit");
+        test_connection(&f, Some(&given)).await;
+        assert_eq!(f.peeked.lock().unwrap().as_deref(), Some("explicit"));
+
+        // Without an argument the namespace EntityPath beats the first queue.
+        test_connection(&f, None).await;
+        assert_eq!(
+            f.peeked.lock().unwrap().as_deref(),
+            Some("from-conn-string")
+        );
+    }
+
+    #[tokio::test]
+    async fn skipped_reason_names_the_failed_management_check() {
+        let mut f = fake(ns(SAS));
+        f.list = Err("claims required");
+        let r = test_connection(&f, None).await;
+        assert!(matches!(
+            &r.messaging,
+            Check::Skipped { reason } if reason.contains("management check failed") && reason.contains("pass an entity")
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hanging_listing_times_out_without_blocking_the_report() {
+        let mut f = fake(ns(SAS));
+        f.hang_list = true;
+        let r = test_connection(&f, Some(&EntityPath::queue("q"))).await;
+        assert!(matches!(
+            &r.management,
+            Check::Failed { kind: "timeout", message } if message.contains("did not answer within 30 s")
+        ));
+        assert!(matches!(r.messaging, Check::Ok { .. }));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hanging_peek_times_out() {
+        let mut f = fake(ns(SAS));
+        f.hang_peek = true;
+        let r = test_connection(&f, None).await;
+        assert!(matches!(r.management, Check::Ok { .. }));
+        assert!(matches!(
+            &r.messaging,
+            Check::Failed { kind: "timeout", message } if message.contains("peeking did not answer within 30 s")
         ));
     }
 }
