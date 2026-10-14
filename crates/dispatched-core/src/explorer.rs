@@ -42,19 +42,16 @@ impl Explorer {
     /// (for example no Listen right), `counts` stays `None`.
     pub async fn list_queues(&self) -> Result<Vec<QueueInfo>> {
         let mut queues = self.mgmt.list_queues().await?;
-        for (counted, q) in queues.iter_mut().filter(|q| q.counts.is_none()).enumerate() {
-            if counted == Self::MAX_COUNTED_ENTITIES {
-                tracing::info!(
-                    "approximate counts limited to the first {} queues",
-                    Self::MAX_COUNTED_ENTITIES
-                );
-                break;
-            }
-            q.counts = self
-                .count_by_peek(&EntityPath::queue(&q.name), Self::COUNT_CAP)
-                .await
-                .ok();
-        }
+        let mut missing: Vec<(String, &mut Option<EntityCounts>)> = queues
+            .iter_mut()
+            .filter(|q| q.counts.is_none())
+            .map(|q| (q.name.clone(), &mut q.counts))
+            .collect();
+        fill_counts(&mut missing, "queues", Self::MAX_COUNTED_ENTITIES, |name| {
+            let path = EntityPath::queue(&name);
+            async move { self.count_by_peek(&path, Self::COUNT_CAP).await }
+        })
+        .await;
         Ok(queues)
     }
 
@@ -68,19 +65,21 @@ impl Explorer {
     /// Missing counts are filled by peeking, as in [`Explorer::list_queues`].
     pub async fn list_subscriptions(&self, topic: &str) -> Result<Vec<SubscriptionInfo>> {
         let mut subs = self.mgmt.list_subscriptions(topic).await?;
-        for (counted, s) in subs.iter_mut().filter(|s| s.counts.is_none()).enumerate() {
-            if counted == Self::MAX_COUNTED_ENTITIES {
-                tracing::info!(
-                    "approximate counts limited to the first {} subscriptions of {topic}",
-                    Self::MAX_COUNTED_ENTITIES
-                );
-                break;
-            }
-            s.counts = self
-                .count_by_peek(&EntityPath::subscription(topic, &s.name), Self::COUNT_CAP)
-                .await
-                .ok();
-        }
+        let mut missing: Vec<(String, &mut Option<EntityCounts>)> = subs
+            .iter_mut()
+            .filter(|s| s.counts.is_none())
+            .map(|s| (s.name.clone(), &mut s.counts))
+            .collect();
+        fill_counts(
+            &mut missing,
+            "subscriptions",
+            Self::MAX_COUNTED_ENTITIES,
+            |name| {
+                let path = EntityPath::subscription(topic, &name);
+                async move { self.count_by_peek(&path, Self::COUNT_CAP).await }
+            },
+        )
+        .await;
         Ok(subs)
     }
 
@@ -148,6 +147,40 @@ impl Explorer {
     pub async fn close(&self) {
         if let Some(conn) = self.amqp.lock().await.take() {
             let _ = conn.close().await;
+        }
+    }
+}
+
+/// Fill the missing counts of up to `max` entities with `count`.
+///
+/// A failed count leaves that entity's counts `None` and is logged. After a
+/// connection-level failure (see [`retry_after`]; `count` has already retried
+/// once) the remaining entities are not attempted, since each would fail the
+/// same slow way. Answers from a healthy service (`NotFound`, `Forbidden`)
+/// only affect the entity they concern.
+async fn fill_counts<F, Fut>(
+    missing: &mut [(String, &mut Option<EntityCounts>)],
+    kind: &str,
+    max: usize,
+    mut count: F,
+) where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = Result<EntityCounts>>,
+{
+    for (counted, (name, slot)) in missing.iter_mut().enumerate() {
+        if counted == max {
+            tracing::info!("approximate counts limited to the first {max} {kind}");
+            break;
+        }
+        match count(name.clone()).await {
+            Ok(c) => **slot = Some(c),
+            Err(e) => {
+                tracing::debug!(entity = %name, error = %e, "approximate count failed");
+                if retry_after(&e, 0) {
+                    tracing::debug!("stopping approximate counts after a connection-level failure");
+                    break;
+                }
+            }
         }
     }
 }
@@ -367,5 +400,71 @@ mod tests {
             count_sub_queues(&mut src, &q, 100).await,
             Err(Error::NotFound(_))
         ));
+    }
+
+    fn fake_counts() -> EntityCounts {
+        EntityCounts {
+            approximate: true,
+            ..EntityCounts::default()
+        }
+    }
+
+    async fn run_fill(
+        n: usize,
+        max: usize,
+        fail_first_with: impl Fn() -> Error,
+    ) -> (Vec<Option<EntityCounts>>, Vec<String>) {
+        let mut slots: Vec<Option<EntityCounts>> = vec![None; n];
+        let mut missing: Vec<(String, &mut Option<EntityCounts>)> = slots
+            .iter_mut()
+            .enumerate()
+            .map(|(i, s)| (format!("e{}", i + 1), s))
+            .collect();
+        let attempted = std::cell::RefCell::new(Vec::new());
+        fill_counts(&mut missing, "queues", max, |name| {
+            attempted.borrow_mut().push(name.clone());
+            let first = name == "e1";
+            let err = fail_first_with();
+            async move { if first { Err(err) } else { Ok(fake_counts()) } }
+        })
+        .await;
+        (slots, attempted.into_inner())
+    }
+
+    #[tokio::test]
+    async fn connection_level_failure_stops_counting_the_rest() {
+        for e in [
+            || Error::Network("x".into()),
+            || Error::Auth("x".into()),
+            || Error::Protocol("x".into()),
+            || Error::Timeout("x".into()),
+        ] {
+            let (slots, attempted) = run_fill(4, 50, e).await;
+            assert_eq!(attempted, ["e1"]);
+            assert!(slots.iter().all(Option::is_none));
+        }
+    }
+
+    #[tokio::test]
+    async fn healthy_service_errors_only_skip_that_entity() {
+        for e in [
+            || Error::NotFound("x".into()),
+            || Error::Forbidden {
+                needed: None,
+                detail: "x".into(),
+            },
+        ] {
+            let (slots, attempted) = run_fill(3, 50, e).await;
+            assert_eq!(attempted, ["e1", "e2", "e3"]);
+            assert!(slots[0].is_none());
+            assert!(slots[1].is_some() && slots[2].is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn counting_is_capped_per_call() {
+        let (slots, attempted) = run_fill(5, 2, || Error::NotFound("x".into())).await;
+        assert_eq!(attempted, ["e1", "e2"]);
+        assert!(slots[2..].iter().all(Option::is_none));
     }
 }
