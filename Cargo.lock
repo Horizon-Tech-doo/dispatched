@@ -1114,6 +1114,7 @@ dependencies = [
  "dirs",
  "dispatched-core",
  "horizon-azure-kit",
+ "libc",
  "open",
  "secrecy",
  "serde",

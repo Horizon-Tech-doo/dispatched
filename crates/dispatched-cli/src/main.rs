@@ -113,6 +113,7 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    restore_sigpipe();
     let cli = Cli::parse();
     match run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
@@ -120,6 +121,18 @@ async fn main() -> ExitCode {
             eprintln!("error: {}", format_error(&e, hints));
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Rust ignores SIGPIPE, so `println!` panics when the reader of a pipe
+/// exits early (`dispatched peek q | head`). Restore the default so the
+/// process ends quietly, like other command-line tools.
+fn restore_sigpipe() {
+    #[cfg(unix)]
+    // SAFETY: setting a signal disposition is process-wide and thread-safe;
+    // this runs once, before anything is written.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 }
 
