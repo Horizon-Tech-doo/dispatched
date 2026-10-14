@@ -90,8 +90,21 @@ pub struct PeekPage {
 }
 
 /// Peek through `address`, keeping messages accepted by `view` and `opts.filter`.
+///
 /// Stops at `opts.max` matches, `opts.scan_limit` examined messages, an empty
-/// batch, or a batch whose sequence numbers do not advance.
+/// batch (the end of the entity), a batch that makes no progress, or the first
+/// message without a sequence number (`< 0`).
+///
+/// Messages whose sequence number is below the current position (duplicates or
+/// stale replays) are skipped: they are neither returned nor counted against
+/// `scan_limit`.
+///
+/// `next_sequence` is where to continue. It is `None` when the end of the
+/// entity was reached, when the scan made no progress at all (nothing examined,
+/// so retrying from the same place would loop), and when `opts.max == 0`
+/// (which returns immediately). If a message without a sequence number is met
+/// after real progress, the continuation is the last good sequence plus one; the
+/// next call then examines nothing and ends with `None`.
 pub async fn scan_messages(
     src: &mut (impl PeekSource + ?Sized),
     address: &str,
@@ -111,6 +124,14 @@ pub async fn scan_messages(
         }
         let mut advanced = false;
         for m in batch {
+            if m.sequence_number < 0 {
+                // No sequence number: we cannot position past it.
+                break 'outer;
+            }
+            if m.sequence_number < next {
+                // Already seen or stale.
+                continue;
+            }
             let wanted = view.accepts(m.state) && opts.filter.matches(&m);
             if wanted && out.len() as u32 >= opts.max {
                 // Leave this match for the next page.
@@ -118,10 +139,8 @@ pub async fn scan_messages(
                 break 'outer;
             }
             scanned += 1;
-            if m.sequence_number >= next {
-                next = m.sequence_number + 1;
-                advanced = true;
-            }
+            next = m.sequence_number + 1;
+            advanced = true;
             if wanted {
                 out.push(m);
             }
@@ -133,10 +152,15 @@ pub async fn scan_messages(
             break;
         }
     }
+    let next_sequence = if exhausted || scanned == 0 {
+        None
+    } else {
+        Some(next)
+    };
     Ok(PeekPage {
         messages: out,
         scanned,
-        next_sequence: if exhausted { None } else { Some(next) },
+        next_sequence,
         exhausted,
     })
 }
@@ -252,8 +276,7 @@ mod tests {
         assert!(src.calls <= 4, "1000 / 250 batches, got {}", src.calls);
     }
 
-    /// A misbehaving source that ignores `from` and always returns the same
-    /// messages without sequence numbers.
+    /// A misbehaving source that always returns messages without sequence numbers.
     struct Stuck {
         calls: u32,
     }
@@ -278,7 +301,159 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(src.calls, 1, "must not re-read the same range");
-        assert_eq!(page.messages.len(), 5);
+        assert!(
+            page.messages.is_empty(),
+            "unsequenced messages are not emitted"
+        );
+        assert_eq!(page.scanned, 0);
+        assert_eq!(
+            page.next_sequence, None,
+            "no progress means no continuation"
+        );
+        assert!(!page.exhausted);
+    }
+
+    /// Returns scripted batches in order, then empty batches.
+    struct Scripted {
+        batches: std::collections::VecDeque<Vec<PeekedMessage>>,
+        calls: u32,
+    }
+
+    #[async_trait]
+    impl PeekSource for Scripted {
+        async fn peek_batch(
+            &mut self,
+            _address: &str,
+            _from: i64,
+            _max: u32,
+        ) -> Result<Vec<PeekedMessage>> {
+            self.calls += 1;
+            Ok(self.batches.pop_front().unwrap_or_default())
+        }
+    }
+
+    fn seqs(list: &[i64]) -> Vec<PeekedMessage> {
+        list.iter().map(|&i| test_message(i)).collect()
+    }
+
+    fn seq_numbers(page: &PeekPage) -> Vec<i64> {
+        page.messages.iter().map(|m| m.sequence_number).collect()
+    }
+
+    #[tokio::test]
+    async fn duplicate_and_stale_messages_are_skipped() {
+        let mut src = Scripted {
+            batches: [seqs(&[5, 5, 6])].into(),
+            calls: 0,
+        };
+        let page = scan_messages(&mut src, "q", PeekView::Active, &PeekOptions::new(10))
+            .await
+            .unwrap();
+        assert_eq!(seq_numbers(&page), [5, 6]);
+        assert_eq!(
+            page.scanned, 2,
+            "stale messages do not count toward the scan limit"
+        );
+        assert!(page.exhausted);
+    }
+
+    #[tokio::test]
+    async fn stale_only_batch_makes_no_progress() {
+        let mut src = Scripted {
+            batches: [seqs(&[3, 4]), seqs(&[1, 2])].into(),
+            calls: 0,
+        };
+        let opts = PeekOptions::new(10).from_sequence(10);
+        let page = scan_messages(&mut src, "q", PeekView::Active, &opts)
+            .await
+            .unwrap();
+        assert_eq!(src.calls, 1);
+        assert!(page.messages.is_empty());
+        assert_eq!(page.next_sequence, None);
+        assert!(!page.exhausted);
+    }
+
+    #[tokio::test]
+    async fn gapped_sequences_continue_correctly() {
+        let mut src = Fake {
+            messages: seqs(&[1, 2, 10, 11]),
+            calls: 0,
+        };
+        let first = scan_messages(&mut src, "q", PeekView::Active, &PeekOptions::new(3))
+            .await
+            .unwrap();
+        assert_eq!(seq_numbers(&first), [1, 2, 10]);
+        assert_eq!(first.next_sequence, Some(11));
+        let opts = PeekOptions::new(3).from_sequence(11);
+        let second = scan_messages(&mut src, "q", PeekView::Active, &opts)
+            .await
+            .unwrap();
+        assert_eq!(seq_numbers(&second), [11]);
+        assert!(second.exhausted);
+    }
+
+    #[tokio::test]
+    async fn max_mid_batch_points_at_the_first_unexamined_message() {
+        // Even sequence numbers are scheduled, so Active matches 1, 3, 5, ...
+        let mut src = entity(10, 2);
+        let page = scan_messages(&mut src, "q", PeekView::Active, &PeekOptions::new(2))
+            .await
+            .unwrap();
+        assert_eq!(seq_numbers(&page), [1, 3]);
+        assert_eq!(page.scanned, 4, "1, 2, 3 and the non-match 4 were examined");
+        assert_eq!(page.next_sequence, Some(5));
+        let opts = PeekOptions::new(2).from_sequence(5);
+        let second = scan_messages(&mut src, "q", PeekView::Active, &opts)
+            .await
+            .unwrap();
+        assert_eq!(seq_numbers(&second), [5, 7]);
+    }
+
+    #[tokio::test]
+    async fn deferred_view_keeps_only_deferred_messages() {
+        let mut src = entity(9, 0);
+        for m in src
+            .messages
+            .iter_mut()
+            .filter(|m| m.sequence_number % 3 == 0)
+        {
+            m.state = MessageState::Deferred;
+        }
+        let page = scan_messages(&mut src, "q", PeekView::Deferred, &PeekOptions::new(10))
+            .await
+            .unwrap();
+        assert_eq!(seq_numbers(&page), [3, 6, 9]);
+        let page = scan_messages(&mut src, "q", PeekView::Active, &PeekOptions::new(10))
+            .await
+            .unwrap();
+        assert_eq!(page.messages.len(), 6);
+    }
+
+    #[tokio::test]
+    async fn unsequenced_message_after_progress_keeps_the_continuation() {
+        let mut batch = seqs(&[1, 2]);
+        batch.push(test_message(-1));
+        let mut src = Scripted {
+            batches: [batch].into(),
+            calls: 0,
+        };
+        let page = scan_messages(&mut src, "q", PeekView::Active, &PeekOptions::new(10))
+            .await
+            .unwrap();
+        assert_eq!(seq_numbers(&page), [1, 2]);
+        assert_eq!(page.next_sequence, Some(3));
+        assert!(!page.exhausted);
+    }
+
+    #[tokio::test]
+    async fn zero_max_returns_immediately_without_a_continuation() {
+        let mut src = entity(10, 0);
+        let page = scan_messages(&mut src, "q", PeekView::Active, &PeekOptions::new(0))
+            .await
+            .unwrap();
+        assert_eq!(src.calls, 0);
+        assert!(page.messages.is_empty());
+        assert_eq!(page.next_sequence, None);
         assert!(!page.exhausted);
     }
 
