@@ -37,6 +37,12 @@ impl Explorer {
         &self.ns
     }
 
+    /// The management client, for callers that need plain listings without
+    /// the approximate-count work (e.g. connection diagnostics).
+    pub fn management_client(&self) -> &ManagementClient {
+        &self.mgmt
+    }
+
     /// Queues with counts. Where the service reports none (the emulator),
     /// counts are taken by peeking and marked approximate; if that fails
     /// (for example no Listen right), `counts` stays `None`.

@@ -6,6 +6,7 @@
 #![warn(clippy::all)]
 
 pub mod connstr;
+pub mod diagnostics;
 pub mod discovery;
 pub mod error;
 pub mod explorer;
