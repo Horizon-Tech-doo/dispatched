@@ -105,10 +105,15 @@ pub fn secret_key(profile_id: &str) -> String {
 
 /// Apply `HTTPS_PROXY` unless the namespace is the emulator or already proxied.
 pub fn with_env_proxy(ns: Namespace) -> Result<Namespace> {
+    apply_proxy(ns, ProxyConfig::from_env())
+}
+
+/// Apply `proxy` unless the namespace is the emulator or already proxied.
+pub fn apply_proxy(ns: Namespace, proxy: Option<ProxyConfig>) -> Result<Namespace> {
     if ns.is_emulator() || ns.proxy().is_some() {
         return Ok(ns);
     }
-    ns.with_proxy(ProxyConfig::from_env())
+    ns.with_proxy(proxy)
 }
 
 /// Build the namespace a profile points at.
@@ -212,5 +217,36 @@ mod tests {
         let ns = namespace_for(&p, &MemoryStore::new(), &session(), Some(&si)).unwrap();
         assert_eq!(ns.transport(), Transport::WebSockets);
         assert!(ns.proxy().is_some());
+    }
+
+    fn namespace(cs: &str) -> Namespace {
+        Namespace::from_connection_string(&ConnectionString::parse(cs).unwrap()).unwrap()
+    }
+
+    const REAL: &str =
+        "Endpoint=sb://ns.servicebus.windows.net/;SharedAccessKeyName=k;SharedAccessKey=v";
+    const EMU: &str = "Endpoint=sb://localhost;SharedAccessKeyName=k;SharedAccessKey=v;UseDevelopmentEmulator=true;";
+
+    #[test]
+    fn apply_proxy_leaves_the_emulator_alone() {
+        let ns = apply_proxy(namespace(EMU), ProxyConfig::parse("http://p:8080").ok()).unwrap();
+        assert!(ns.proxy().is_none());
+        assert_eq!(ns.transport(), Transport::Amqp);
+    }
+
+    #[test]
+    fn apply_proxy_forces_websockets() {
+        let ns = apply_proxy(namespace(REAL), ProxyConfig::parse("http://p:8080").ok()).unwrap();
+        assert_eq!(ns.proxy().unwrap().host(), "p");
+        assert_eq!(ns.transport(), Transport::WebSockets);
+    }
+
+    #[test]
+    fn apply_proxy_keeps_an_existing_proxy() {
+        let ns = namespace(REAL)
+            .with_proxy(ProxyConfig::parse("http://first:1").ok())
+            .unwrap();
+        let ns = apply_proxy(ns, ProxyConfig::parse("http://second:2").ok()).unwrap();
+        assert_eq!(ns.proxy().unwrap().host(), "first");
     }
 }

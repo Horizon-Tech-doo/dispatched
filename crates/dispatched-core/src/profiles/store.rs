@@ -2,7 +2,7 @@
 
 use super::{Profile, ProfileAuth, secret_key};
 use crate::connstr::ConnectionString;
-use crate::namespace::Transport;
+use crate::namespace::{ProxyConfig, Transport};
 use crate::{Error, Result};
 use horizon_azure_kit::auth::SignIn;
 use horizon_azure_kit::secrets::CredentialStore;
@@ -12,6 +12,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 const SCHEMA_VERSION: i64 = 1;
+
+/// How long a second process waits for the first to finish creating the schema.
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Profile database.
 #[derive(Debug)]
@@ -23,10 +26,12 @@ pub struct ProfileStore {
 impl ProfileStore {
     /// Open (creating if needed) the database at `path`.
     pub fn open(path: &Path) -> Result<Self> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| db_err(path, e))?;
+        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            create_private_dir(dir).map_err(|e| db_err(path, e))?;
         }
         let conn = Connection::open(path).map_err(|e| db_err(path, e))?;
+        conn.busy_timeout(BUSY_TIMEOUT)
+            .map_err(|e| db_err(path, e))?;
         let store = Self {
             conn: Mutex::new(conn),
             path: path.to_path_buf(),
@@ -52,8 +57,13 @@ impl ProfileStore {
     }
 
     fn migrate(&self) -> Result<()> {
-        let conn = self.conn.lock().expect("profile db poisoned");
-        let version: i64 = conn
+        let mut conn = self.conn.lock().expect("profile db poisoned");
+        // Take the write lock first and read the version under it, so a second
+        // process that lost the race sees version 1 and skips creation.
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| self.err(e))?;
+        let version: i64 = tx
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(|e| self.err(e))?;
         if version > SCHEMA_VERSION {
@@ -62,7 +72,7 @@ impl ProfileStore {
             )));
         }
         if version < 1 {
-            conn.execute_batch(
+            tx.execute_batch(
                 "CREATE TABLE profiles (
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -81,7 +91,7 @@ impl ProfileStore {
             )
             .map_err(|e| self.err(e))?;
         }
-        Ok(())
+        tx.commit().map_err(|e| self.err(e))
     }
 
     /// All profiles, by name.
@@ -99,6 +109,10 @@ impl ProfileStore {
 
     /// Profile by name (case-insensitive).
     pub fn get(&self, name: &str) -> Result<Option<Profile>> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Ok(None);
+        }
         let conn = self.conn.lock().expect("profile db poisoned");
         conn.query_row(
             &format!("{SELECT_PROFILE} WHERE name = ?1 COLLATE NOCASE"),
@@ -111,12 +125,14 @@ impl ProfileStore {
 
     /// Insert a new profile; the name must be unused (case-insensitive).
     pub fn insert(&self, p: &Profile) -> Result<()> {
+        let name = clean_name(&p.name)?;
+        validate_proxy(p.proxy.as_deref())?;
         let conn = self.conn.lock().expect("profile db poisoned");
         let result = conn.execute(
             "INSERT INTO profiles (id, name, host, auth, emulator, production, color, transport, proxy, pinned_entities)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
-                p.id, p.name, p.host, auth_json(&p.auth), p.emulator, p.production, p.color,
+                p.id, name, p.host, auth_json(&p.auth), p.emulator, p.production, p.color,
                 transport_text(p.transport), p.proxy, serde_json::to_string(&p.pinned_entities).expect("pins serialize")
             ],
         );
@@ -136,12 +152,14 @@ impl ProfileStore {
 
     /// Replace an existing profile (matched by id).
     pub fn update(&self, p: &Profile) -> Result<()> {
+        let name = clean_name(&p.name)?;
+        validate_proxy(p.proxy.as_deref())?;
         let conn = self.conn.lock().expect("profile db poisoned");
         let result = conn.execute(
             "UPDATE profiles SET name = ?2, host = ?3, auth = ?4, emulator = ?5, production = ?6, color = ?7,
              transport = ?8, proxy = ?9, pinned_entities = ?10 WHERE id = ?1",
             params![
-                p.id, p.name, p.host, auth_json(&p.auth), p.emulator, p.production, p.color,
+                p.id, name, p.host, auth_json(&p.auth), p.emulator, p.production, p.color,
                 transport_text(p.transport), p.proxy, serde_json::to_string(&p.pinned_entities).expect("pins serialize")
             ],
         );
@@ -155,7 +173,7 @@ impl ProfileStore {
                 )))
             }
             Err(e) => Err(self.err(e)),
-            Ok(0) => Err(Error::NotFound(format!("profile `{}`", p.name))),
+            Ok(0) => Err(Error::NotFound(format!("profile `{name}`"))),
             Ok(_) => Ok(()),
         }
     }
@@ -331,19 +349,24 @@ impl ProfileStore {
                 params![s.id, serde_json::to_string(s).expect("SignIn serializes")],
             )
             .map_err(|e| self.err(e))?;
+            // Only fill an unset choice: a stale file must not override a newer one.
             tx.execute(
-                "INSERT INTO settings (key, value) VALUES ('current_sign_in', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                "INSERT INTO settings (key, value) VALUES ('current_sign_in', ?1) ON CONFLICT(key) DO NOTHING",
                 params![s.id],
             )
             .map_err(|e| self.err(e))?;
             tx.commit().map_err(|e| self.err(e))?;
         }
-        std::fs::remove_file(path).map_err(|e| {
-            Error::Io(format!(
-                "could not remove {}: {e}; delete it manually",
-                path.display()
-            ))
-        })?;
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(Error::Io(format!(
+                    "could not remove {}: {e}; delete it manually",
+                    path.display()
+                )));
+            }
+        }
         Ok(old.sign_in.is_some())
     }
 }
@@ -351,21 +374,75 @@ impl ProfileStore {
 const SELECT_PROFILE: &str = "SELECT id, name, host, auth, emulator, production, color, transport, proxy, pinned_entities FROM profiles";
 
 fn row_to_profile(r: &rusqlite::Row<'_>) -> rusqlite::Result<Profile> {
+    let id: String = r.get(0)?;
+    let name: String = r.get(1)?;
+    let bad = |col: usize, what: &str, e: &dyn std::fmt::Display| {
+        rusqlite::Error::FromSqlConversionFailure(
+            col,
+            rusqlite::types::Type::Text,
+            format!("profile `{name}` ({id}) has an invalid {what}: {e}").into(),
+        )
+    };
     let auth_text: String = r.get(3)?;
     let transport_text: String = r.get(7)?;
     let pins_text: String = r.get(9)?;
+    let auth = serde_json::from_str(&auth_text).map_err(|e| bad(3, "auth setting", &e))?;
+    let transport = Transport::parse(&transport_text).map_err(|e| bad(7, "transport", &e))?;
+    let pinned_entities =
+        serde_json::from_str(&pins_text).map_err(|e| bad(9, "pinned-entities list", &e))?;
     Ok(Profile {
-        id: r.get(0)?,
-        name: r.get(1)?,
         host: r.get(2)?,
-        auth: serde_json::from_str(&auth_text).unwrap_or(ProfileAuth::ConnectionString),
+        auth,
         emulator: r.get(4)?,
         production: r.get(5)?,
         color: r.get(6)?,
-        transport: Transport::parse(&transport_text).unwrap_or_default(),
+        transport,
         proxy: r.get(8)?,
-        pinned_entities: serde_json::from_str(&pins_text).unwrap_or_default(),
+        pinned_entities,
+        id,
+        name,
     })
+}
+
+/// Trim a profile name and refuse an empty one.
+fn clean_name(name: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(Error::Invalid(
+            "a profile needs a name; give it one that is not blank".into(),
+        ));
+    }
+    Ok(name.to_string())
+}
+
+/// Proxies are stored without credentials (they would end up in the
+/// database); an authenticated proxy comes from `HTTPS_PROXY`.
+fn validate_proxy(proxy: Option<&str>) -> Result<()> {
+    let Some(proxy) = proxy else { return Ok(()) };
+    ProxyConfig::parse(proxy)?;
+    if let Ok(u) = url::Url::parse(proxy)
+        && (!u.username().is_empty() || u.password().is_some())
+    {
+        return Err(Error::Invalid(
+            "store the proxy without credentials (http://host:port); set HTTPS_PROXY for an authenticated proxy".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Create `dir` (and missing parents); new directories are private (0700) on Unix.
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    if dir.exists() {
+        return Ok(());
+    }
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir)
 }
 
 fn auth_json(a: &ProfileAuth) -> String {
@@ -519,5 +596,182 @@ mod tests {
             .update(&Profile::connection_string("ghost", &cs))
             .unwrap_err();
         assert!(matches!(e, Error::NotFound(_)), "{e}");
+    }
+
+    struct FailingStore;
+    impl CredentialStore for FailingStore {
+        fn put(&self, _: &str, _: &SecretString) -> horizon_azure_kit::KitResult<()> {
+            Err(horizon_azure_kit::KitError::SecretStore("boom".into()))
+        }
+        fn get(&self, _: &str) -> horizon_azure_kit::KitResult<Option<SecretString>> {
+            Ok(None)
+        }
+        fn delete(&self, _: &str) -> horizon_azure_kit::KitResult<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn failed_secret_write_leaves_no_row() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        let e = store
+            .add_connection_string("dev", CS, &FailingStore, false)
+            .unwrap_err();
+        assert!(e.to_string().contains("boom"), "{e}");
+        assert!(store.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn production_flag_roundtrips() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        store
+            .add_connection_string("prod", CS, &MemoryStore::new(), true)
+            .unwrap();
+        assert!(store.get("prod").unwrap().unwrap().production);
+    }
+
+    #[test]
+    fn concurrent_opens_both_succeed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sub").join("dispatched.db");
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|s| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    s.spawn(|| {
+                        barrier.wait();
+                        ProfileStore::open(&path).map(|_| ())
+                    })
+                })
+                .collect();
+            for h in handles {
+                h.join().unwrap().unwrap();
+            }
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_config_dir_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("dispatched");
+        ProfileStore::open(&sub.join("dispatched.db")).unwrap();
+        assert_eq!(
+            std::fs::metadata(&sub).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
+    fn sign_in(id: &str) -> SignIn {
+        SignIn {
+            id: id.into(),
+            user_principal: format!("{id}@x.io"),
+            tenant_id: "t".into(),
+            display_name: None,
+            cloud: horizon_azure_kit::AzureCloud::Public,
+        }
+    }
+
+    #[test]
+    fn stale_state_file_does_not_override_current_sign_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("cli-state.json");
+        std::fs::write(
+            &state,
+            serde_json::json!({ "sign_in": sign_in("old") }).to_string(),
+        )
+        .unwrap();
+        let store = ProfileStore::open_in_memory().unwrap();
+        store.save_sign_in(&sign_in("new")).unwrap();
+        store.set_current_sign_in(Some("new")).unwrap();
+        store.migrate_cli_state(&state).unwrap();
+        assert_eq!(store.current_sign_in().unwrap().unwrap().id, "new");
+        assert!(
+            store.sign_in("old").unwrap().is_some(),
+            "the old record is still imported"
+        );
+    }
+
+    #[test]
+    fn proxy_credentials_are_rejected() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        let cs = ConnectionString::parse(CS).unwrap();
+        for bad in [
+            "http://u:p@proxy:8080",
+            "http://u@proxy:8080",
+            "http://:p@proxy:8080",
+        ] {
+            let mut p = Profile::connection_string("dev", &cs);
+            p.proxy = Some(bad.into());
+            let e = store.insert(&p).unwrap_err().to_string();
+            assert!(
+                e.contains("without credentials") && e.contains("HTTPS_PROXY"),
+                "{e}"
+            );
+            assert!(!e.contains(":p@"), "{e}");
+        }
+        let mut p = Profile::connection_string("dev", &cs);
+        p.proxy = Some("not a url".into());
+        assert!(store.insert(&p).is_err());
+        p.proxy = Some("http://proxy:8080".into());
+        store.insert(&p).unwrap();
+        p.proxy = Some("http://u:p@proxy:8080".into());
+        assert!(store.update(&p).is_err());
+    }
+
+    #[test]
+    fn corrupt_rows_name_the_profile() {
+        for (column, value, what) in [
+            ("auth", "{nope", "auth"),
+            ("transport", "carrier-pigeon", "transport"),
+            ("pinned_entities", "[1,", "pinned"),
+        ] {
+            let store = ProfileStore::open_in_memory().unwrap();
+            store
+                .add_connection_string("dev", CS, &MemoryStore::new(), false)
+                .unwrap();
+            store
+                .conn
+                .lock()
+                .unwrap()
+                .execute(
+                    &format!("UPDATE profiles SET {column} = ?1"),
+                    params![value],
+                )
+                .unwrap();
+            for e in [store.get("dev").unwrap_err(), store.list().unwrap_err()] {
+                let e = e.to_string();
+                assert!(
+                    e.contains("profile `dev`")
+                        && e.contains(what)
+                        && e.contains("delete the file"),
+                    "{e}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn blank_names_are_rejected_and_names_trimmed() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        let secrets = MemoryStore::new();
+        for blank in ["", "   ", "\t"] {
+            let e = store
+                .add_connection_string(blank, CS, &secrets, false)
+                .unwrap_err();
+            assert!(matches!(e, Error::Invalid(_)), "{e}");
+        }
+        let mut p = store
+            .add_connection_string("  dev  ", CS, &secrets, false)
+            .unwrap();
+        assert_eq!(p.name, "dev");
+        assert_eq!(store.get("  DEV ").unwrap().unwrap().id, p.id);
+        assert!(store.get("  ").unwrap().is_none());
+        p.name = "  renamed ".into();
+        store.update(&p).unwrap();
+        assert_eq!(store.get("renamed").unwrap().unwrap().id, p.id);
+        p.name = "   ".into();
+        assert!(matches!(store.update(&p).unwrap_err(), Error::Invalid(_)));
     }
 }
