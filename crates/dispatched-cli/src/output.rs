@@ -1,11 +1,26 @@
 //! Plain aligned tables for humans; JSON for machines.
 
-/// Replace control characters and bidi/line-separator characters with a space,
-/// so untrusted text cannot inject terminal escapes or reorder the output.
+/// Bidi controls, line/paragraph separators and zero-width/mark characters
+/// that render as nothing (or reorder text) in a terminal.
+fn is_invisible_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{061C}'
+            | '\u{FEFF}'
+    )
+}
+
+/// Replace control characters and invisible formatting characters with a
+/// space, so untrusted text cannot inject terminal escapes or reorder the output.
 pub fn sanitize(s: &str) -> String {
     s.chars()
         .map(|c| {
-            if c.is_control() || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{2028}' | '\u{2029}') {
+            if c.is_control() || is_invisible_format(c) {
                 ' '
             } else {
                 c
@@ -73,6 +88,13 @@ mod tests {
     fn ellipsize_flattens_newlines() {
         assert_eq!(ellipsize("a\nb", 10), "a b");
         assert_eq!(ellipsize("abcdef", 4), "abc…");
+    }
+
+    #[test]
+    fn invisible_formatting_characters_are_neutralised() {
+        for c in ['\u{200B}', '\u{200E}', '\u{200F}', '\u{061C}', '\u{FEFF}'] {
+            assert_eq!(sanitize(&format!("a{c}b")), "a b");
+        }
     }
 
     #[test]

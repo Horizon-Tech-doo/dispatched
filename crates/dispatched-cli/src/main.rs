@@ -1,20 +1,16 @@
 //! `dispatched`: Azure Service Bus explorer CLI.
 
+mod commands;
+mod context;
 mod output;
 mod resolve;
-mod state;
 
-use anyhow::Context;
 use clap::{Parser, Subcommand, ValueEnum};
-use dispatched_core::discovery::discover_namespaces;
-use dispatched_core::{
-    EntityCounts, EntityPath, Explorer, MessageBody, PeekOptions, PeekView, PeekedMessage,
-};
-use horizon_azure_kit::AzureCloud;
-use horizon_azure_kit::arm::ArmClient;
-use output::{ellipsize, table};
+use commands::profile::ProfileCmd;
+use context::Ctx;
+use dispatched_core::PeekView;
+use resolve::Selection;
 use std::process::ExitCode;
-use time::format_description::well_known::Rfc3339;
 
 #[derive(Parser)]
 #[command(
@@ -30,12 +26,26 @@ struct Cli {
         long,
         env = "DISPATCHED_CONNECTION_STRING",
         global = true,
-        hide_env_values = true
+        hide_env_values = true,
+        conflicts_with_all = ["namespace", "profile"]
     )]
     connection_string: Option<String>,
     /// Namespace name or host, used with the signed-in Entra account.
-    #[arg(long, env = "DISPATCHED_NAMESPACE", global = true)]
+    #[arg(
+        long,
+        env = "DISPATCHED_NAMESPACE",
+        global = true,
+        conflicts_with_all = ["connection_string", "profile"]
+    )]
     namespace: Option<String>,
+    /// Saved profile to use (see `dispatched profile ls`).
+    #[arg(
+        long,
+        env = "DISPATCHED_PROFILE",
+        global = true,
+        conflicts_with_all = ["connection_string", "namespace"]
+    )]
+    profile: Option<String>,
     /// Output format.
     #[arg(long, value_enum, default_value_t = Format::Table, global = true)]
     format: Format,
@@ -44,7 +54,7 @@ struct Cli {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
-enum Format {
+pub enum Format {
     Table,
     Json,
 }
@@ -65,7 +75,14 @@ enum Command {
     /// Show the current sign-in.
     Whoami,
     /// List Service Bus namespaces visible to the signed-in account.
-    Namespaces,
+    Namespaces {
+        /// Search this tenant (id or domain) instead of the home tenant.
+        #[arg(long, conflicts_with = "all_tenants")]
+        tenant: Option<String>,
+        /// Search every tenant the account can access.
+        #[arg(long)]
+        all_tenants: bool,
+    },
     /// List queues (and with --topics, topics and subscriptions) with counts.
     Ls {
         #[arg(long)]
@@ -88,6 +105,11 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         from_seq: i64,
     },
+    /// Manage saved profiles.
+    Profile {
+        #[command(subcommand)]
+        cmd: ProfileCmd,
+    },
 }
 
 #[tokio::main]
@@ -102,7 +124,7 @@ async fn main() -> ExitCode {
     }
 }
 
-const LOGIN_HINT: &str = "run `dispatched login`";
+pub const LOGIN_HINT: &str = "run `dispatched login`";
 
 /// One-line, terminal-safe error text. A not-signed-in root cause gets the
 /// login hint appended; control characters from remote text are neutralised.
@@ -122,237 +144,25 @@ fn format_error(e: &anyhow::Error) -> String {
     output::sanitize(&text)
 }
 
-/// A count cell: `?` when unknown, `~N` when counted by peeking, `~N+` when
-/// that count hit its cap.
-fn count_cell(counts: Option<&EntityCounts>, pick: fn(&EntityCounts) -> u64) -> String {
-    match counts {
-        None => "?".into(),
-        Some(c) => {
-            let n = pick(c);
-            match (c.approximate, c.truncated) {
-                (_, true) => format!("~{n}+"),
-                (true, false) => format!("~{n}"),
-                (false, false) => n.to_string(),
-            }
-        }
-    }
-}
-
-fn body_cell(body: &MessageBody) -> String {
-    match body.as_text() {
-        Some(text) => ellipsize(&text, 60),
-        None => format!("<{} bytes>", body.len()),
-    }
-}
-
-fn print_messages(messages: &[PeekedMessage], format: Format, dlq: bool) -> anyhow::Result<()> {
-    if let Format::Json = format {
-        println!("{}", serde_json::to_string_pretty(messages)?);
-        return Ok(());
-    }
-    let mut headers = vec!["SEQ", "ENQUEUED", "MESSAGE ID", "DELIV", "SUBJECT"];
-    if dlq {
-        headers.push("REASON");
-    }
-    headers.push("BODY");
-    let rows: Vec<Vec<String>> = messages
-        .iter()
-        .map(|m| {
-            let mut row = vec![
-                m.sequence_number.to_string(),
-                m.enqueued_time
-                    .and_then(|t| t.format(&Rfc3339).ok())
-                    .unwrap_or_default(),
-                ellipsize(m.message_id.as_deref().unwrap_or(""), 36),
-                m.delivery_count.to_string(),
-                ellipsize(m.subject.as_deref().unwrap_or(""), 24),
-            ];
-            if dlq {
-                row.push(ellipsize(m.dead_letter_reason.as_deref().unwrap_or(""), 32));
-            }
-            row.push(body_cell(&m.body));
-            row
-        })
-        .collect();
-    println!("{}", table(&headers, &rows));
-    if messages.is_empty() {
-        eprintln!("(no messages)");
-    }
-    Ok(())
-}
-
 async fn run(cli: Cli) -> anyhow::Result<()> {
-    let session = state::entra_session();
-    let mut st = state::load();
-    let uses_stored_sign_in = match &cli.command {
-        Command::Whoami | Command::Namespaces => true,
-        Command::Ls { .. } | Command::Peek { .. } => {
-            cli.connection_string.is_none() && cli.namespace.is_some()
-        }
-        Command::Login { .. } | Command::Logout => false,
+    let ctx = Ctx::open()?;
+    let sel = Selection {
+        connection_string: cli.connection_string.as_deref(),
+        namespace: cli.namespace.as_deref(),
+        profile: cli.profile.as_deref(),
     };
-    if uses_stored_sign_in {
-        state::prune_stale_sign_in(&session, &mut st, &state::state_path())?;
-    }
     match cli.command {
         Command::Login {
             device_code,
             tenant,
-        } => {
-            let sign_in = if device_code {
-                session
-                    .login_device_code(&tenant, |dc| eprintln!("{}", dc.message))
-                    .await?
-            } else {
-                session
-                    .login_browser(&tenant, |url| {
-                        eprintln!(
-                            "Opening your browser to sign in. If it does not open, visit:\n{url}"
-                        );
-                        let _ = open::that(url);
-                    })
-                    .await?
-            };
-            eprintln!(
-                "Signed in as {} (tenant {}).",
-                sign_in.user_principal, sign_in.tenant_id
-            );
-            if let Some(old) = st.sign_in.take().filter(|old| old.id != sign_in.id)
-                && let Err(e) = session.logout(&old)
-                && !matches!(e, horizon_azure_kit::KitError::NotFound(_))
-            {
-                eprintln!(
-                    "note: could not clear the previous sign-in for {}: {e}",
-                    old.user_principal
-                );
-            }
-            st.sign_in = Some(sign_in);
-            state::save(&st)?;
-        }
-        Command::Logout => {
-            if let Some(sign_in) = st.sign_in.take() {
-                session.logout(&sign_in)?;
-                state::save(&st)?;
-                eprintln!("Signed out {}.", sign_in.user_principal);
-            } else {
-                eprintln!("Not signed in.");
-            }
-        }
-        Command::Whoami => match &st.sign_in {
-            Some(s) => println!("{} (tenant {})", s.user_principal, s.tenant_id),
-            None => println!("Not signed in; {LOGIN_HINT}."),
-        },
-        Command::Namespaces => {
-            let sign_in = st
-                .sign_in
-                .clone()
-                .context(format!("not signed in; {LOGIN_HINT}"))?;
-            let token = session
-                .token_for(&sign_in, None, &AzureCloud::Public.arm_scope())
-                .await?;
-            let arm = ArmClient::new(AzureCloud::Public, token.token);
-            let found = discover_namespaces(&arm).await?;
-            if let Format::Json = cli.format {
-                println!("{}", serde_json::to_string_pretty(&found)?);
-            } else {
-                for s in &found.skipped {
-                    eprintln!(
-                        "warning: skipped subscription {}: {}",
-                        ellipsize(&s.subscription_name, 80),
-                        ellipsize(&s.reason, 200)
-                    );
-                }
-                let rows: Vec<Vec<String>> = found
-                    .namespaces
-                    .iter()
-                    .map(|n| {
-                        vec![
-                            n.name.clone(),
-                            n.host.clone(),
-                            n.tier.clone().unwrap_or_default(),
-                            n.location.clone().unwrap_or_default(),
-                            n.subscription_name.clone(),
-                            if n.local_auth_disabled {
-                                "Entra only".into()
-                            } else {
-                                String::new()
-                            },
-                        ]
-                    })
-                    .collect();
-                println!(
-                    "{}",
-                    table(
-                        &["NAME", "HOST", "TIER", "LOCATION", "SUBSCRIPTION", "AUTH"],
-                        &rows
-                    )
-                );
-            }
-        }
-        Command::Ls { topics } => {
-            let ns = resolve::namespace(
-                cli.connection_string.as_deref(),
-                cli.namespace.as_deref(),
-                &session,
-                &st,
-            )?;
-            let explorer = Explorer::new(ns)?;
-            let queues = explorer.list_queues().await?;
-            if let Format::Json = cli.format {
-                let mut value = serde_json::json!({ "queues": queues });
-                if topics {
-                    let mut list = Vec::new();
-                    for t in explorer.list_topics().await? {
-                        let subs = explorer.list_subscriptions(&t.name).await?;
-                        list.push(serde_json::json!({ "topic": t, "subscriptions": subs }));
-                    }
-                    value["topics"] = serde_json::Value::Array(list);
-                }
-                println!("{}", serde_json::to_string_pretty(&value)?);
-                return Ok(());
-            }
-            let rows: Vec<Vec<String>> = queues
-                .iter()
-                .map(|q| {
-                    vec![
-                        q.name.clone(),
-                        count_cell(q.counts.as_ref(), |c| c.active),
-                        count_cell(q.counts.as_ref(), |c| c.dead_letter),
-                        count_cell(q.counts.as_ref(), |c| c.scheduled),
-                        if q.requires_session {
-                            "yes".into()
-                        } else {
-                            String::new()
-                        },
-                        q.status.clone().unwrap_or_default(),
-                    ]
-                })
-                .collect();
-            println!(
-                "{}",
-                table(
-                    &["QUEUE", "ACTIVE", "DLQ", "SCHEDULED", "SESSIONS", "STATUS"],
-                    &rows
-                )
-            );
-            if topics {
-                let mut rows = Vec::new();
-                for t in explorer.list_topics().await? {
-                    for s in explorer.list_subscriptions(&t.name).await? {
-                        rows.push(vec![
-                            format!("{}/subscriptions/{}", t.name, s.name),
-                            count_cell(s.counts.as_ref(), |c| c.active),
-                            count_cell(s.counts.as_ref(), |c| c.dead_letter),
-                            s.status.clone().unwrap_or_default(),
-                        ]);
-                    }
-                }
-                println!(
-                    "\n{}",
-                    table(&["SUBSCRIPTION", "ACTIVE", "DLQ", "STATUS"], &rows)
-                );
-            }
-        }
+        } => commands::auth::login(&ctx, device_code, &tenant).await,
+        Command::Logout => commands::auth::logout(&ctx).await,
+        Command::Whoami => commands::auth::whoami(&ctx, cli.format).await,
+        Command::Namespaces {
+            tenant,
+            all_tenants,
+        } => commands::auth::namespaces(&ctx, tenant, all_tenants, cli.format).await,
+        Command::Ls { topics } => commands::browse::ls(&ctx, &sel, topics, cli.format).await,
         Command::Peek {
             entity,
             dlq,
@@ -360,27 +170,15 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             top,
             from_seq,
         } => {
-            let ns = resolve::namespace(
-                cli.connection_string.as_deref(),
-                cli.namespace.as_deref(),
-                &session,
-                &st,
-            )?;
-            let explorer = Explorer::new(ns)?;
-            let path = EntityPath::parse(&entity)?;
             let view = match (dlq, transfer_dlq) {
                 (true, _) => PeekView::DeadLetter,
                 (_, true) => PeekView::TransferDeadLetter,
                 _ => PeekView::Active,
             };
-            let page = explorer
-                .peek(&path, view, &PeekOptions::new(top).from_sequence(from_seq))
-                .await?;
-            explorer.close().await;
-            print_messages(&page.messages, cli.format, dlq || transfer_dlq)?;
+            commands::browse::peek(&ctx, &sel, &entity, view, top, from_seq, cli.format).await
         }
+        Command::Profile { cmd } => commands::profile::run(&ctx, cmd, cli.format).await,
     }
-    Ok(())
 }
 
 #[cfg(test)]

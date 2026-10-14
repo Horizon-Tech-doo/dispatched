@@ -274,6 +274,16 @@ impl ProxyConfig {
         ))
     }
 
+    /// `http://host:port` without credentials, as stored in profiles.
+    pub fn without_credentials_url(&self) -> String {
+        let host = if self.host.contains(':') {
+            format!("[{}]", self.host)
+        } else {
+            self.host.clone()
+        };
+        format!("http://{host}:{}", self.port)
+    }
+
     /// URL for reqwest (contains credentials — never log it).
     pub fn url_for_reqwest(&self) -> String {
         use secrecy::ExposeSecret;
@@ -584,5 +594,22 @@ mod tests {
         assert_eq!(p.url_for_reqwest(), "http://u:p@[2001:db8::2]:8080");
         let p = ProxyConfig::parse("http://proxy.corp:3128").unwrap();
         assert_eq!(p.host(), "proxy.corp");
+    }
+
+    #[test]
+    fn without_credentials_url_drops_auth_and_brackets_ipv6() {
+        for (input, expected) in [
+            ("http://u:p@proxy.corp:3128", "http://proxy.corp:3128"),
+            ("http://[::1]:3128", "http://[::1]:3128"),
+            ("http://u:p@[2001:db8::2]:8080", "http://[2001:db8::2]:8080"),
+            ("http://10.0.0.1:80", "http://10.0.0.1:80"),
+        ] {
+            let url = ProxyConfig::parse(input).unwrap().without_credentials_url();
+            assert_eq!(url, expected);
+            assert_eq!(
+                ProxyConfig::parse(&url).unwrap().host(),
+                ProxyConfig::parse(input).unwrap().host()
+            );
+        }
     }
 }
