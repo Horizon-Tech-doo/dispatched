@@ -27,7 +27,7 @@ pub async fn connect_connection_string(
         .explorer
         .write()
         .await
-        .replace(Arc::new(Explorer::new(ns)));
+        .replace(Arc::new(Explorer::new(ns)?));
     if let Some(old) = previous {
         old.close().await;
     }

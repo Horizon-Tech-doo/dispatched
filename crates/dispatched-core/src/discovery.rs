@@ -21,6 +21,8 @@ pub struct DiscoveredNamespace {
     pub subscription_id: String,
     /// Subscription display name.
     pub subscription_name: String,
+    /// Tenant that owns the subscription.
+    pub tenant_id: Option<String>,
     /// Azure region.
     pub location: Option<String>,
     /// `Basic`, `Standard` or `Premium`.
@@ -70,6 +72,7 @@ fn map(sub: &Subscription, raw: RawNamespace) -> DiscoveredNamespace {
         resource_id: raw.id,
         subscription_id: sub.subscription_id.clone(),
         subscription_name: sub.display_name.clone(),
+        tenant_id: sub.tenant_id.clone(),
         location: raw.location,
         tier: raw.sku.and_then(|s| s.tier),
         local_auth_disabled: raw.properties.disable_local_auth.unwrap_or(false),
@@ -199,7 +202,7 @@ mod tests {
     #[tokio::test]
     async fn discovers_namespaces_and_records_forbidden_subscriptions() {
         let mut server = mockito::Server::new_async().await;
-        let _subs = subs_mock(&mut server, r#"{"value":[{"subscriptionId":"s1","displayName":"Prod"},{"subscriptionId":"s2","displayName":"Locked"}]}"#).await;
+        let _subs = subs_mock(&mut server, r#"{"value":[{"subscriptionId":"s1","displayName":"Prod","tenantId":"t1"},{"subscriptionId":"s2","displayName":"Locked"}]}"#).await;
         let _ns = ns_mock(&mut server, "s1", 200, NS_BODY, 1).await;
         let _denied = ns_mock(&mut server, "s2", 403, "AuthorizationFailed", 1).await;
         let found = discover_namespaces(&arm(&server)).await.unwrap();
@@ -209,6 +212,7 @@ mod tests {
         assert_eq!(ns.tier.as_deref(), Some("Premium"));
         assert!(ns.local_auth_disabled);
         assert_eq!(ns.subscription_name, "Prod");
+        assert_eq!(ns.tenant_id.as_deref(), Some("t1"));
         assert_eq!(found.skipped.len(), 1);
         assert_eq!(found.skipped[0].subscription_id, "s2");
         assert_eq!(found.skipped[0].subscription_name, "Locked");

@@ -10,19 +10,7 @@ pub struct CommandError {
 
 impl From<Error> for CommandError {
     fn from(e: Error) -> Self {
-        let kind = match &e {
-            Error::Auth(_) => "auth",
-            Error::NotSignedIn(_) => "not_signed_in",
-            Error::Forbidden { .. } => "forbidden",
-            Error::NotFound(_) => "not_found",
-            Error::Throttled { .. } => "throttled",
-            Error::Timeout(_) => "timeout",
-            Error::Cancelled => "cancelled",
-            Error::Unsupported { .. } => "unsupported",
-            Error::Invalid(_) => "invalid",
-            Error::Network(_) => "network",
-            _ => "protocol",
-        };
+        let kind = dispatched_core::diagnostics::error_kind(&e);
         Self {
             kind,
             message: e.to_string(),
@@ -43,5 +31,14 @@ mod tests {
         .into();
         assert_eq!(e.kind, "forbidden");
         assert!(e.message.contains("needs Listen"));
+    }
+
+    #[test]
+    fn io_and_protocol_have_their_own_kinds() {
+        assert_eq!(CommandError::from(Error::Io("disk".into())).kind, "io");
+        assert_eq!(
+            CommandError::from(Error::Protocol("x".into())).kind,
+            "protocol"
+        );
     }
 }

@@ -12,5 +12,5 @@
 # environment; Azure SQL Edge reads the same variables.
 services:
   mssql:
-    image: mcr.microsoft.com/azure-sql-edge:latest
+    image: mcr.microsoft.com/azure-sql-edge:1.0.7
     platform: linux/arm64

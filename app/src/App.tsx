@@ -3,6 +3,13 @@
 import { useState } from "react";
 import * as api from "./api";
 
+// "?" unknown, "~N" counted by peeking, "~N+" when that count hit its cap.
+function countCell(counts: api.EntityCounts | null, key: "active" | "dead_letter"): string {
+  if (!counts) return "?";
+  const n = counts[key];
+  return counts.truncated ? `~${n}+` : counts.approximate ? `~${n}` : String(n);
+}
+
 export default function App() {
   const [connectionString, setConnectionString] = useState("");
   const [info, setInfo] = useState<api.ConnectionInfo | null>(null);
@@ -75,8 +82,8 @@ export default function App() {
             {queues.map((q) => (
               <tr key={q.name}>
                 <td>{q.name}</td>
-                <td>{q.counts?.active ?? "?"}</td>
-                <td>{q.counts?.dead_letter ?? "?"}</td>
+                <td>{countCell(q.counts, "active")}</td>
+                <td>{countCell(q.counts, "dead_letter")}</td>
                 <td>
                   <button onClick={() => open(q.name, "active")} disabled={busy}>Peek</button>{" "}
                   <button onClick={() => open(q.name, "dead-letter")} disabled={busy}>Peek DLQ</button>

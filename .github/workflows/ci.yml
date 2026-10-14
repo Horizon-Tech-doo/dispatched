@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@v4
         with: { path: dispatched }
       - uses: actions/checkout@v4
-        with: { repository: Horizon-Tech-doo/horizon-azure-kit, ref: v0.1.0, path: horizon-azure-kit }
+        with: { repository: Horizon-Tech-doo/horizon-azure-kit, ref: v0.2.0, path: horizon-azure-kit }
       - uses: dtolnay/rust-toolchain@stable
         with: { components: "rustfmt, clippy" }
       - uses: Swatinem/rust-cache@v2
@@ -35,7 +35,7 @@ jobs:
       - uses: actions/checkout@v4
         with: { path: dispatched }
       - uses: actions/checkout@v4
-        with: { repository: Horizon-Tech-doo/horizon-azure-kit, ref: v0.1.0, path: horizon-azure-kit }
+        with: { repository: Horizon-Tech-doo/horizon-azure-kit, ref: v0.2.0, path: horizon-azure-kit }
       - run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
@@ -55,26 +55,26 @@ jobs:
       - uses: actions/checkout@v4
         with: { path: dispatched }
       - uses: actions/checkout@v4
-        with: { repository: Horizon-Tech-doo/horizon-azure-kit, ref: v0.1.0, path: horizon-azure-kit }
+        with: { repository: Horizon-Tech-doo/horizon-azure-kit, ref: v0.2.0, path: horizon-azure-kit }
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with: { workspaces: "dispatched -> target" }
       # ubuntu runners are x86_64, so emulator.sh uses only the default compose file.
       - run: testing/emulator/emulator.sh up
-      - name: Run the M0 gate test
+      - name: Run the emulator gate tests
         shell: bash
         run: |
           set -o pipefail
-          DISPATCHED_EMULATOR=1 cargo test -p dispatched-core --features test-support --test emulator_m0 -- --nocapture 2>&1 | tee emulator-gate.log
-          # The gate test prints "skipped: ..." and passes when the emulator is
+          DISPATCHED_EMULATOR=1 cargo test -p dispatched-core --features test-support --test emulator_m0 --test emulator_m1 -- --nocapture 2>&1 | tee emulator-gate.log
+          # The gate tests print "skipped: ..." and pass when the emulator is
           # not enabled; that must never count as a green gate.
           if grep -q 'skipped:' emulator-gate.log; then
-            echo "::error::Emulator gate test skipped itself; the gate did not run."
+            echo "::error::An emulator gate test skipped itself; the gate did not run."
             exit 1
           fi
-          # ...and the test must positively report that it ran and passed.
-          if ! grep -q 'test result: ok. 1 passed' emulator-gate.log; then
-            echo "::error::Emulator gate test did not report 'test result: ok. 1 passed'."
+          # ...and both tests must positively report that they ran and passed.
+          if [ "$(grep -c 'test result: ok. 1 passed' emulator-gate.log)" -ne 2 ]; then
+            echo "::error::Both emulator gate tests must report 'test result: ok. 1 passed'."
             exit 1
           fi
       - if: always()

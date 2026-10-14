@@ -67,6 +67,7 @@ pub trait TokenSource: Send + Sync {
 pub struct SasKeySource {
     key_name: String,
     key: SecretString,
+    ttl: Duration,
 }
 
 impl SasKeySource {
@@ -75,7 +76,14 @@ impl SasKeySource {
         Self {
             key_name: key_name.into(),
             key,
+            ttl: SAS_TTL,
         }
+    }
+
+    /// Override the token lifetime (tests and short-lived tokens).
+    pub fn with_ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = ttl;
+        self
     }
 }
 
@@ -86,7 +94,7 @@ impl TokenSource for SasKeySource {
             audience,
             &self.key_name,
             self.key.expose_secret(),
-            SAS_TTL,
+            self.ttl,
         );
         Ok(ServiceBusToken {
             token: SecretString::from(token),
@@ -211,6 +219,15 @@ mod tests {
                 .starts_with("SharedAccessSignature sr=amqp%3a%2f%2flocalhost%2forders&")
         );
         assert_eq!(src.describe(), "SAS key RootManageSharedAccessKey");
+    }
+
+    #[tokio::test]
+    async fn sas_key_source_honours_ttl_override() {
+        let src = SasKeySource::new("k", SecretString::from("SAS_KEY_VALUE"))
+            .with_ttl(Duration::from_secs(60));
+        let t = src.token("amqp://localhost/orders").await.unwrap();
+        let left = (t.expires_on - OffsetDateTime::now_utc()).whole_seconds();
+        assert!((55..=65).contains(&left), "expires in {left}s");
     }
 
     #[tokio::test]

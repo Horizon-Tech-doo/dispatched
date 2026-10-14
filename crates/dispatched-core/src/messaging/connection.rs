@@ -2,21 +2,25 @@
 //! plus cached management links per entity address.
 
 use super::management::{ManagementLink, SETUP_TIMEOUT, map_put_token_error};
+use super::tokens_ledger::{LinkLru, TokenLedger, must_reattach};
 use crate::namespace::Namespace;
 use crate::{Error, Result};
+use fe2o3_amqp::Session;
 use fe2o3_amqp::connection::ConnectionHandle;
-use fe2o3_amqp::sasl_profile::SaslProfile;
 use fe2o3_amqp::session::SessionHandle;
 use fe2o3_amqp::types::primitives::Timestamp;
-use fe2o3_amqp::{Connection, Session};
 use fe2o3_amqp_cbs::client::CbsClient;
 use fe2o3_amqp_cbs::token::CbsToken;
 use secrecy::ExposeSecret;
 use std::collections::HashMap;
 use std::time::Duration;
+use time::OffsetDateTime;
 
 /// Upper bound for the whole close sequence; an unresponsive peer must not hang callers.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Management links kept per connection; the least recently used is closed beyond this.
+const MAX_MANAGEMENT_LINKS: usize = 64;
 
 /// An open AMQP connection to a Service Bus namespace (or the emulator).
 pub struct ServiceBusConnection {
@@ -25,28 +29,19 @@ pub struct ServiceBusConnection {
     session: SessionHandle<()>,
     cbs: CbsClient,
     management: HashMap<String, ManagementLink>,
+    ledger: TokenLedger,
+    lru: LinkLru,
 }
 
 impl ServiceBusConnection {
-    /// Connect (TLS for the cloud, plain TCP for the emulator), begin a
+    /// Connect (TLS or WebSockets for the cloud, plain TCP for the emulator), begin a
     /// session, and attach the CBS node.
     pub async fn open(ns: &Namespace) -> Result<Self> {
-        let url = ns.amqp_url();
-        let builder = Connection::builder()
-            .container_id(format!("dispatched-{}", uuid::Uuid::new_v4().simple()))
-            .hostname(Some(ns.host()))
-            .sasl_profile(SaslProfile::Anonymous)
-            .max_frame_size(65_536u32)
-            .idle_time_out(60_000u32);
-        let builder = if ns.is_emulator() {
-            builder
-        } else {
-            builder.alt_tls_establishment(true)
-        };
-        let mut connection = tokio::time::timeout(SETUP_TIMEOUT, builder.open(url.as_str()))
-            .await
-            .map_err(|_| Error::Timeout(format!("connecting to {url} timed out")))?
-            .map_err(|e| Error::Network(format!("cannot connect to {url}: {e}")))?;
+        let mut connection = super::transport::open_connection(
+            ns,
+            format!("dispatched-{}", uuid::Uuid::new_v4().simple()),
+        )
+        .await?;
         let mut session = tokio::time::timeout(SETUP_TIMEOUT, Session::begin(&mut connection))
             .await
             .map_err(|_| Error::Timeout("beginning the AMQP session timed out".into()))?
@@ -61,6 +56,8 @@ impl ServiceBusConnection {
             session,
             cbs,
             management: HashMap::new(),
+            ledger: TokenLedger::default(),
+            lru: LinkLru::new(MAX_MANAGEMENT_LINKS),
         })
     }
 
@@ -68,6 +65,7 @@ impl ServiceBusConnection {
     pub async fn authorize(&mut self, address: &str) -> Result<()> {
         let audience = self.ns.amqp_audience(address);
         let token = self.ns.tokens().token(&audience).await?;
+        let expires_on = token.expires_on;
         let cbs_token = CbsToken::new(
             token.token.expose_secret().to_string(),
             token.kind.cbs_type(),
@@ -79,16 +77,49 @@ impl ServiceBusConnection {
         )
         .await
         .map_err(|_| Error::Timeout(format!("putting the token for {audience} timed out")))?
-        .map_err(|e| map_put_token_error(&audience, address, e))
+        .map_err(|e| map_put_token_error(&audience, address, e))?;
+        self.ledger.record(&audience, expires_on);
+        Ok(())
     }
 
-    /// The management link for `address`, attached and authorized on first use.
-    pub async fn management(&mut self, address: &str) -> Result<&mut ManagementLink> {
-        if !self.management.contains_key(address) {
+    /// Put a token for `address` unless a fresh one is already in place.
+    pub async fn ensure_authorized(&mut self, address: &str) -> Result<()> {
+        let audience = self.ns.amqp_audience(address);
+        if self.ledger.needs_put(&audience, OffsetDateTime::now_utc()) {
             self.authorize(address).await?;
-            self.authorize(&format!("{address}/$management")).await?;
+        }
+        Ok(())
+    }
+
+    /// The management link for `address`, attached on first use. Tokens are
+    /// re-put when missing or near expiry; a cached link whose token lapsed is
+    /// closed and re-attached (the broker closes links when their token
+    /// expires). At most 64 links are kept (LRU).
+    pub async fn management(&mut self, address: &str) -> Result<&mut ManagementLink> {
+        let mgmt_address = format!("{address}/$management");
+        let audiences = [
+            self.ns.amqp_audience(address),
+            self.ns.amqp_audience(&mgmt_address),
+        ];
+        if self.management.contains_key(address)
+            && must_reattach(&self.ledger, &audiences, OffsetDateTime::now_utc())
+            && let Some(stale) = self.management.remove(address)
+        {
+            close_link(stale).await;
+        }
+        self.ensure_authorized(address).await?;
+        self.ensure_authorized(&mgmt_address).await?;
+        if !self.management.contains_key(address) {
             let link = ManagementLink::attach(&mut self.session, address).await?;
             self.management.insert(address.to_string(), link);
+        }
+        if let Some(evicted) = self.lru.touch(address)
+            && let Some(old) = self.management.remove(&evicted)
+        {
+            close_link(old).await;
+            self.ledger.forget(&self.ns.amqp_audience(&evicted));
+            self.ledger
+                .forget(&self.ns.amqp_audience(&format!("{evicted}/$management")));
         }
         Ok(self.management.get_mut(address).expect("inserted above"))
     }
@@ -122,5 +153,15 @@ impl ServiceBusConnection {
                 Ok(())
             }
         }
+    }
+}
+
+/// Close a link, bounded so an unresponsive peer cannot stall the caller.
+async fn close_link(link: ManagementLink) {
+    if tokio::time::timeout(CLOSE_TIMEOUT, link.close())
+        .await
+        .is_err()
+    {
+        tracing::warn!("closing a management link timed out; dropped it");
     }
 }

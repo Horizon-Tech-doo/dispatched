@@ -2,7 +2,9 @@
 //! Run: `testing/emulator/emulator.sh up && DISPATCHED_EMULATOR=1 cargo test -p dispatched-core --features test-support --test emulator_m0 -- --nocapture`
 
 use dispatched_core::messaging::{ServiceBusConnection, testing};
-use dispatched_core::{ConnectionString, EntityPath, Explorer, Namespace, PeekedMessage, SubQueue};
+use dispatched_core::{
+    ConnectionString, EntityPath, Explorer, Namespace, PeekOptions, PeekView, PeekedMessage,
+};
 use std::time::Duration;
 
 const EMULATOR: &str = "Endpoint=sb://localhost;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;";
@@ -68,7 +70,7 @@ async fn m0_gate_flow_against_emulator() {
     );
     conn.close().await.unwrap();
 
-    let explorer = Explorer::new(ns);
+    let explorer = Explorer::new(ns).unwrap();
 
     // 1. List queues over ATOM (HTTP :5300).
     let queues = explorer
@@ -88,9 +90,14 @@ async fn m0_gate_flow_against_emulator() {
 
     // 2. Peek active messages over AMQP $management.
     let active = explorer
-        .peek(&EntityPath::queue("orders"), SubQueue::Active, 0, 100)
+        .peek(
+            &EntityPath::queue("orders"),
+            PeekView::Active,
+            &PeekOptions::new(100),
+        )
         .await
-        .unwrap();
+        .unwrap()
+        .messages;
     let ours: Vec<_> = active
         .iter()
         .filter(|m| run_of(m) == Some(run.as_str()))
@@ -102,9 +109,14 @@ async fn m0_gate_flow_against_emulator() {
 
     // 3. Peek the dead-letter queue and see the reason.
     let dead = explorer
-        .peek(&EntityPath::queue("orders"), SubQueue::DeadLetter, 0, 100)
+        .peek(
+            &EntityPath::queue("orders"),
+            PeekView::DeadLetter,
+            &PeekOptions::new(100),
+        )
         .await
-        .unwrap();
+        .unwrap()
+        .messages;
     let dead = dead
         .iter()
         .find(|m| run_of(m) == Some(run.as_str()))
@@ -119,9 +131,10 @@ async fn m0_gate_flow_against_emulator() {
     let sub = EntityPath::subscription("events", "all");
     assert!(
         explorer
-            .peek(&sub, SubQueue::Active, 0, 10)
+            .peek(&sub, PeekView::Active, &PeekOptions::new(10))
             .await
             .unwrap()
+            .messages
             .is_empty()
     );
     let last = ours[1].sequence_number;
@@ -129,12 +142,12 @@ async fn m0_gate_flow_against_emulator() {
         explorer
             .peek(
                 &EntityPath::queue("orders"),
-                SubQueue::Active,
-                last + 10_000,
-                10
+                PeekView::Active,
+                &PeekOptions::new(10).from_sequence(last + 10_000)
             )
             .await
             .unwrap()
+            .messages
             .is_empty()
     );
 

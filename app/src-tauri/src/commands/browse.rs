@@ -1,6 +1,6 @@
 use crate::error::CommandError;
 use crate::state::AppState;
-use dispatched_core::{EntityPath, PeekedMessage, QueueInfo, SubQueue};
+use dispatched_core::{EntityPath, PeekOptions, PeekView, PeekedMessage, QueueInfo, SubQueue};
 use tauri::State;
 
 #[tauri::command]
@@ -17,9 +17,12 @@ pub async fn peek(
     max: u32,
 ) -> Result<Vec<PeekedMessage>, CommandError> {
     let path = EntityPath::parse(&entity)?;
-    Ok(state
-        .explorer()
-        .await?
-        .peek(&path, sub_queue, from_sequence, max.min(500))
-        .await?)
+    let view = match sub_queue {
+        SubQueue::Active => PeekView::Active,
+        SubQueue::DeadLetter => PeekView::DeadLetter,
+        SubQueue::TransferDeadLetter => PeekView::TransferDeadLetter,
+    };
+    let opts = PeekOptions::new(max.min(500)).from_sequence(from_sequence);
+    let page = state.explorer().await?.peek(&path, view, &opts).await?;
+    Ok(page.messages)
 }

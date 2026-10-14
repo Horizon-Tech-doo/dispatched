@@ -54,6 +54,9 @@ pub enum Error {
     /// Unexpected protocol response.
     #[error("protocol error: {0}")]
     Protocol(String),
+    /// Local input/output failure (writing an export file, ...).
+    #[error("{0}")]
+    Io(String),
 }
 
 impl From<KitError> for Error {

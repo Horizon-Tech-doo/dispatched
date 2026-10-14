@@ -4,7 +4,7 @@ export type SubQueue = "active" | "dead-letter" | "transfer-dead-letter";
 
 export interface CommandError { kind: string; message: string }
 export interface ConnectionInfo { host: string; emulator: boolean; auth: string }
-export interface EntityCounts { active: number; dead_letter: number; scheduled: number; transfer: number; transfer_dead_letter: number }
+export interface EntityCounts { active: number; dead_letter: number; scheduled: number; transfer: number; transfer_dead_letter: number; approximate: boolean; truncated: boolean }
 export interface QueueInfo { name: string; status: string | null; counts: EntityCounts | null; requires_session: boolean }
 export type MessageBody =
   | { kind: "binary"; value: string }
@@ -13,6 +13,7 @@ export type MessageBody =
   | { kind: "empty" };
 export interface PeekedMessage {
   sequence_number: number;
+  state: "active" | "deferred" | "scheduled";
   message_id: string | null;
   subject: string | null;
   enqueued_time: string | null;
