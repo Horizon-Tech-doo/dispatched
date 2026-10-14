@@ -53,17 +53,27 @@ impl Explorer {
     ) -> Result<PeekPage> {
         let address = entity.address(view.sub_queue());
         let mut guard = self.amqp.lock().await;
-        if guard.is_none() {
-            *guard = Some(ServiceBusConnection::open(&self.ns).await?);
+        let mut attempt = 0;
+        loop {
+            if guard.is_none() {
+                *guard = Some(ServiceBusConnection::open(&self.ns).await?);
+            }
+            let conn = guard.as_mut().expect("opened above");
+            let result = scan_messages(conn, &address, view, opts).await;
+            match result {
+                Err(e) if retry_after(&e, attempt) || breaks_connection(&e) => {
+                    if let Some(conn) = guard.take() {
+                        let _ = conn.close().await;
+                    }
+                    if retry_after(&e, attempt) {
+                        attempt += 1;
+                        continue;
+                    }
+                    return Err(e);
+                }
+                other => return other,
+            }
         }
-        let conn = guard.as_mut().expect("opened above");
-        let result = scan_messages(conn, &address, view, opts).await;
-        if result.as_ref().is_err_and(breaks_connection)
-            && let Some(conn) = guard.take()
-        {
-            let _ = conn.close().await;
-        }
-        result
     }
 
     /// Close the AMQP connection, if open.
@@ -72,6 +82,13 @@ impl Explorer {
             let _ = conn.close().await;
         }
     }
+}
+
+/// Whether a failed operation should be retried on a fresh connection.
+/// An `Auth` error on the first attempt usually means a token expired
+/// mid-session; a new connection re-puts fresh tokens.
+pub fn retry_after(err: &Error, attempt: u32) -> bool {
+    attempt == 0 && matches!(err, Error::Auth(_))
 }
 
 /// Only transport-level failures poison the cached connection; `Forbidden`,
@@ -98,5 +115,19 @@ mod tests {
         }));
         assert!(!breaks_connection(&Error::NotFound("q".into())));
         assert!(!breaks_connection(&Error::Auth("x".into())));
+    }
+
+    #[test]
+    fn explorer_retries_once_after_auth_error() {
+        assert!(retry_after(&Error::Auth("expired".into()), 0));
+        assert!(!retry_after(&Error::Auth("expired".into()), 1));
+        assert!(!retry_after(&Error::Network("x".into()), 0));
+        assert!(!retry_after(
+            &Error::Forbidden {
+                needed: None,
+                detail: "x".into()
+            },
+            0
+        ));
     }
 }

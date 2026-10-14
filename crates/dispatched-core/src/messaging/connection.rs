@@ -2,6 +2,7 @@
 //! plus cached management links per entity address.
 
 use super::management::{ManagementLink, SETUP_TIMEOUT, map_put_token_error};
+use super::tokens_ledger::{LinkLru, TokenLedger};
 use crate::namespace::Namespace;
 use crate::{Error, Result};
 use fe2o3_amqp::connection::ConnectionHandle;
@@ -14,9 +15,13 @@ use fe2o3_amqp_cbs::token::CbsToken;
 use secrecy::ExposeSecret;
 use std::collections::HashMap;
 use std::time::Duration;
+use time::OffsetDateTime;
 
 /// Upper bound for the whole close sequence; an unresponsive peer must not hang callers.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Management links kept per connection; the least recently used is closed beyond this.
+const MAX_MANAGEMENT_LINKS: usize = 64;
 
 /// An open AMQP connection to a Service Bus namespace (or the emulator).
 pub struct ServiceBusConnection {
@@ -25,6 +30,8 @@ pub struct ServiceBusConnection {
     session: SessionHandle<()>,
     cbs: CbsClient,
     management: HashMap<String, ManagementLink>,
+    ledger: TokenLedger,
+    lru: LinkLru,
 }
 
 impl ServiceBusConnection {
@@ -61,6 +68,8 @@ impl ServiceBusConnection {
             session,
             cbs,
             management: HashMap::new(),
+            ledger: TokenLedger::default(),
+            lru: LinkLru::new(MAX_MANAGEMENT_LINKS),
         })
     }
 
@@ -68,6 +77,7 @@ impl ServiceBusConnection {
     pub async fn authorize(&mut self, address: &str) -> Result<()> {
         let audience = self.ns.amqp_audience(address);
         let token = self.ns.tokens().token(&audience).await?;
+        let expires_on = token.expires_on;
         let cbs_token = CbsToken::new(
             token.token.expose_secret().to_string(),
             token.kind.cbs_type(),
@@ -79,16 +89,37 @@ impl ServiceBusConnection {
         )
         .await
         .map_err(|_| Error::Timeout(format!("putting the token for {audience} timed out")))?
-        .map_err(|e| map_put_token_error(&audience, address, e))
+        .map_err(|e| map_put_token_error(&audience, address, e))?;
+        self.ledger.record(&audience, expires_on);
+        Ok(())
     }
 
-    /// The management link for `address`, attached and authorized on first use.
-    pub async fn management(&mut self, address: &str) -> Result<&mut ManagementLink> {
-        if !self.management.contains_key(address) {
+    /// Put a token for `address` unless a fresh one is already in place.
+    pub async fn ensure_authorized(&mut self, address: &str) -> Result<()> {
+        let audience = self.ns.amqp_audience(address);
+        if self.ledger.needs_put(&audience, OffsetDateTime::now_utc()) {
             self.authorize(address).await?;
-            self.authorize(&format!("{address}/$management")).await?;
+        }
+        Ok(())
+    }
+
+    /// The management link for `address`, attached on first use. Tokens are
+    /// re-put when missing or near expiry; at most 64 links are kept (LRU).
+    pub async fn management(&mut self, address: &str) -> Result<&mut ManagementLink> {
+        self.ensure_authorized(address).await?;
+        self.ensure_authorized(&format!("{address}/$management"))
+            .await?;
+        if !self.management.contains_key(address) {
             let link = ManagementLink::attach(&mut self.session, address).await?;
             self.management.insert(address.to_string(), link);
+        }
+        if let Some(evicted) = self.lru.touch(address)
+            && let Some(old) = self.management.remove(&evicted)
+        {
+            old.close().await;
+            self.ledger.forget(&self.ns.amqp_audience(&evicted));
+            self.ledger
+                .forget(&self.ns.amqp_audience(&format!("{evicted}/$management")));
         }
         Ok(self.management.get_mut(address).expect("inserted above"))
     }
