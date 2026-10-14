@@ -7,10 +7,10 @@ permissions:
   contents: write
 jobs:
   desktop:
-    uses: Horizon-Tech-doo/horizon-azure-kit/.github/workflows/tauri-release.yml@v0.1.0
+    uses: Horizon-Tech-doo/horizon-azure-kit/.github/workflows/tauri-release.yml@v0.2.0
     with:
       app-name: Dispatched
       project-path: app
       cargo-workspace: "."
-      kit-ref: v0.1.0
+      kit-ref: v0.2.0
     secrets: inherit
