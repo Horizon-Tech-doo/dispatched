@@ -56,6 +56,17 @@ impl ProfileStore {
         db_err(&self.path, e)
     }
 
+    /// Map an error from reading profile rows: a damaged profile says how to
+    /// remove it; anything else is a database-level failure.
+    fn row_err(&self, e: rusqlite::Error) -> Error {
+        if let rusqlite::Error::FromSqlConversionFailure(_, _, inner) = &e
+            && let Some(c) = inner.downcast_ref::<CorruptProfile>()
+        {
+            return Error::Io(c.to_string());
+        }
+        self.err(e)
+    }
+
     fn migrate(&self) -> Result<()> {
         let mut conn = self.conn.lock().expect("profile db poisoned");
         // Take the write lock first and read the version under it, so a second
@@ -104,7 +115,7 @@ impl ProfileStore {
             .query_map([], row_to_profile)
             .map_err(|e| self.err(e))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|e| self.err(e))
+            .map_err(|e| self.row_err(e))
     }
 
     /// Profile by name (case-insensitive).
@@ -120,7 +131,7 @@ impl ProfileStore {
             row_to_profile,
         )
         .optional()
-        .map_err(|e| self.err(e))
+        .map_err(|e| self.row_err(e))
     }
 
     /// Insert a new profile; the name must be unused (case-insensitive).
@@ -142,7 +153,7 @@ impl ProfileStore {
             {
                 Err(Error::Invalid(format!(
                     "a profile named `{}` already exists",
-                    p.name
+                    name
                 )))
             }
             Err(e) => Err(self.err(e)),
@@ -169,7 +180,7 @@ impl ProfileStore {
             {
                 Err(Error::Invalid(format!(
                     "a profile named `{}` already exists",
-                    p.name
+                    name
                 )))
             }
             Err(e) => Err(self.err(e)),
@@ -203,25 +214,28 @@ impl ProfileStore {
 
     /// Delete a profile and its secret. Returns whether it existed.
     pub fn delete(&self, name: &str, secrets: &dyn CredentialStore) -> Result<bool> {
-        let Some(p) = self.get(name)? else {
-            return Ok(false);
-        };
-        secrets.delete(&secret_key(&p.id))?;
-        let conn = self.conn.lock().expect("profile db poisoned");
-        conn.execute("DELETE FROM profiles WHERE id = ?1", params![p.id])
-            .map_err(|e| self.err(e))?;
-        let default: Option<String> = conn
-            .query_row(
-                "SELECT value FROM settings WHERE key = 'default_profile'",
-                [],
+        let name = name.trim();
+        // Only the id is read, so a profile with damaged settings can still be removed.
+        let id: Option<String> = {
+            let conn = self.conn.lock().expect("profile db poisoned");
+            conn.query_row(
+                "SELECT id FROM profiles WHERE name = ?1 COLLATE NOCASE",
+                params![name],
                 |r| r.get(0),
             )
             .optional()
+            .map_err(|e| self.err(e))?
+        };
+        let Some(id) = id else { return Ok(false) };
+        secrets.delete(&secret_key(&id))?;
+        let conn = self.conn.lock().expect("profile db poisoned");
+        conn.execute("DELETE FROM profiles WHERE id = ?1", params![id])
             .map_err(|e| self.err(e))?;
-        if default.as_deref() == Some(p.id.as_str()) {
-            conn.execute("DELETE FROM settings WHERE key = 'default_profile'", [])
-                .map_err(|e| self.err(e))?;
-        }
+        conn.execute(
+            "DELETE FROM settings WHERE key = 'default_profile' AND value = ?1",
+            params![id],
+        )
+        .map_err(|e| self.err(e))?;
         Ok(true)
     }
 
@@ -274,7 +288,7 @@ impl ProfileStore {
             row_to_profile,
         )
         .optional()
-        .map_err(|e| self.err(e))
+        .map_err(|e| self.row_err(e))
     }
 
     /// Remember a sign-in (no secrets).
@@ -373,23 +387,37 @@ impl ProfileStore {
 
 const SELECT_PROFILE: &str = "SELECT id, name, host, auth, emulator, production, color, transport, proxy, pinned_entities FROM profiles";
 
+/// A profile row whose stored settings cannot be understood.
+#[derive(Debug)]
+struct CorruptProfile(String);
+
+impl std::fmt::Display for CorruptProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CorruptProfile {}
+
 fn row_to_profile(r: &rusqlite::Row<'_>) -> rusqlite::Result<Profile> {
     let id: String = r.get(0)?;
     let name: String = r.get(1)?;
-    let bad = |col: usize, what: &str, e: &dyn std::fmt::Display| {
+    let bad = |col: usize, what: &str| {
         rusqlite::Error::FromSqlConversionFailure(
             col,
             rusqlite::types::Type::Text,
-            format!("profile `{name}` ({id}) has an invalid {what}: {e}").into(),
+            Box::new(CorruptProfile(format!(
+                "profile `{name}` has an invalid saved {what}; remove it with `dispatched profile remove {name}` and add it again"
+            ))),
         )
     };
     let auth_text: String = r.get(3)?;
     let transport_text: String = r.get(7)?;
     let pins_text: String = r.get(9)?;
-    let auth = serde_json::from_str(&auth_text).map_err(|e| bad(3, "auth setting", &e))?;
-    let transport = Transport::parse(&transport_text).map_err(|e| bad(7, "transport", &e))?;
+    let auth = serde_json::from_str(&auth_text).map_err(|_| bad(3, "sign-in method"))?;
+    let transport = Transport::parse(&transport_text).map_err(|_| bad(7, "transport"))?;
     let pinned_entities =
-        serde_json::from_str(&pins_text).map_err(|e| bad(9, "pinned-entities list", &e))?;
+        serde_json::from_str(&pins_text).map_err(|_| bad(9, "pinned-entities list"))?;
     Ok(Profile {
         host: r.get(2)?,
         auth,
@@ -483,6 +511,10 @@ mod tests {
             .unwrap_err();
         assert!(e.to_string().contains("already exists"), "{e}");
         assert_eq!(store.get("PROD").unwrap().unwrap().name, "Prod");
+        let e = store
+            .add_connection_string("  prod ", CS, &secrets, false)
+            .unwrap_err();
+        assert!(e.to_string().contains("named `prod` already"), "{e}");
     }
 
     #[test]
@@ -723,7 +755,7 @@ mod tests {
     #[test]
     fn corrupt_rows_name_the_profile() {
         for (column, value, what) in [
-            ("auth", "{nope", "auth"),
+            ("auth", "{nope", "sign-in"),
             ("transport", "carrier-pigeon", "transport"),
             ("pinned_entities", "[1,", "pinned"),
         ] {
@@ -745,7 +777,8 @@ mod tests {
                 assert!(
                     e.contains("profile `dev`")
                         && e.contains(what)
-                        && e.contains("delete the file"),
+                        && e.contains("dispatched profile remove dev")
+                        && !e.contains("delete the file"),
                     "{e}"
                 );
             }
@@ -773,5 +806,35 @@ mod tests {
         assert_eq!(store.get("renamed").unwrap().unwrap().id, p.id);
         p.name = "   ".into();
         assert!(matches!(store.update(&p).unwrap_err(), Error::Invalid(_)));
+    }
+
+    #[test]
+    fn corrupt_profile_can_still_be_removed() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        let secrets = MemoryStore::new();
+        let dev = store
+            .add_connection_string("dev", CS, &secrets, false)
+            .unwrap();
+        let other = store
+            .add_connection_string("other", CS, &secrets, false)
+            .unwrap();
+        store.set_default(Some("dev")).unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE profiles SET transport = 'carrier-pigeon', auth = '{nope' WHERE name = 'dev'",
+                [],
+            )
+            .unwrap();
+        assert!(store.list().is_err());
+        assert!(store.delete(" DEV ", &secrets).unwrap());
+        assert!(secrets.get(&secret_key(&dev.id)).unwrap().is_none());
+        assert!(secrets.get(&secret_key(&other.id)).unwrap().is_some());
+        let left = store.list().unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].name, "other");
+        assert!(store.default_profile().unwrap().is_none());
     }
 }
