@@ -14,6 +14,7 @@ pub mod filter;
 pub mod messaging;
 pub mod mgmt;
 pub mod namespace;
+pub mod profiles;
 pub mod tokens;
 
 pub use connstr::ConnectionString;

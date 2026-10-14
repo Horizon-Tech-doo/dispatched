@@ -25,6 +25,7 @@ percent-encoding = { workspace = true }
 quick-xml = { workspace = true }
 regex = { workspace = true }
 reqwest = { workspace = true }
+rusqlite = { workspace = true }
 secrecy = { workspace = true }
 serde = { workspace = true }
 serde_amqp = { workspace = true }
@@ -41,6 +42,7 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 mockito = { workspace = true }
+tempfile = { workspace = true }
 uuid = { workspace = true }
 serde_bytes = "0.11"
 tokio = { version = "1", features = ["full"] }

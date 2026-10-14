@@ -31,6 +31,7 @@ open = "5"
 percent-encoding = "2"
 quick-xml = "0.36"
 regex = "1"
+rusqlite = { version = "0.40", features = ["bundled"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "charset", "system-proxy", "json", "form", "query"] }
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
@@ -39,6 +40,7 @@ serde_json = "1"
 serde_json_path = "0.7"
 thiserror = "2"
 time = { version = "0.3", features = ["serde", "serde-well-known", "formatting"] }
+tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
 tracing = "0.1"
 url = "2"
