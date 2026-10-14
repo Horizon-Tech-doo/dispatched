@@ -697,9 +697,18 @@ fn exists_message(path: &str) -> String {
     format!("{path} exists; pass --force to overwrite it, or choose another --out")
 }
 
+/// An existing target that is not a regular file (a device such as
+/// `/dev/null` or `/dev/stdout`, a FIFO): it is written to directly, and
+/// "overwrite" does not apply to it.
+fn is_special_target(path: &std::path::Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| !m.is_file() && !m.is_dir())
+}
+
 /// Fail early (before any network work) when `path` exists and `force` is off.
+/// Devices and pipes are not "existing files" and never need `--force`.
 pub fn check_output(path: &str, force: bool) -> anyhow::Result<()> {
-    if path != "-" && !force && std::path::Path::new(path).exists() {
+    let p = std::path::Path::new(path);
+    if path != "-" && !force && p.exists() && !is_special_target(p) {
         anyhow::bail!(exists_message(path));
     }
     Ok(())
@@ -736,13 +745,23 @@ fn temp_path(path: &std::path::Path) -> std::path::PathBuf {
 /// (atomic; fails with `AlreadyExists`), and the temp file is then removed;
 /// where hard links are unsupported it falls back to an existence check
 /// followed by a rename. On any error the temp file is removed and an
-/// existing target is left untouched.
+/// existing target is left untouched. An existing non-regular target (device,
+/// FIFO) is written directly, without a temp file, rename or `--force`.
 pub fn write_atomic(
     path: &std::path::Path,
     force: bool,
     write: impl FnOnce(&mut dyn Write) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let shown = path.display();
+    if is_special_target(path) {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .with_context(|| format!("cannot write {shown}; check the path and permissions"))?;
+        let mut w = std::io::BufWriter::new(file);
+        write(&mut w)?;
+        return w.flush().with_context(|| format!("cannot write {shown}"));
+    }
     let exists = || anyhow::anyhow!(exists_message(&path.to_string_lossy()));
     let tmp = temp_path(path);
     let file = std::fs::OpenOptions::new()
@@ -782,7 +801,8 @@ pub fn write_atomic(
     }
 }
 
-/// Write the export to `path` (`-` is stdout), atomically (see [`write_atomic`]).
+/// Write the export to `path` (`-` is stdout), atomically for regular files
+/// (see [`write_atomic`]).
 pub fn write_output(
     path: &str,
     force: bool,
@@ -1212,6 +1232,48 @@ mod tests {
             ExportFormat::Ndjson
         );
         assert!(export_format(Some(Format::Table)).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_to_dev_null_needs_no_force() {
+        check_output("/dev/null", false).unwrap();
+        assert_eq!(
+            write_output("/dev/null", false, &[msg(1), msg(2)], ExportFormat::Ndjson).unwrap(),
+            2
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_to_a_fifo_writes_directly() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe");
+        match std::process::Command::new("mkfifo").arg(&fifo).status() {
+            Ok(s) if s.success() => {}
+            _ => {
+                eprintln!("skipping: mkfifo is not available");
+                return;
+            }
+        }
+        let reader = {
+            let fifo = fifo.clone();
+            std::thread::spawn(move || std::fs::read_to_string(fifo).unwrap())
+        };
+        let p = fifo.to_str().unwrap();
+        // No --force, and no temp file or rename: the FIFO itself is written.
+        check_output(p, false).unwrap();
+        assert_eq!(
+            write_output(p, false, &[msg(1), msg(2)], ExportFormat::Ndjson).unwrap(),
+            2
+        );
+        let got = reader.join().unwrap();
+        assert_eq!(got.lines().count(), 2, "{got}");
+        assert_eq!(dir_names(dir.path()), ["pipe"]);
+        assert!(
+            !std::fs::metadata(&fifo).unwrap().is_file(),
+            "the FIFO must not be replaced by a regular file"
+        );
     }
 
     #[test]
