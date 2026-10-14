@@ -3,20 +3,20 @@
 use crate::Format;
 use crate::context::Ctx;
 use crate::output::{ellipsize, table};
-use crate::resolve::{Selection, resolve};
+use crate::resolve::{Selection, needs_sign_in, resolve};
 use dispatched_core::{
     EntityCounts, EntityPath, Explorer, MessageBody, Namespace, PeekOptions, PeekView,
     PeekedMessage, SubQueue,
 };
 use time::format_description::well_known::Rfc3339;
 
-/// The namespace the user selected. A connection string needs no sign-in;
-/// anything else may, so the current one is looked up.
+/// The namespace the user selected. The sign-in (a keychain read) is only
+/// looked up when the selection uses Entra.
 fn namespace(ctx: &Ctx, sel: &Selection<'_>) -> anyhow::Result<Namespace> {
-    let sign_in = if sel.connection_string.is_some() {
-        None
-    } else {
+    let sign_in = if needs_sign_in(sel, &ctx.store)? {
         ctx.current_sign_in()?
+    } else {
+        None
     };
     resolve(
         sel,

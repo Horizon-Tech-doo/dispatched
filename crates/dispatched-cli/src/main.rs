@@ -20,31 +20,20 @@ use std::process::ExitCode;
 )]
 struct Cli {
     /// Service Bus connection string (SAS or emulator). Prefer the
-    /// DISPATCHED_CONNECTION_STRING environment variable: arguments are visible
-    /// in shell history and process lists.
-    #[arg(
-        long,
-        env = "DISPATCHED_CONNECTION_STRING",
-        global = true,
-        hide_env_values = true,
-        conflicts_with_all = ["namespace", "profile"]
-    )]
+    /// DISPATCHED_CONNECTION_STRING environment variable (used when no
+    /// selection flag is given): arguments are visible in shell history and
+    /// process lists.
+    #[arg(long, global = true, conflicts_with_all = ["namespace", "profile"])]
     connection_string: Option<String>,
-    /// Namespace name or host, used with the signed-in Entra account.
-    #[arg(
-        long,
-        env = "DISPATCHED_NAMESPACE",
-        global = true,
-        conflicts_with_all = ["connection_string", "profile"]
-    )]
+    /// Namespace name or host, used with the signed-in Entra account
+    /// (environment: DISPATCHED_NAMESPACE).
+    #[arg(long, global = true, conflicts_with_all = ["connection_string", "profile"])]
     namespace: Option<String>,
-    /// Saved profile to use (see `dispatched profile ls`).
-    #[arg(
-        long,
-        env = "DISPATCHED_PROFILE",
-        global = true,
-        conflicts_with_all = ["connection_string", "namespace"]
-    )]
+    /// Saved profile to use, see `dispatched profile ls` (environment:
+    /// DISPATCHED_PROFILE). Without any selection, the default profile is used.
+    /// Precedence: flag, then DISPATCHED_CONNECTION_STRING, DISPATCHED_NAMESPACE,
+    /// DISPATCHED_PROFILE, then the default profile.
+    #[arg(long, global = true, conflicts_with_all = ["connection_string", "namespace"])]
     profile: Option<String>,
     /// Output format.
     #[arg(long, value_enum, default_value_t = Format::Table, global = true)]
@@ -146,11 +135,19 @@ fn format_error(e: &anyhow::Error) -> String {
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
     let ctx = Ctx::open()?;
-    let sel = Selection {
+    let env = |k: &str| std::env::var(k).ok();
+    let flags = Selection {
         connection_string: cli.connection_string.as_deref(),
         namespace: cli.namespace.as_deref(),
         profile: cli.profile.as_deref(),
     };
+    let owned = resolve::select(&flags, &env);
+    let sel = owned.borrow();
+    // `profile test` is about a profile whatever else is selected.
+    let profile_hint = cli
+        .profile
+        .clone()
+        .or_else(|| env(resolve::ENV_PROFILE).filter(|v| !v.trim().is_empty()));
     match cli.command {
         Command::Login {
             device_code,
@@ -177,13 +174,74 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             };
             commands::browse::peek(&ctx, &sel, &entity, view, top, from_seq, cli.format).await
         }
-        Command::Profile { cmd } => commands::profile::run(&ctx, cmd, cli.format).await,
+        Command::Profile { cmd } => {
+            commands::profile::run(&ctx, cmd, cli.format, profile_hint.as_deref()).await
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn cli_definition_is_valid() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn profile_add_namespace_is_its_own_option() {
+        let cli = Cli::try_parse_from([
+            "dispatched",
+            "profile",
+            "add",
+            "p",
+            "--namespace",
+            "ns",
+            "--tenant",
+            "t",
+        ])
+        .unwrap();
+        let Command::Profile {
+            cmd: ProfileCmd::Add {
+                namespace, tenant, ..
+            },
+        } = cli.command
+        else {
+            panic!("not profile add")
+        };
+        assert_eq!(namespace.as_deref(), Some("ns"));
+        assert_eq!(tenant.as_deref(), Some("t"));
+        assert!(
+            Cli::try_parse_from([
+                "dispatched",
+                "profile",
+                "add",
+                "p",
+                "--namespace",
+                "ns",
+                "--connection-string-stdin"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn explicit_selection_flags_conflict() {
+        let e = Cli::try_parse_from([
+            "dispatched",
+            "--profile",
+            "p",
+            "--connection-string",
+            "c",
+            "ls",
+        ]);
+        assert!(e.is_err());
+        let cli = Cli::try_parse_from(["dispatched", "--profile", "p", "ls"]).unwrap();
+        assert_eq!(cli.profile.as_deref(), Some("p"));
+        assert!(cli.connection_string.is_none());
+    }
     use dispatched_core::Error as CoreError;
     use horizon_azure_kit::KitError;
 

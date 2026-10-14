@@ -24,6 +24,80 @@ pub fn namespace_host(input: &str) -> String {
     }
 }
 
+pub const ENV_CONNECTION_STRING: &str = "DISPATCHED_CONNECTION_STRING";
+pub const ENV_NAMESPACE: &str = "DISPATCHED_NAMESPACE";
+pub const ENV_PROFILE: &str = "DISPATCHED_PROFILE";
+
+/// A selection that owns its strings (after merging flags with the environment).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct OwnedSelection {
+    pub connection_string: Option<String>,
+    pub namespace: Option<String>,
+    pub profile: Option<String>,
+}
+
+impl OwnedSelection {
+    pub fn borrow(&self) -> Selection<'_> {
+        Selection {
+            connection_string: self.connection_string.as_deref(),
+            namespace: self.namespace.as_deref(),
+            profile: self.profile.as_deref(),
+        }
+    }
+}
+
+/// Merge explicit flags with the environment. Precedence: an explicit flag
+/// (clap guarantees at most one) beats every environment variable; otherwise
+/// `DISPATCHED_CONNECTION_STRING`, then `DISPATCHED_NAMESPACE`, then
+/// `DISPATCHED_PROFILE`; with none of them the default profile applies later.
+/// Environment variables never conflict with each other or with flags.
+pub fn select(flags: &Selection<'_>, env: &dyn Fn(&str) -> Option<String>) -> OwnedSelection {
+    let own = |v: Option<&str>| v.map(str::to_string);
+    if flags.connection_string.is_some() || flags.namespace.is_some() || flags.profile.is_some() {
+        return OwnedSelection {
+            connection_string: own(flags.connection_string),
+            namespace: own(flags.namespace),
+            profile: own(flags.profile),
+        };
+    }
+    let get = |k: &str| env(k).filter(|v| !v.trim().is_empty());
+    if let Some(cs) = get(ENV_CONNECTION_STRING) {
+        return OwnedSelection {
+            connection_string: Some(cs),
+            ..Default::default()
+        };
+    }
+    if let Some(ns) = get(ENV_NAMESPACE) {
+        return OwnedSelection {
+            namespace: Some(ns),
+            ..Default::default()
+        };
+    }
+    OwnedSelection {
+        profile: get(ENV_PROFILE),
+        ..Default::default()
+    }
+}
+
+/// Whether resolving `sel` needs the Entra sign-in (so the keychain is only
+/// read when it matters). Unknown profiles return false; `resolve` reports them.
+pub fn needs_sign_in(sel: &Selection<'_>, store: &ProfileStore) -> anyhow::Result<bool> {
+    if sel.connection_string.is_some() {
+        return Ok(false);
+    }
+    if sel.namespace.is_some() {
+        return Ok(true);
+    }
+    let profile = match sel.profile {
+        Some(name) => store.get(name)?,
+        None => store.default_profile()?,
+    };
+    Ok(matches!(
+        profile.map(|p| p.auth),
+        Some(profiles::ProfileAuth::Entra { .. })
+    ))
+}
+
 /// Resolution order: `--connection-string`, `--namespace` (with the current
 /// sign-in), `--profile`, then the default profile.
 pub fn resolve(
@@ -95,6 +169,89 @@ mod tests {
         );
     }
 
+    fn env_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |k| {
+            pairs
+                .iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    fn sel(cs: Option<&str>, ns: Option<&str>, p: Option<&str>) -> OwnedSelection {
+        OwnedSelection {
+            connection_string: cs.map(Into::into),
+            namespace: ns.map(Into::into),
+            profile: p.map(Into::into),
+        }
+    }
+
+    const ALL_ENV: [(&str, &str); 3] = [
+        (ENV_CONNECTION_STRING, "env-cs"),
+        (ENV_NAMESPACE, "env-ns"),
+        (ENV_PROFILE, "env-profile"),
+    ];
+
+    #[test]
+    fn selection_precedence_table() {
+        let flag = |cs, ns, p| Selection {
+            connection_string: cs,
+            namespace: ns,
+            profile: p,
+        };
+        // (flags, env, expected)
+        type Case<'a> = (Selection<'a>, Vec<(&'a str, &'a str)>, OwnedSelection);
+        let cases: Vec<Case<'_>> = vec![
+            // Nothing anywhere: the default profile applies later.
+            (flag(None, None, None), vec![], sel(None, None, None)),
+            // Environment only, in order of precedence.
+            (
+                flag(None, None, None),
+                ALL_ENV.to_vec(),
+                sel(Some("env-cs"), None, None),
+            ),
+            (
+                flag(None, None, None),
+                ALL_ENV[1..].to_vec(),
+                sel(None, Some("env-ns"), None),
+            ),
+            (
+                flag(None, None, None),
+                ALL_ENV[2..].to_vec(),
+                sel(None, None, Some("env-profile")),
+            ),
+            // An explicit flag beats every environment variable (and only it applies).
+            (
+                flag(None, None, Some("p")),
+                ALL_ENV.to_vec(),
+                sel(None, None, Some("p")),
+            ),
+            (
+                flag(None, Some("n"), None),
+                ALL_ENV.to_vec(),
+                sel(None, Some("n"), None),
+            ),
+            (
+                flag(Some("c"), None, None),
+                ALL_ENV.to_vec(),
+                sel(Some("c"), None, None),
+            ),
+            // Empty variables count as unset.
+            (
+                flag(None, None, None),
+                vec![
+                    (ENV_CONNECTION_STRING, ""),
+                    (ENV_NAMESPACE, "  "),
+                    (ENV_PROFILE, "q"),
+                ],
+                sel(None, None, Some("q")),
+            ),
+        ];
+        for (flags, env, expected) in cases {
+            assert_eq!(select(&flags, &env_of(&env)), expected, "env {env:?}");
+        }
+    }
+
     #[test]
     fn connection_string_wins() {
         let (store, secrets) = ctx();
@@ -146,6 +303,36 @@ mod tests {
                 .unwrap()
                 .is_emulator()
         );
+    }
+
+    #[test]
+    fn sign_in_is_only_needed_for_entra_selections() {
+        let (store, secrets) = ctx();
+        store
+            .add_connection_string("emu", EMU, &secrets, false)
+            .unwrap();
+        let entra =
+            dispatched_core::profiles::Profile::entra("ent", "x.servicebus.windows.net", "o", None);
+        store.insert(&entra).unwrap();
+        let needs = |cs, ns, p| {
+            needs_sign_in(
+                &Selection {
+                    connection_string: cs,
+                    namespace: ns,
+                    profile: p,
+                },
+                &store,
+            )
+            .unwrap()
+        };
+        assert!(!needs(Some("x"), None, None));
+        assert!(needs(None, Some("n"), None));
+        assert!(!needs(None, None, Some("emu")));
+        assert!(needs(None, None, Some("ENT")));
+        assert!(!needs(None, None, Some("ghost")));
+        assert!(!needs(None, None, None));
+        store.set_default(Some("ent")).unwrap();
+        assert!(needs(None, None, None));
     }
 
     #[test]

@@ -7,12 +7,16 @@ use anyhow::Context as _;
 use dispatched_core::discovery::{
     DiscoveredNamespace, Discovery, SkippedSubscription, discover_namespaces,
 };
+use dispatched_core::profiles::ProfileAuth;
 use horizon_azure_kit::AzureCloud;
 use horizon_azure_kit::arm::ArmClient;
 use horizon_azure_kit::auth::SignIn;
 use serde::Serialize;
 
 pub async fn login(ctx: &Ctx, device_code: bool, tenant: &str) -> anyhow::Result<()> {
+    // Read the previous sign-in before the new token exists, so a database
+    // problem here can only mean "no previous", never a stranded new token.
+    let previous = ctx.store.current_sign_in().ok().flatten();
     let sign_in = if device_code {
         ctx.session
             .login_device_code(tenant, |dc| eprintln!("{}", dc.message))
@@ -29,39 +33,56 @@ pub async fn login(ctx: &Ctx, device_code: bool, tenant: &str) -> anyhow::Result
         "Signed in as {} (tenant {}).",
         sign_in.user_principal, sign_in.tenant_id
     );
-    let old = ctx.store.current_sign_in()?;
-    ctx.store.save_sign_in(&sign_in)?;
-    ctx.store.set_current_sign_in(Some(&sign_in.id))?;
-    if let Some(old) = old.filter(|old| old.id != sign_in.id) {
-        forget_previous(ctx, &old);
+    for note in finish_login(ctx, &sign_in, previous.as_ref())? {
+        eprintln!("note: {note}");
     }
     Ok(())
 }
 
-/// Clear the previous account's refresh token, unless a saved profile still
-/// uses that account (then it stays usable once the user signs back in).
-fn forget_previous(ctx: &Ctx, old: &SignIn) {
-    let in_use = ctx.store.list().map_or(true, |profiles| {
-        profiles.iter().any(|p| {
-            matches!(&p.auth, dispatched_core::profiles::ProfileAuth::Entra { sign_in_id, .. } if *sign_in_id == old.id)
-        })
-    });
-    if in_use {
-        eprintln!(
-            "note: kept the sign-in for {}; saved profiles use it.",
-            old.user_principal
-        );
-        return;
-    }
+/// Bookkeeping after a successful login: remember the new sign-in as current,
+/// then (on an account switch) clear the previous account's refresh token as
+/// M0 did. Returns notes for the user, e.g. which saved profiles used the
+/// previous account.
+fn finish_login(ctx: &Ctx, new: &SignIn, previous: Option<&SignIn>) -> anyhow::Result<Vec<String>> {
+    ctx.store.save_sign_in(new)?;
+    ctx.store.set_current_sign_in(Some(&new.id))?;
+    let mut notes = Vec::new();
+    let Some(old) = previous.filter(|old| old.id != new.id) else {
+        return Ok(notes);
+    };
+    let users: Vec<String> = ctx
+        .store
+        .list()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(
+            |p| matches!(&p.auth, ProfileAuth::Entra { sign_in_id, .. } if *sign_in_id == old.id),
+        )
+        .map(|p| format!("`{}`", p.name))
+        .collect();
     if let Err(e) = ctx.session.logout(old)
         && !matches!(e, horizon_azure_kit::KitError::NotFound(_))
     {
-        eprintln!(
-            "note: could not clear the previous sign-in for {}: {e}",
+        notes.push(format!(
+            "could not clear the previous sign-in for {}: {e}",
             old.user_principal
-        );
+        ));
     }
     let _ = ctx.store.remove_sign_in(&old.id);
+    if !users.is_empty() {
+        let label = if users.len() == 1 {
+            "Profile"
+        } else {
+            "Profiles"
+        };
+        notes.push(format!(
+            "{label} {} use {}; sign in as that account again to use {}.",
+            users.join(", "),
+            old.user_principal,
+            if users.len() == 1 { "it" } else { "them" }
+        ));
+    }
+    Ok(notes)
 }
 
 pub async fn logout(ctx: &Ctx) -> anyhow::Result<()> {
@@ -128,11 +149,13 @@ pub async fn namespaces(
         skipped: Vec::new(),
         skipped_tenants: Vec::new(),
     };
+    let mut tenants_total = 0;
     if all_tenants {
         let home = ctx.session.token_for(&sign_in, None, &scope).await?;
         let tenants = ArmClient::new(AzureCloud::Public, home.token)
             .list_tenants()
             .await?;
+        tenants_total = tenants.len();
         for t in tenants {
             let found = async {
                 let token = ctx
@@ -170,9 +193,10 @@ pub async fn namespaces(
         let found = discover_namespaces(&ArmClient::new(AzureCloud::Public, token.token)).await?;
         merge(&mut out, found);
     }
+    let outcome = all_skipped(tenants_total, &out.skipped_tenants);
     if let Format::Json = format {
         println!("{}", serde_json::to_string_pretty(&out)?);
-        return Ok(());
+        return outcome;
     }
     for s in &out.skipped {
         eprintln!(
@@ -215,10 +239,113 @@ pub async fn namespaces(
             &rows
         )
     );
+    outcome
+}
+
+/// `--all-tenants` fails when no tenant could be searched at all.
+fn all_skipped(total: usize, skipped: &[SkippedTenant]) -> anyhow::Result<()> {
+    if total > 0 && skipped.len() == total {
+        anyhow::bail!(
+            "every tenant was skipped ({total}); nothing could be listed. Try `dispatched login` again, \
+             or `--tenant <id>` for a tenant you can sign in to"
+        );
+    }
     Ok(())
 }
 
 fn merge(out: &mut NamespacesOutput, d: Discovery) {
     out.namespaces.extend(d.namespaces);
     out.skipped.extend(d.skipped);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dispatched_core::profiles::{Profile, ProfileStore};
+    use horizon_azure_kit::secrets::MemoryStore;
+    use std::sync::Arc;
+
+    fn sign_in(id: &str, upn: &str) -> SignIn {
+        SignIn {
+            id: id.into(),
+            user_principal: upn.into(),
+            tenant_id: "t".into(),
+            display_name: None,
+            cloud: AzureCloud::Public,
+        }
+    }
+
+    fn ctx() -> Ctx {
+        Ctx::from_parts(
+            ProfileStore::open_in_memory().unwrap(),
+            Arc::new(MemoryStore::new()),
+        )
+    }
+
+    #[test]
+    fn first_login_becomes_current() {
+        let ctx = ctx();
+        let a = sign_in("a", "a@x.io");
+        assert!(finish_login(&ctx, &a, None).unwrap().is_empty());
+        assert_eq!(ctx.store.current_sign_in().unwrap().unwrap().id, "a");
+    }
+
+    #[test]
+    fn account_switch_forgets_the_old_sign_in_and_names_its_profiles() {
+        let ctx = ctx();
+        let (a, b) = (sign_in("a", "a@x.io"), sign_in("b", "b@x.io"));
+        ctx.store.save_sign_in(&a).unwrap();
+        ctx.store.set_current_sign_in(Some("a")).unwrap();
+        for (name, owner) in [("one", "a"), ("two", "a"), ("other", "b")] {
+            ctx.store
+                .insert(&Profile::entra(
+                    name,
+                    "n.servicebus.windows.net",
+                    owner,
+                    None,
+                ))
+                .unwrap();
+        }
+        let notes = finish_login(&ctx, &b, Some(&a)).unwrap();
+        assert_eq!(
+            notes,
+            ["Profiles `one`, `two` use a@x.io; sign in as that account again to use them."]
+        );
+        assert_eq!(ctx.store.current_sign_in().unwrap().unwrap().id, "b");
+        assert!(ctx.store.sign_in("a").unwrap().is_none());
+    }
+
+    #[test]
+    fn switch_without_dependent_profiles_or_same_account_has_no_note() {
+        let ctx = ctx();
+        let (a, b) = (sign_in("a", "a@x.io"), sign_in("b", "b@x.io"));
+        assert!(finish_login(&ctx, &b, Some(&a)).unwrap().is_empty());
+        ctx.store
+            .insert(&Profile::entra("p", "n.servicebus.windows.net", "b", None))
+            .unwrap();
+        // Same account again: nothing is cleared, no note.
+        assert!(finish_login(&ctx, &b, Some(&b)).unwrap().is_empty());
+        assert!(ctx.store.sign_in("b").unwrap().is_some());
+    }
+
+    #[test]
+    fn all_tenants_fails_only_when_every_tenant_was_skipped() {
+        let sk = |n: usize| {
+            (0..n)
+                .map(|i| SkippedTenant {
+                    tenant_id: format!("t{i}"),
+                    reason: "mfa".into(),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(all_skipped(0, &sk(0)).is_ok());
+        assert!(all_skipped(3, &sk(2)).is_ok());
+        assert!(all_skipped(3, &sk(0)).is_ok());
+        assert!(
+            all_skipped(2, &sk(2))
+                .unwrap_err()
+                .to_string()
+                .contains("every tenant")
+        );
+    }
 }

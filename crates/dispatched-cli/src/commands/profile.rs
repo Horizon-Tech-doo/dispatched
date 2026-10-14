@@ -6,7 +6,7 @@ use crate::output::{sanitize, table};
 use crate::resolve::namespace_host;
 use anyhow::{Context, bail};
 use clap::Subcommand;
-use dispatched_core::diagnostics::{Check, test_connection};
+use dispatched_core::diagnostics::{Check, ConnectionReport, test_connection};
 use dispatched_core::namespace::{ProxyConfig, Transport};
 use dispatched_core::profiles::{Profile, ProfileAuth, namespace_for};
 use dispatched_core::{ConnectionString, EntityPath, Explorer};
@@ -58,7 +58,9 @@ pub enum ProfileCmd {
     Pin { name: String, entity: String },
     /// Forget a pinned entity.
     Unpin { name: String, entity: String },
-    /// Check which auth path is used and which rights work.
+    /// Check which auth path is used and which rights work. Exits non-zero
+    /// when a check fails. Without a name: --profile / DISPATCHED_PROFILE, then
+    /// the default profile.
     Test {
         name: Option<String>,
         #[arg(long)]
@@ -202,7 +204,31 @@ fn add(
     }
 }
 
-pub async fn run(ctx: &Ctx, cmd: ProfileCmd, format: Format) -> anyhow::Result<()> {
+/// `Err` naming the failed checks and their kinds, if any check failed.
+fn failure_summary(report: &ConnectionReport) -> anyhow::Result<()> {
+    let failed: Vec<String> = [
+        ("management", &report.management),
+        ("messaging", &report.messaging),
+    ]
+    .into_iter()
+    .filter_map(|(name, c)| match c {
+        Check::Failed { kind, .. } => Some(format!("{name} ({kind})")),
+        _ => None,
+    })
+    .collect();
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        bail!("connection test failed: {}", failed.join(", "))
+    }
+}
+
+pub async fn run(
+    ctx: &Ctx,
+    cmd: ProfileCmd,
+    format: Format,
+    selected_profile: Option<&str>,
+) -> anyhow::Result<()> {
     match cmd {
         ProfileCmd::Ls => {
             let profiles = ctx.store.list()?;
@@ -307,24 +333,36 @@ pub async fn run(ctx: &Ctx, cmd: ProfileCmd, format: Format) -> anyhow::Result<(
         ProfileCmd::Pin { name, entity } => {
             let mut p = find(ctx, &name)?;
             EntityPath::parse(&entity)?;
-            if !p
+            let msg = if p
                 .pinned_entities
                 .iter()
                 .any(|e| e.eq_ignore_ascii_case(&entity))
             {
+                format!("`{entity}` is already pinned on profile `{}`.", p.name)
+            } else {
+                let msg = format!("Pinned `{entity}` on profile `{}`.", p.name);
                 p.pinned_entities.push(entity);
-            }
-            ctx.store.update(&p)?;
+                ctx.store.update(&p)?;
+                msg
+            };
+            eprintln!("{}", sanitize(&msg));
         }
         ProfileCmd::Unpin { name, entity } => {
             let mut p = find(ctx, &name)?;
+            let before = p.pinned_entities.len();
             p.pinned_entities
                 .retain(|e| !e.eq_ignore_ascii_case(&entity));
-            ctx.store.update(&p)?;
+            let msg = if p.pinned_entities.len() == before {
+                format!("`{entity}` is not pinned on profile `{}`.", p.name)
+            } else {
+                ctx.store.update(&p)?;
+                format!("Unpinned `{entity}` from profile `{}`.", p.name)
+            };
+            eprintln!("{}", sanitize(&msg));
         }
         ProfileCmd::Test { name, entity } => {
-            let p = match name {
-                Some(n) => find(ctx, &n)?,
+            let p = match name.as_deref().or(selected_profile) {
+                Some(n) => find(ctx, n)?,
                 None => ctx
                     .store
                     .default_profile()?
@@ -341,7 +379,7 @@ pub async fn run(ctx: &Ctx, cmd: ProfileCmd, format: Format) -> anyhow::Result<(
             explorer.close().await;
             if let Format::Json = format {
                 println!("{}", serde_json::to_string_pretty(&report)?);
-                return Ok(());
+                return failure_summary(&report);
             }
             let show = |c: &Check| match c {
                 Check::Ok { detail } => format!("ok — {}", sanitize(detail)),
@@ -356,6 +394,7 @@ pub async fn run(ctx: &Ctx, cmd: ProfileCmd, format: Format) -> anyhow::Result<(
             println!("auth        {}", sanitize(&report.auth));
             println!("management  {}", show(&report.management));
             println!("messaging   {}", show(&report.messaging));
+            return failure_summary(&report);
         }
     }
     Ok(())
@@ -384,6 +423,40 @@ mod tests {
 
     fn add_cs(ctx: &Ctx, name: &str, cs: &str, net: NetworkOptions) -> anyhow::Result<Profile> {
         add(ctx, name, Some(cs.into()), None, None, false, None, net)
+    }
+
+    fn report(management: Check, messaging: Check) -> ConnectionReport {
+        ConnectionReport {
+            host: "h".into(),
+            emulator: false,
+            transport: Transport::Amqp,
+            auth: "a".into(),
+            management,
+            messaging,
+        }
+    }
+
+    #[test]
+    fn failed_checks_make_the_test_fail_with_a_summary() {
+        let ok = || Check::Ok { detail: "d".into() };
+        let skipped = || Check::Skipped { reason: "r".into() };
+        let failed = |kind| Check::Failed {
+            kind,
+            message: "secret-free".into(),
+        };
+        assert!(failure_summary(&report(ok(), ok())).is_ok());
+        assert!(failure_summary(&report(ok(), skipped())).is_ok());
+        let e = failure_summary(&report(failed("forbidden"), skipped()))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(e, "connection test failed: management (forbidden)");
+        let e = failure_summary(&report(failed("auth"), failed("timeout")))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            e,
+            "connection test failed: management (auth), messaging (timeout)"
+        );
     }
 
     #[test]
@@ -501,6 +574,7 @@ mod tests {
                 clear: false,
             },
             Format::Table,
+            None,
         )
         .await
         .unwrap();
@@ -510,13 +584,17 @@ mod tests {
             name: "emu".into(),
             entity: e.into(),
         };
-        run(&ctx, pin("orders"), Format::Table).await.unwrap();
-        run(&ctx, pin("ORDERS"), Format::Table).await.unwrap();
+        run(&ctx, pin("orders"), Format::Table, None).await.unwrap();
+        run(&ctx, pin("ORDERS"), Format::Table, None).await.unwrap();
         assert_eq!(
             ctx.store.get("emu").unwrap().unwrap().pinned_entities,
             ["orders"]
         );
-        assert!(run(&ctx, pin("a/b/c/d"), Format::Table).await.is_err());
+        assert!(
+            run(&ctx, pin("a/b/c/d"), Format::Table, None)
+                .await
+                .is_err()
+        );
         run(
             &ctx,
             ProfileCmd::Unpin {
@@ -524,6 +602,7 @@ mod tests {
                 entity: "Orders".into(),
             },
             Format::Table,
+            None,
         )
         .await
         .unwrap();
@@ -542,7 +621,8 @@ mod tests {
                     name: "ghost".into(),
                     entity: "q".into()
                 },
-                Format::Table
+                Format::Table,
+                None
             )
             .await
             .is_err()
@@ -555,20 +635,31 @@ mod tests {
                 clear: true,
             },
             Format::Table,
+            None,
         )
         .await
         .unwrap();
         assert!(ctx.store.default_profile().unwrap().is_none());
 
-        run(&ctx, ProfileCmd::Rm { name: "emu".into() }, Format::Table)
-            .await
-            .unwrap();
+        run(
+            &ctx,
+            ProfileCmd::Rm { name: "emu".into() },
+            Format::Table,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(ctx.store.list().unwrap().is_empty());
         assert!(ctx.secrets.get(&secret_key(&p.id)).unwrap().is_none());
-        let e = run(&ctx, ProfileCmd::Rm { name: "emu".into() }, Format::Table)
-            .await
-            .unwrap_err()
-            .to_string();
+        let e = run(
+            &ctx,
+            ProfileCmd::Rm { name: "emu".into() },
+            Format::Table,
+            None,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
         assert!(e.contains("emu"), "{e}");
     }
 }
