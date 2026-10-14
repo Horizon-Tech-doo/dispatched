@@ -7,7 +7,7 @@ mod state;
 use anyhow::Context;
 use clap::{Parser, Subcommand, ValueEnum};
 use dispatched_core::discovery::discover_namespaces;
-use dispatched_core::{EntityPath, Explorer, MessageBody, PeekedMessage, SubQueue};
+use dispatched_core::{EntityPath, Explorer, MessageBody, PeekOptions, PeekView, PeekedMessage};
 use horizon_azure_kit::AzureCloud;
 use horizon_azure_kit::arm::ArmClient;
 use output::{ellipsize, table};
@@ -354,14 +354,16 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             )?;
             let explorer = Explorer::new(ns);
             let path = EntityPath::parse(&entity)?;
-            let sub_queue = match (dlq, transfer_dlq) {
-                (true, _) => SubQueue::DeadLetter,
-                (_, true) => SubQueue::TransferDeadLetter,
-                _ => SubQueue::Active,
+            let view = match (dlq, transfer_dlq) {
+                (true, _) => PeekView::DeadLetter,
+                (_, true) => PeekView::TransferDeadLetter,
+                _ => PeekView::Active,
             };
-            let messages = explorer.peek(&path, sub_queue, from_seq, top).await?;
+            let page = explorer
+                .peek(&path, view, &PeekOptions::new(top).from_sequence(from_seq))
+                .await?;
             explorer.close().await;
-            print_messages(&messages, cli.format, dlq || transfer_dlq)?;
+            print_messages(&page.messages, cli.format, dlq || transfer_dlq)?;
         }
     }
     Ok(())

@@ -19,6 +19,70 @@ pub enum SubQueue {
     TransferDeadLetter,
 }
 
+/// What a user wants to see. Scheduled and deferred messages live in the
+/// entity itself and are told apart by their state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PeekView {
+    /// Active messages.
+    Active,
+    /// Scheduled (not yet enqueued) messages.
+    Scheduled,
+    /// Deferred messages.
+    Deferred,
+    /// The dead-letter queue (all states).
+    DeadLetter,
+    /// The transfer dead-letter queue (all states).
+    TransferDeadLetter,
+}
+
+impl PeekView {
+    /// Queue to read from.
+    pub fn sub_queue(self) -> SubQueue {
+        match self {
+            PeekView::Active | PeekView::Scheduled | PeekView::Deferred => SubQueue::Active,
+            PeekView::DeadLetter => SubQueue::DeadLetter,
+            PeekView::TransferDeadLetter => SubQueue::TransferDeadLetter,
+        }
+    }
+
+    /// Whether a message in `state` belongs to this view.
+    pub fn accepts(self, state: crate::messaging::MessageState) -> bool {
+        use crate::messaging::MessageState as S;
+        match self {
+            PeekView::Active => state == S::Active,
+            PeekView::Scheduled => state == S::Scheduled,
+            PeekView::Deferred => state == S::Deferred,
+            PeekView::DeadLetter | PeekView::TransferDeadLetter => true,
+        }
+    }
+
+    /// Stable name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PeekView::Active => "active",
+            PeekView::Scheduled => "scheduled",
+            PeekView::Deferred => "deferred",
+            PeekView::DeadLetter => "dead-letter",
+            PeekView::TransferDeadLetter => "transfer-dead-letter",
+        }
+    }
+
+    /// Parse a user-facing name.
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "active" => Ok(PeekView::Active),
+            "scheduled" => Ok(PeekView::Scheduled),
+            "deferred" => Ok(PeekView::Deferred),
+            "dlq" | "dead-letter" | "deadletter" => Ok(PeekView::DeadLetter),
+            "transfer-dlq" | "transfer-dead-letter" => Ok(PeekView::TransferDeadLetter),
+            other => Err(Error::Invalid(format!(
+                "unknown view `{other}`; use active, scheduled, deferred, dlq or transfer-dlq"
+            ))),
+        }
+    }
+}
+
 /// A queue, or a topic subscription.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EntityPath {
@@ -261,6 +325,22 @@ mod tests {
         );
         assert!(EntityPath::parse("a/b").is_err());
         assert!(EntityPath::parse("").is_err());
+    }
+
+    #[test]
+    fn peek_views_map_to_sub_queues_and_states() {
+        use crate::messaging::MessageState as S;
+        assert_eq!(PeekView::Scheduled.sub_queue(), SubQueue::Active);
+        assert_eq!(PeekView::parse("DLQ").unwrap(), PeekView::DeadLetter);
+        assert!(PeekView::Scheduled.accepts(S::Scheduled));
+        assert!(!PeekView::Active.accepts(S::Deferred));
+        assert!(PeekView::DeadLetter.accepts(S::Deferred));
+        assert!(
+            PeekView::parse("nope")
+                .unwrap_err()
+                .to_string()
+                .contains("unknown view")
+        );
     }
 
     #[test]

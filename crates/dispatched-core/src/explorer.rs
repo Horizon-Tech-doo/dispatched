@@ -1,8 +1,8 @@
 //! The facade every surface uses: one namespace, lazily-opened AMQP connection.
 
-use crate::messaging::{PeekedMessage, ServiceBusConnection, peek};
+use crate::messaging::{PeekOptions, PeekPage, ServiceBusConnection, scan_messages};
 use crate::mgmt::{ManagementClient, QueueInfo, SubscriptionInfo, TopicInfo};
-use crate::namespace::{EntityPath, Namespace, SubQueue};
+use crate::namespace::{EntityPath, Namespace, PeekView};
 use crate::{Error, Result};
 use tokio::sync::Mutex;
 
@@ -44,26 +44,24 @@ impl Explorer {
         self.mgmt.list_subscriptions(topic).await
     }
 
-    /// Peek up to `max` messages from `entity`'s `sub_queue`, starting at `from_sequence`.
+    /// Peek `view` of `entity` according to `opts`.
     pub async fn peek(
         &self,
         entity: &EntityPath,
-        sub_queue: SubQueue,
-        from_sequence: i64,
-        max: u32,
-    ) -> Result<Vec<PeekedMessage>> {
-        let address = entity.address(sub_queue);
+        view: PeekView,
+        opts: &PeekOptions,
+    ) -> Result<PeekPage> {
+        let address = entity.address(view.sub_queue());
         let mut guard = self.amqp.lock().await;
         if guard.is_none() {
             *guard = Some(ServiceBusConnection::open(&self.ns).await?);
         }
         let conn = guard.as_mut().expect("opened above");
-        let result = peek_all(conn, &address, from_sequence, max).await;
-        if result.as_ref().is_err_and(breaks_connection) {
-            // Drop a possibly broken connection; the next call reconnects.
-            if let Some(conn) = guard.take() {
-                let _ = conn.close().await;
-            }
+        let result = scan_messages(conn, &address, view, opts).await;
+        if result.as_ref().is_err_and(breaks_connection)
+            && let Some(conn) = guard.take()
+        {
+            let _ = conn.close().await;
         }
         result
     }
@@ -83,29 +81,6 @@ fn breaks_connection(e: &Error) -> bool {
         e,
         Error::Network(_) | Error::Protocol(_) | Error::Timeout(_)
     )
-}
-
-async fn peek_all(
-    conn: &mut ServiceBusConnection,
-    address: &str,
-    from_sequence: i64,
-    max: u32,
-) -> Result<Vec<PeekedMessage>> {
-    let mut out: Vec<PeekedMessage> = Vec::new();
-    let mut next = from_sequence;
-    while (out.len() as u32) < max {
-        let want = (max - out.len() as u32).min(peek::MAX_PER_REQUEST);
-        let batch = peek::peek(conn, address, next, want).await?;
-        let got = batch.len() as u32;
-        if let Some(last) = batch.last() {
-            next = last.sequence_number + 1;
-        }
-        out.extend(batch);
-        if got < want {
-            break;
-        }
-    }
-    Ok(out)
 }
 
 #[cfg(test)]
