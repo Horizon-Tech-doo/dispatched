@@ -209,6 +209,9 @@ pub enum Continuation {
     More(i64),
     /// The scan made no progress, so the end of the entity was NOT confirmed.
     Stalled,
+    /// `export` collected everything asked for (`--top`); no continuation is known
+    /// and none is needed.
+    Done,
 }
 
 pub fn continuation(page: &PeekPage) -> Continuation {
@@ -256,6 +259,7 @@ pub fn scan_notes(s: &ScanSummary) -> Vec<String> {
                 )]
             }
         }
+        Continuation::Done => Vec::new(),
         Continuation::Stalled => vec![format!(
             "warning: the scan stopped without progress after {scanned} message(s), so the end of the entity was not confirmed; \
              the service returned nothing new from this position. Try again, or pass a different --from-seq"
@@ -429,9 +433,30 @@ pub async fn ls(
     result
 }
 
-async fn fetch_topics(
-    explorer: &Explorer,
-) -> anyhow::Result<Vec<(TopicInfo, Vec<SubscriptionInfo>)>> {
+type TopicListing = Vec<(TopicInfo, Vec<SubscriptionInfo>)>;
+
+const LIST_FORBIDDEN_HINT: &str = "this key can't list entities; peek a known entity with `dispatched peek <entity>` or pin it with `dispatched profile pin <profile> <entity>`";
+const TOPICS_SKIPPED_NOTE: &str =
+    "topics and subscriptions skipped: listing them needs Manage,EntityRead";
+
+/// The original listing error with a hint on what to do instead.
+pub fn forbidden_without_known(e: dispatched_core::Error) -> anyhow::Error {
+    anyhow::anyhow!("{e}; {LIST_FORBIDDEN_HINT}")
+}
+
+/// A refused topic listing is not fatal once the queues were listed:
+/// `Ok(None)` means skip the topics. Other errors still fail the command.
+pub fn topics_outcome(
+    r: dispatched_core::Result<TopicListing>,
+) -> anyhow::Result<Option<TopicListing>> {
+    match r {
+        Ok(t) => Ok(Some(t)),
+        Err(dispatched_core::Error::Forbidden { .. }) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+async fn fetch_topics(explorer: &Explorer) -> dispatched_core::Result<TopicListing> {
     let mut out = Vec::new();
     for t in explorer.list_topics().await? {
         let subs = explorer.list_subscriptions(&t.name).await?;
@@ -451,7 +476,7 @@ async fn list(
         Err(e @ dispatched_core::Error::Forbidden { .. }) => {
             let known = known_entities(explorer.namespace().entity_path(), pins);
             if known.is_empty() {
-                return Err(e.into());
+                return Err(forbidden_without_known(e));
             }
             eprintln!("{FALLBACK_NOTE}");
             if let Format::Json = format {
@@ -463,14 +488,23 @@ async fn list(
         }
         Err(e) => return Err(e.into()),
     };
+    let skipped;
     let topic_list = if topics {
-        fetch_topics(explorer).await?
+        let listing = topics_outcome(fetch_topics(explorer).await)?;
+        skipped = listing.is_none();
+        listing.unwrap_or_default()
     } else {
+        skipped = false;
         Vec::new()
     };
+    if skipped {
+        eprintln!("{TOPICS_SKIPPED_NOTE}");
+    }
     if let Format::Json = format {
         let mut value = serde_json::json!({ "queues": queues });
-        if topics {
+        if skipped {
+            value["topics_skipped"] = serde_json::Value::String(TOPICS_SKIPPED_NOTE.into());
+        } else if topics {
             let list: Vec<_> = topic_list
                 .iter()
                 .map(|(t, subs)| serde_json::json!({ "topic": t, "subscriptions": subs }))
@@ -482,7 +516,7 @@ async fn list(
     }
     let subs: Vec<&SubscriptionInfo> = topic_list.iter().flat_map(|(_, s)| s.iter()).collect();
     println!("{}", queues_table(&queues));
-    if topics {
+    if topics && !skipped {
         println!("\n{}", subscriptions_table(&subs));
     }
     if any_approximate(&queues, &subs) {
@@ -634,6 +668,9 @@ where
                 }
                 from = n;
             }
+            // Asked-for count reached: complete, even if the last page made no
+            // progress past it.
+            Continuation::Stalled if messages.len() >= top => break Continuation::Done,
             other => break other,
         }
     };
@@ -667,9 +704,84 @@ pub fn check_output(path: &str, force: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Write the export to `path` (`-` is stdout). Without `force` the file is
-/// created exclusively, so a file that appeared since [`check_output`] is
-/// never overwritten.
+/// Removes the temporary file on drop unless disarmed.
+struct TempFile(Option<std::path::PathBuf>);
+
+impl TempFile {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
+fn temp_path(path: &std::path::Path) -> std::path::PathBuf {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "export".into());
+    path.with_file_name(format!(".{name}.dispatched-tmp-{}", std::process::id()))
+}
+
+/// Produce `path` atomically: `write` fills a sibling temp file, which is
+/// flushed and synced, then put in place. With `force` it is renamed over the
+/// target. Without it, a hard link creates the target only if absent
+/// (atomic; fails with `AlreadyExists`), and the temp file is then removed;
+/// where hard links are unsupported it falls back to an existence check
+/// followed by a rename. On any error the temp file is removed and an
+/// existing target is left untouched.
+pub fn write_atomic(
+    path: &std::path::Path,
+    force: bool,
+    write: impl FnOnce(&mut dyn Write) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let shown = path.display();
+    let exists = || anyhow::anyhow!(exists_message(&path.to_string_lossy()));
+    let tmp = temp_path(path);
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .with_context(|| format!("cannot write {shown}; check the path and permissions"))?;
+    let mut guard = TempFile(Some(tmp.clone()));
+    let mut w = std::io::BufWriter::new(file);
+    write(&mut w)?;
+    w.flush().with_context(|| format!("cannot write {shown}"))?;
+    let file = w
+        .into_inner()
+        .map_err(|e| e.into_error())
+        .with_context(|| format!("cannot write {shown}"))?;
+    file.sync_all()
+        .with_context(|| format!("cannot sync {shown}"))?;
+    drop(file);
+    if force {
+        std::fs::rename(&tmp, path).with_context(|| format!("cannot replace {shown}"))?;
+        guard.disarm();
+        return Ok(());
+    }
+    match std::fs::hard_link(&tmp, path) {
+        // The temp name is dropped (guard) and the target keeps the data.
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(exists()),
+        Err(_) => {
+            // No hard links here: best-effort check, then rename.
+            if path.exists() {
+                return Err(exists());
+            }
+            std::fs::rename(&tmp, path).with_context(|| format!("cannot write {shown}"))?;
+            guard.disarm();
+            Ok(())
+        }
+    }
+}
+
+/// Write the export to `path` (`-` is stdout), atomically (see [`write_atomic`]).
 pub fn write_output(
     path: &str,
     force: bool,
@@ -679,26 +791,23 @@ pub fn write_output(
     if path == "-" {
         return Ok(write_messages(std::io::stdout().lock(), messages, format)?);
     }
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true);
-    if force {
-        opts.create(true).truncate(true);
-    } else {
-        opts.create_new(true);
-    }
-    let file = opts.open(path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::AlreadyExists {
-            anyhow::anyhow!(exists_message(path))
-        } else {
-            anyhow::Error::new(e).context(format!(
-                "cannot write {path}; check the path and permissions"
-            ))
-        }
+    let mut n = 0;
+    write_atomic(std::path::Path::new(path), force, |w| {
+        n = write_messages(w, messages, format)?;
+        Ok(())
     })?;
-    let mut w = std::io::BufWriter::new(file);
-    let n = write_messages(&mut w, messages, format)?;
-    w.flush().with_context(|| format!("cannot write {path}"))?;
     Ok(n)
+}
+
+/// An export whose scan stopped without progress is incomplete: the file is
+/// written, but the command must not look like a clean success.
+pub fn check_complete(end: Continuation, written: usize) -> anyhow::Result<()> {
+    if end == Continuation::Stalled {
+        anyhow::bail!(
+            "export incomplete: the scan stopped without progress, so the end of the entity was not confirmed ({written} message(s) were written)"
+        );
+    }
+    Ok(())
 }
 
 pub async fn export(
@@ -734,7 +843,7 @@ pub async fn export(
         scan_limit: None,
         end: collected.end,
     }));
-    Ok(())
+    check_complete(collected.end, n)
 }
 
 #[cfg(test)]
@@ -1270,6 +1379,142 @@ mod tests {
             profile: None,
         };
         assert!(pins_for(&ctx, &cs_sel).unwrap().is_empty());
+    }
+
+    fn dir_names(dir: &std::path::Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn failed_write_leaves_the_original_and_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.json");
+        std::fs::write(&path, "original").unwrap();
+        for force in [false, true] {
+            let err = write_atomic(&path, force, |w| {
+                w.write_all(b"partial")?;
+                anyhow::bail!("disk full")
+            })
+            .unwrap_err();
+            assert!(err.to_string().contains("disk full"));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
+            assert_eq!(dir_names(dir.path()), ["out.json"]);
+        }
+        // A writer that fails at the I/O level.
+        struct Failing;
+        impl Write for Failing {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("no space"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let err = write_atomic(&path, true, |w| {
+            std::io::copy(&mut &b"data"[..], &mut Failing)?;
+            w.write_all(b"never")?;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("no space"), "{err:#}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
+        assert_eq!(dir_names(dir.path()), ["out.json"]);
+    }
+
+    #[test]
+    fn failed_export_to_a_new_path_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new.json");
+        assert!(write_atomic(&path, false, |_| anyhow::bail!("boom")).is_err());
+        assert!(dir_names(dir.path()).is_empty());
+        // An unwritable (missing) directory fails without creating anything.
+        let missing = dir.path().join("nope/out.json");
+        let e = format!(
+            "{:#}",
+            write_atomic(&missing, true, |_| Ok(())).unwrap_err()
+        );
+        assert!(e.contains("check the path"), "{e}");
+        assert!(dir_names(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn a_target_that_appears_during_the_write_is_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.json");
+        let err = write_atomic(&path, false, |w| {
+            w.write_all(b"ours")?;
+            // Someone else creates the target while we write.
+            std::fs::write(&path, "theirs")?;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("--force"), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs");
+        assert_eq!(dir_names(dir.path()), ["out.json"]);
+    }
+
+    #[test]
+    fn successful_atomic_writes_leave_only_the_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.json");
+        write_atomic(&path, false, |w| Ok(w.write_all(b"one")?)).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "one");
+        assert_eq!(dir_names(dir.path()), ["out.json"]);
+        write_atomic(&path, true, |w| Ok(w.write_all(b"two")?)).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "two");
+        assert_eq!(dir_names(dir.path()), ["out.json"]);
+    }
+
+    #[tokio::test]
+    async fn short_export_is_stalled_but_a_full_one_is_not() {
+        // Fewer than --top and no progress: end not confirmed -> non-zero.
+        let fake = Fake::new(vec![page(&[1], 1, None, false)]);
+        let c = collect_pages(3, 0, |f, m| fake.fetch(f, m)).await.unwrap();
+        assert_eq!(c.end, Continuation::Stalled);
+        let e = check_complete(c.end, c.messages.len()).unwrap_err();
+        assert!(e.to_string().contains("export incomplete"), "{e}");
+        assert!(e.to_string().contains("1 message(s) were written"));
+        // --top reached: complete even though the last page made no progress.
+        let fake = Fake::new(vec![page(&[1, 2, 3], 3, None, false)]);
+        let c = collect_pages(3, 0, |f, m| fake.fetch(f, m)).await.unwrap();
+        assert_eq!(c.end, Continuation::Done);
+        check_complete(c.end, 3).unwrap();
+        assert!(scan_notes(&summary(3, 3, None, Continuation::Done)).is_empty());
+        // End, More: fine.
+        check_complete(Continuation::End, 0).unwrap();
+        check_complete(Continuation::More(5), 3).unwrap();
+    }
+
+    #[test]
+    fn forbidden_listing_with_nothing_known_keeps_the_error_and_adds_a_hint() {
+        let e = forbidden_without_known(dispatched_core::Error::Forbidden {
+            needed: Some("Manage,EntityRead".into()),
+            detail: "Unauthorized".into(),
+        });
+        let t = e.to_string();
+        assert!(
+            t.starts_with("access denied (needs Manage,EntityRead): Unauthorized"),
+            "{t}"
+        );
+        assert!(t.contains("dispatched peek <entity>"));
+        assert!(t.contains("dispatched profile pin <profile> <entity>"));
+    }
+
+    #[test]
+    fn refused_topic_listing_is_skipped_but_other_errors_fail() {
+        let forbidden = dispatched_core::Error::Forbidden {
+            needed: None,
+            detail: "no".into(),
+        };
+        assert!(topics_outcome(Err(forbidden)).unwrap().is_none());
+        assert!(topics_outcome(Ok(Vec::new())).unwrap().is_some());
+        assert!(topics_outcome(Err(dispatched_core::Error::Network("down".into()))).is_err());
+        assert!(TOPICS_SKIPPED_NOTE.contains("Manage,EntityRead"));
     }
 
     #[test]
