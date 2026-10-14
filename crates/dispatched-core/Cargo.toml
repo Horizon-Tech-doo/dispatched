@@ -22,11 +22,13 @@ fe2o3-amqp-management = { workspace = true }
 fe2o3-amqp-types = { workspace = true }
 percent-encoding = { workspace = true }
 quick-xml = { workspace = true }
+regex = { workspace = true }
 reqwest = { workspace = true }
 secrecy = { workspace = true }
 serde = { workspace = true }
 serde_amqp = { workspace = true }
 serde_json = { workspace = true }
+serde_json_path = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true }
