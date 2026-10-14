@@ -11,7 +11,7 @@ use fe2o3_amqp::types::messaging::{
     ApplicationProperties, Body, Data, Message, MessageAnnotations, Modified, Properties,
 };
 use fe2o3_amqp::types::primitives::{OrderedMap, SimpleValue, Symbol, Timestamp, Value};
-use fe2o3_amqp::{Receiver, Sender};
+use fe2o3_amqp::{Delivery, Receiver, Sender};
 use std::fmt::Display;
 use std::future::Future;
 use std::time::Duration;
@@ -133,19 +133,136 @@ pub async fn send_scheduled(
     send_message(conn, address, text_message(body, props, Some(enqueue_at))).await
 }
 
-/// Attach a peek-lock receiver with one credit.
+/// Attach a peek-lock receiver holding exactly one credit that is not refilled
+/// after settling, so the broker never locks a second message we do not look at.
 async fn attach_peek_lock(conn: &mut ServiceBusConnection, address: &str) -> Result<Receiver> {
     authorize(conn, address).await?;
-    step(
+    let mut receiver = step(
         "attach receiver",
         Receiver::builder()
             .name(link_name("rx"))
             .source(address.to_string())
             .receiver_settle_mode(ReceiverSettleMode::Second)
-            .credit_mode(CreditMode::Auto(1))
+            .credit_mode(CreditMode::Manual)
             .attach(conn.session_mut()),
     )
-    .await
+    .await?;
+    step("grant credit", receiver.set_credit(1)).await?;
+    Ok(receiver)
+}
+
+/// Settlement applied to the one delivery that was picked.
+enum Pick {
+    DeadLetter { reason: String, description: String },
+    Defer,
+}
+
+fn dead_letter_error(reason: &str, description: &str) -> AmqpError {
+    let mut info = Fields::default();
+    info.insert(Symbol::from("DeadLetterReason"), Value::from(reason));
+    info.insert(
+        Symbol::from("DeadLetterErrorDescription"),
+        Value::from(description),
+    );
+    AmqpError::new(
+        ErrorCondition::Custom(Symbol::from("com.microsoft:dead-letter")),
+        None,
+        Some(info),
+    )
+}
+
+async fn settle_pick(
+    receiver: &mut Receiver,
+    delivery: &Delivery<Body<Value>>,
+    pick: &Pick,
+) -> Result<()> {
+    match pick {
+        Pick::DeadLetter {
+            reason,
+            description,
+        } => {
+            step(
+                "dead-letter",
+                receiver.reject(delivery, dead_letter_error(reason, description)),
+            )
+            .await
+        }
+        Pick::Defer => {
+            step(
+                "defer",
+                receiver.modify(
+                    delivery,
+                    Modified {
+                        delivery_failed: None,
+                        undeliverable_here: Some(true),
+                        message_annotations: None,
+                    },
+                ),
+            )
+            .await
+        }
+    }
+}
+
+/// Whether the delivery's application property `key` is the string `value`.
+fn has_prop(delivery: &Delivery<Body<Value>>, key: &str, value: &str) -> bool {
+    delivery
+        .message()
+        .application_properties
+        .as_ref()
+        .and_then(|a| a.0.get(key))
+        .is_some_and(|v| matches!(v, SimpleValue::String(s) if s == value))
+}
+
+/// Receive in peek-lock until a delivery matches `prop` (or `wait` elapses),
+/// settle that one with `pick`, and release every non-matching delivery that
+/// was received on the way. Non-matching ones are released only at the end so
+/// the broker cannot hand them straight back; credit is granted one message at
+/// a time so nothing unexamined gets locked.
+async fn settle_first_matching(
+    conn: &mut ServiceBusConnection,
+    address: &str,
+    prop: (&str, &str),
+    pick: Pick,
+    wait: Duration,
+) -> Result<bool> {
+    authorize(conn, address).await?;
+    let mut receiver = step(
+        "attach receiver",
+        Receiver::builder()
+            .name(link_name("rx"))
+            .source(address.to_string())
+            .receiver_settle_mode(ReceiverSettleMode::Second)
+            .credit_mode(CreditMode::Manual)
+            .attach(conn.session_mut()),
+    )
+    .await?;
+    let deadline = tokio::time::Instant::now() + wait;
+    let mut skipped = Vec::new();
+    let mut picked = false;
+    let outcome = loop {
+        // One credit per receive: the broker never locks messages we did not look at.
+        if let Err(e) = step("grant credit", receiver.set_credit(1)).await {
+            break Err(e);
+        }
+        match tokio::time::timeout_at(deadline, receiver.recv::<Body<Value>>()).await {
+            Err(_) => break Ok(()),
+            Ok(Err(e)) => break Err(Error::Protocol(format!("receive: {e}"))),
+            Ok(Ok(delivery)) if has_prop(&delivery, prop.0, prop.1) => {
+                match settle_pick(&mut receiver, &delivery, &pick).await {
+                    Ok(()) => picked = true,
+                    Err(e) => break Err(e),
+                }
+                break Ok(());
+            }
+            Ok(Ok(delivery)) => skipped.push(delivery),
+        }
+    };
+    for delivery in &skipped {
+        let _ = tokio::time::timeout(STEP_TIMEOUT, receiver.release(delivery)).await;
+    }
+    close_receiver(receiver).await;
+    outcome.map(|()| picked)
 }
 
 /// Receive the next message (peek-lock) and dead-letter it with `reason`.
@@ -165,20 +282,30 @@ pub async fn dead_letter_next(
         }
         Ok(r) => r.map_err(|e| Error::Protocol(format!("receive: {e}")))?,
     };
-    let mut info = Fields::default();
-    info.insert(Symbol::from("DeadLetterReason"), Value::from(reason));
-    info.insert(
-        Symbol::from("DeadLetterErrorDescription"),
-        Value::from(description),
-    );
-    let error = AmqpError::new(
-        ErrorCondition::Custom(Symbol::from("com.microsoft:dead-letter")),
-        None,
-        Some(info),
-    );
-    step("dead-letter", receiver.reject(&delivery, error)).await?;
+    let pick = Pick::DeadLetter {
+        reason: reason.to_string(),
+        description: description.to_string(),
+    };
+    settle_pick(&mut receiver, &delivery, &pick).await?;
     close_receiver(receiver).await;
     Ok(true)
+}
+
+/// Like [`dead_letter_next`], but only the first message whose application
+/// property `prop.0` equals `prop.1` is dead-lettered; others are released.
+pub async fn dead_letter_next_matching(
+    conn: &mut ServiceBusConnection,
+    address: &str,
+    prop: (&str, &str),
+    reason: &str,
+    description: &str,
+    wait: Duration,
+) -> Result<bool> {
+    let pick = Pick::DeadLetter {
+        reason: reason.to_string(),
+        description: description.to_string(),
+    };
+    settle_first_matching(conn, address, prop, pick, wait).await
 }
 
 /// Receive the next message (peek-lock) and defer it: settle with `Modified`
@@ -196,45 +323,56 @@ pub async fn defer_next(
         }
         Ok(r) => r.map_err(|e| Error::Protocol(format!("receive: {e}")))?,
     };
-    step(
-        "defer",
-        receiver.modify(
-            &delivery,
-            Modified {
-                delivery_failed: None,
-                undeliverable_here: Some(true),
-                message_annotations: None,
-            },
-        ),
-    )
-    .await?;
+    settle_pick(&mut receiver, &delivery, &Pick::Defer).await?;
     close_receiver(receiver).await;
     Ok(true)
 }
 
-/// Receive-and-delete everything in `address` until it has been idle for `idle`.
+/// Defer the first message whose application property `prop.0` equals
+/// `prop.1`; other messages received on the way are released (abandoned).
+/// Returns whether a message was deferred within `wait`.
+pub async fn defer_next_matching(
+    conn: &mut ServiceBusConnection,
+    address: &str,
+    prop: (&str, &str),
+    wait: Duration,
+) -> Result<bool> {
+    settle_first_matching(conn, address, prop, Pick::Defer, wait).await
+}
+
+/// Receive-and-delete everything in `address`; returns how many messages were removed.
+///
+/// The link is receive-and-delete (settled by the sender), so there is
+/// nothing to accept. Passes repeat until two consecutive passes receive
+/// nothing, each pass ending after `idle` without a message. Deferred and
+/// scheduled messages cannot be received this way and are not touched.
 pub async fn drain(
     conn: &mut ServiceBusConnection,
     address: &str,
     idle: Duration,
 ) -> Result<usize> {
-    authorize(conn, address).await?;
-    let mut receiver = step(
-        "attach drain receiver",
-        Receiver::builder()
-            .name(link_name("drain"))
-            .source(address.to_string())
-            .sender_settle_mode(SenderSettleMode::Settled)
-            .credit_mode(CreditMode::Auto(50))
-            .attach(conn.session_mut()),
-    )
-    .await?;
     let mut drained = 0;
-    while let Ok(result) = tokio::time::timeout(idle, receiver.recv::<Body<Value>>()).await {
-        let delivery = result.map_err(|e| Error::Protocol(format!("drain receive: {e}")))?;
-        let _ = tokio::time::timeout(STEP_TIMEOUT, receiver.accept(&delivery)).await;
-        drained += 1;
+    let mut empty_passes = 0;
+    while empty_passes < 2 {
+        authorize(conn, address).await?;
+        let mut receiver = step(
+            "attach drain receiver",
+            Receiver::builder()
+                .name(link_name("drain"))
+                .source(address.to_string())
+                .sender_settle_mode(SenderSettleMode::Settled)
+                .credit_mode(CreditMode::Auto(50))
+                .attach(conn.session_mut()),
+        )
+        .await?;
+        let mut pass = 0;
+        while let Ok(result) = tokio::time::timeout(idle, receiver.recv::<Body<Value>>()).await {
+            result.map_err(|e| Error::Protocol(format!("drain receive: {e}")))?;
+            pass += 1;
+        }
+        close_receiver(receiver).await;
+        drained += pass;
+        empty_passes = if pass == 0 { empty_passes + 1 } else { 0 };
     }
-    close_receiver(receiver).await;
     Ok(drained)
 }
