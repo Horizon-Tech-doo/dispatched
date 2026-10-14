@@ -103,10 +103,12 @@ pub(crate) fn lex(src: &str) -> Result<Vec<Token>> {
                     i += 1;
                 }
                 let text: String = chars[start..i].iter().collect();
-                Tok::Num(
-                    text.parse()
-                        .map_err(|_| err(col, format!("invalid number `{text}`")))?,
-                )
+                let n: f64 = text
+                    .parse()
+                    .ok()
+                    .filter(|n: &f64| n.is_finite())
+                    .ok_or_else(|| err(col, format!("invalid number `{text}`")))?;
+                Tok::Num(n)
             }
             _ if c.is_alphabetic() || c == '_' => {
                 let start = i;

@@ -60,7 +60,11 @@ enum Field {
 
 #[derive(Debug, Clone, PartialEq)]
 enum Lit {
-    Str(String),
+    /// `time` is the literal parsed as RFC 3339 once, at parse time.
+    Str {
+        text: String,
+        time: Option<OffsetDateTime>,
+    },
     Num(f64),
     Bool(bool),
 }
@@ -82,7 +86,8 @@ enum Expr {
     Not(Box<Expr>),
     Cmp(Field, CmpOp, Lit),
     IsNull(Field, bool),
-    Like(Field, String, bool),
+    /// Pattern characters; `%` and `_` are wildcards, the rest compare case-insensitively.
+    Like(Field, Vec<char>, bool),
     In(Field, Vec<Lit>, bool),
 }
 
@@ -135,8 +140,8 @@ impl PropertyFilter {
 
 fn describe(t: &Tok) -> String {
     match t {
-        Tok::Ident(s) => s.clone(),
-        Tok::Str(s) => format!("'{s}'"),
+        Tok::Ident(s) => s.escape_debug().to_string(),
+        Tok::Str(s) => format!("'{}'", s.escape_debug()),
         Tok::Num(n) => n.to_string(),
         Tok::Op(o) => (*o).to_string(),
         Tok::LParen => "(".into(),
@@ -255,7 +260,7 @@ impl Parser {
             return match self.next() {
                 Some(Token {
                     tok: Tok::Str(p), ..
-                }) => Ok(Expr::Like(field, p, negated)),
+                }) => Ok(Expr::Like(field, p.chars().collect(), negated)),
                 _ => Err(err(col, "LIKE needs a 'string' pattern")),
             };
         }
@@ -317,12 +322,15 @@ impl Parser {
                 col,
             }) => {
                 let lower = name.to_ascii_lowercase();
-                if let Some(rest) = lower.strip_prefix("sys.") {
+                let shown = name.escape_debug();
+                if lower == "sys." || lower == "user." {
+                    Err(err(col, format!("missing property name after `{shown}`")))
+                } else if let Some(rest) = lower.strip_prefix("sys.") {
                     SYS_NAMES
                         .iter()
                         .find(|(n, _)| *n == rest)
                         .map(|(_, f)| Field::Sys(*f))
-                        .ok_or_else(|| err(col, format!("unknown system property `{name}` (known: MessageId, CorrelationId, SessionId, Subject, ContentType, To, ReplyTo, SequenceNumber, EnqueuedTime, ScheduledEnqueueTime, DeliveryCount, DeadLetterReason, DeadLetterErrorDescription, DeadLetterSource, State, Size)")))
+                        .ok_or_else(|| err(col, format!("unknown system property `{shown}` (known: MessageId, CorrelationId, SessionId, Subject, ContentType, To, ReplyTo, SequenceNumber, EnqueuedTime, ScheduledEnqueueTime, DeliveryCount, DeadLetterReason, DeadLetterErrorDescription, DeadLetterSource, State, Size)")))
                 } else if lower.starts_with("user.") {
                     Ok(Field::User(name[5..].to_string()))
                 } else {
@@ -341,7 +349,10 @@ impl Parser {
         match self.next() {
             Some(Token {
                 tok: Tok::Str(s), ..
-            }) => Ok(Lit::Str(s)),
+            }) => {
+                let time = OffsetDateTime::parse(&s, &Rfc3339).ok();
+                Ok(Lit::Str { text: s, time })
+            }
             Some(Token {
                 tok: Tok::Num(n), ..
             }) => Ok(Lit::Num(n)),
@@ -420,10 +431,8 @@ fn order(fv: &FieldValue, lit: &Lit) -> Option<Ordering> {
     match (fv, lit) {
         (FieldValue::Num(a), Lit::Num(b)) => a.partial_cmp(b),
         (FieldValue::Str(a), Lit::Num(b)) => a.trim().parse::<f64>().ok()?.partial_cmp(b),
-        (FieldValue::Str(a), Lit::Str(b)) => Some(a.as_str().cmp(b.as_str())),
-        (FieldValue::Time(a), Lit::Str(b)) => {
-            Some(a.cmp(&OffsetDateTime::parse(b, &Rfc3339).ok()?))
-        }
+        (FieldValue::Str(a), Lit::Str { text, .. }) => Some(a.as_str().cmp(text.as_str())),
+        (FieldValue::Time(a), Lit::Str { time, .. }) => Some(a.cmp(&(*time)?)),
         (FieldValue::Bool(a), Lit::Bool(b)) => Some(a.cmp(b)),
         _ => None,
     }
@@ -443,19 +452,25 @@ fn compare(fv: &FieldValue, op: CmpOp, lit: &Lit) -> bool {
     }
 }
 
-/// `%` = any run, `_` = one character; case-insensitive.
-fn like(text: &str, pattern: &str) -> bool {
-    let t: Vec<char> = text.to_lowercase().chars().collect();
-    let p: Vec<char> = pattern.to_lowercase().chars().collect();
+/// Case-insensitive comparison of single characters (full Unicode lowercase mapping).
+fn same_char(a: char, b: char) -> bool {
+    a == b || a.to_lowercase().eq(b.to_lowercase())
+}
+
+/// `%` = any run, `_` = exactly one character; everything else compares
+/// case-insensitively, one character at a time.
+fn like(text: &str, pattern: &[char]) -> bool {
+    let t: Vec<char> = text.chars().collect();
+    let p = pattern;
     let (mut ti, mut pi) = (0usize, 0usize);
     let (mut star, mut mark) = (None::<usize>, 0usize);
     while ti < t.len() {
-        if pi < p.len() && (p[pi] == '_' || p[pi] == t[ti]) {
-            ti += 1;
-            pi += 1;
-        } else if pi < p.len() && p[pi] == '%' {
+        if pi < p.len() && p[pi] == '%' {
             star = Some(pi);
             mark = ti;
+            pi += 1;
+        } else if pi < p.len() && (p[pi] == '_' || same_char(p[pi], t[ti])) {
+            ti += 1;
             pi += 1;
         } else if let Some(s) = star {
             pi = s + 1;
@@ -501,6 +516,7 @@ fn eval(expr: &Expr, msg: &PeekedMessage) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::filter::lexer::lex;
     use crate::messaging::test_message;
     use crate::messaging::{MessageBody, MessageState, PropValue};
     use time::OffsetDateTime;
@@ -665,5 +681,98 @@ mod tests {
         ] {
             let _ = PropertyFilter::parse(src).map(|f| f.matches(&msg()));
         }
+    }
+
+    #[test]
+    fn like_percent_is_a_wildcard_even_when_the_text_has_one() {
+        let like_s = |t: &str, p: &str| like(t, &p.chars().collect::<Vec<_>>());
+        assert!(like_s("%abc", "%c"));
+        assert!(like_s("%x", "%"));
+        assert!(like_s("100%", "100%"));
+        assert!(like_s("", "%"));
+        assert!(like_s("anything", "%"));
+        assert!(like_s("aXbYbZc", "a%b%c"));
+        assert!(!like_s("aXbYbZ", "a%b%c"));
+        assert!(like_s("abc", "a_c"));
+        assert!(!like_s("ac", "a_c"));
+        assert!(like_s("a-b-c", "a_%c"));
+        assert!(like_s("ab", "_%"));
+        assert!(!like_s("", "_%"));
+        assert!(like_s("a%b", "a%%b"));
+    }
+
+    #[test]
+    fn like_folds_case_per_character() {
+        let like_s = |t: &str, p: &str| like(t, &p.chars().collect::<Vec<_>>());
+        // U+0130 lowercases to two chars; `_` must still match exactly one.
+        assert!(like_s("\u{130}x", "_x"));
+        assert!(!like_s("\u{130}x", "__x"));
+        assert!(like_s("Šejla", "ŠEJLA"));
+        assert!(like_s("STRASSE", "strasse"));
+    }
+
+    #[test]
+    fn longest_accepted_chains_fit_a_small_stack() {
+        // 1024 terms of 3 tokens plus 1023 operators = 4095 tokens, just under MAX_TOKENS.
+        let terms = 1024;
+        let or_chain = format!("{}tenant = 7", "tenant = 1 OR ".repeat(terms - 1));
+        let and_chain = vec!["tenant = 7"; terms].join(" AND ");
+        let and_false = format!(
+            "{} AND tenant = 8",
+            vec!["tenant = 7"; terms - 1].join(" AND ")
+        );
+        assert!(lex(&or_chain).unwrap().len() <= MAX_TOKENS);
+        assert!(lex(&or_chain).unwrap().len() > MAX_TOKENS - 8);
+        let result = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || {
+                let m = msg();
+                let a = PropertyFilter::parse(&or_chain).unwrap().matches(&m);
+                let b = PropertyFilter::parse(&and_chain).unwrap().matches(&m);
+                let c = PropertyFilter::parse(&and_false).unwrap().matches(&m);
+                (a, b, c)
+            })
+            .unwrap()
+            .join()
+            .expect("no stack overflow");
+        assert_eq!(result, (true, true, false));
+    }
+
+    #[test]
+    fn rejects_non_finite_numbers_and_empty_prefixed_names() {
+        for (src, needle) in [
+            ("a = 1e999", "invalid number `1e999` at column 5"),
+            ("a = -1e999", "invalid number `-1e999` at column 5"),
+            (
+                "user. = 1",
+                "missing property name after `user.` at column 1",
+            ),
+            (
+                "x = 1 AND sys. = 1",
+                "missing property name after `sys.` at column 11",
+            ),
+        ] {
+            let e = PropertyFilter::parse(src).unwrap_err().to_string();
+            assert!(e.contains(needle), "{src:?} -> {e}");
+        }
+    }
+
+    #[test]
+    fn untrusted_text_is_escaped_in_errors() {
+        let e = PropertyFilter::parse("a = 1 'x\ny'")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("'x\\ny'") && !e.contains('\n'), "{e}");
+    }
+
+    #[test]
+    fn time_literals_are_parsed_once_and_bad_ones_never_match() {
+        let f = PropertyFilter::parse("sys.EnqueuedTime >= '2023-11-14T22:13:20Z'").unwrap();
+        assert!(f.matches(&msg()));
+        assert!(
+            !PropertyFilter::parse("sys.EnqueuedTime != 'garbage'")
+                .unwrap()
+                .matches(&msg())
+        );
     }
 }
