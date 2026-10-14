@@ -407,7 +407,7 @@ fn row_to_profile(r: &rusqlite::Row<'_>) -> rusqlite::Result<Profile> {
             col,
             rusqlite::types::Type::Text,
             Box::new(CorruptProfile(format!(
-                "profile `{name}` has an invalid saved {what}; remove it with `dispatched profile remove {name}` and add it again"
+                "profile `{name}` has an invalid saved {what}; remove it with `dispatched profile rm {name}` and add it again"
             ))),
         )
     };
@@ -777,7 +777,7 @@ mod tests {
                 assert!(
                     e.contains("profile `dev`")
                         && e.contains(what)
-                        && e.contains("dispatched profile remove dev")
+                        && e.contains("dispatched profile rm dev")
                         && !e.contains("delete the file"),
                     "{e}"
                 );
