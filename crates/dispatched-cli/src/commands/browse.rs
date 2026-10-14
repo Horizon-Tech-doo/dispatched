@@ -343,6 +343,27 @@ fn subscriptions_table(subs: &[&SubscriptionInfo]) -> String {
     table(&["SUBSCRIPTION", "ACTIVE", "DLQ", "STATUS"], &rows)
 }
 
+/// The queues table, or a note when the namespace has none.
+fn queues_section(queues: &[QueueInfo]) -> String {
+    if queues.is_empty() {
+        "(no queues)".into()
+    } else {
+        queues_table(queues)
+    }
+}
+
+/// The subscriptions table, or a note when there are no topics or no
+/// subscriptions to show.
+fn subscriptions_section(topic_count: usize, subs: &[&SubscriptionInfo]) -> String {
+    if topic_count == 0 {
+        "(no topics)".into()
+    } else if subs.is_empty() {
+        "(no subscriptions)".into()
+    } else {
+        subscriptions_table(subs)
+    }
+}
+
 /// The entities we can show without listing the namespace: the connection
 /// string's EntityPath, then the profile's pins. Duplicates (any case) and
 /// unparsable pins are dropped.
@@ -516,9 +537,9 @@ async fn list(
         return Ok(());
     }
     let subs: Vec<&SubscriptionInfo> = topic_list.iter().flat_map(|(_, s)| s.iter()).collect();
-    println!("{}", queues_table(&queues));
+    println!("{}", queues_section(&queues));
     if topics && !skipped {
-        println!("\n{}", subscriptions_table(&subs));
+        println!("\n{}", subscriptions_section(topic_list.len(), &subs));
     }
     if any_approximate(&queues, &subs) {
         eprintln!("{APPROX_FOOTNOTE}");
@@ -1385,6 +1406,13 @@ mod tests {
         let bases: Vec<String> = k.iter().map(EntityPath::base).collect();
         assert_eq!(bases, vec!["orders", "events/Subscriptions/all"]);
         assert!(known_entities(None, &[]).is_empty());
+    }
+
+    #[test]
+    fn empty_listings_say_so_instead_of_printing_a_bare_header() {
+        assert_eq!(queues_section(&[]), "(no queues)");
+        assert_eq!(subscriptions_section(0, &[]), "(no topics)");
+        assert_eq!(subscriptions_section(2, &[]), "(no subscriptions)");
     }
 
     #[test]
