@@ -61,20 +61,20 @@ jobs:
         with: { workspaces: "dispatched -> target" }
       # ubuntu runners are x86_64, so emulator.sh uses only the default compose file.
       - run: testing/emulator/emulator.sh up
-      - name: Run the M0 gate test
+      - name: Run the emulator gate tests
         shell: bash
         run: |
           set -o pipefail
-          DISPATCHED_EMULATOR=1 cargo test -p dispatched-core --features test-support --test emulator_m0 -- --nocapture 2>&1 | tee emulator-gate.log
-          # The gate test prints "skipped: ..." and passes when the emulator is
+          DISPATCHED_EMULATOR=1 cargo test -p dispatched-core --features test-support --test emulator_m0 --test emulator_m1 -- --nocapture 2>&1 | tee emulator-gate.log
+          # The gate tests print "skipped: ..." and pass when the emulator is
           # not enabled; that must never count as a green gate.
           if grep -q 'skipped:' emulator-gate.log; then
-            echo "::error::Emulator gate test skipped itself; the gate did not run."
+            echo "::error::An emulator gate test skipped itself; the gate did not run."
             exit 1
           fi
-          # ...and the test must positively report that it ran and passed.
-          if ! grep -q 'test result: ok. 1 passed' emulator-gate.log; then
-            echo "::error::Emulator gate test did not report 'test result: ok. 1 passed'."
+          # ...and both tests must positively report that they ran and passed.
+          if [ "$(grep -c 'test result: ok. 1 passed' emulator-gate.log)" -ne 2 ]; then
+            echo "::error::Both emulator gate tests must report 'test result: ok. 1 passed'."
             exit 1
           fi
       - if: always()
