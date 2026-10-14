@@ -5,11 +5,10 @@ use super::management::{ManagementLink, SETUP_TIMEOUT, map_put_token_error};
 use super::tokens_ledger::{LinkLru, TokenLedger, must_reattach};
 use crate::namespace::Namespace;
 use crate::{Error, Result};
+use fe2o3_amqp::Session;
 use fe2o3_amqp::connection::ConnectionHandle;
-use fe2o3_amqp::sasl_profile::SaslProfile;
 use fe2o3_amqp::session::SessionHandle;
 use fe2o3_amqp::types::primitives::Timestamp;
-use fe2o3_amqp::{Connection, Session};
 use fe2o3_amqp_cbs::client::CbsClient;
 use fe2o3_amqp_cbs::token::CbsToken;
 use secrecy::ExposeSecret;
@@ -35,25 +34,14 @@ pub struct ServiceBusConnection {
 }
 
 impl ServiceBusConnection {
-    /// Connect (TLS for the cloud, plain TCP for the emulator), begin a
+    /// Connect (TLS or WebSockets for the cloud, plain TCP for the emulator), begin a
     /// session, and attach the CBS node.
     pub async fn open(ns: &Namespace) -> Result<Self> {
-        let url = ns.amqp_url();
-        let builder = Connection::builder()
-            .container_id(format!("dispatched-{}", uuid::Uuid::new_v4().simple()))
-            .hostname(Some(ns.host()))
-            .sasl_profile(SaslProfile::Anonymous)
-            .max_frame_size(65_536u32)
-            .idle_time_out(60_000u32);
-        let builder = if ns.is_emulator() {
-            builder
-        } else {
-            builder.alt_tls_establishment(true)
-        };
-        let mut connection = tokio::time::timeout(SETUP_TIMEOUT, builder.open(url.as_str()))
-            .await
-            .map_err(|_| Error::Timeout(format!("connecting to {url} timed out")))?
-            .map_err(|e| Error::Network(format!("cannot connect to {url}: {e}")))?;
+        let mut connection = super::transport::open_connection(
+            ns,
+            format!("dispatched-{}", uuid::Uuid::new_v4().simple()),
+        )
+        .await?;
         let mut session = tokio::time::timeout(SETUP_TIMEOUT, Session::begin(&mut connection))
             .await
             .map_err(|_| Error::Timeout("beginning the AMQP session timed out".into()))?

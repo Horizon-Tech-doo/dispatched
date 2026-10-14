@@ -8,6 +8,7 @@ pub mod scan;
 #[cfg(feature = "test-support")]
 pub mod testing;
 mod tokens_ledger;
+mod transport;
 
 pub use connection::ServiceBusConnection;
 pub use management::{ManagementLink, MgmtResponse};

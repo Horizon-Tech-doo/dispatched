@@ -15,13 +15,13 @@ pub struct Explorer {
 
 impl Explorer {
     /// Explorer for `ns`. No network I/O until first use.
-    pub fn new(ns: Namespace) -> Self {
-        let mgmt = ManagementClient::new(&ns);
-        Self {
+    pub fn new(ns: Namespace) -> Result<Self> {
+        let mgmt = ManagementClient::new(&ns)?;
+        Ok(Self {
             ns,
             mgmt,
             amqp: Mutex::new(None),
-        }
+        })
     }
 
     /// The namespace.

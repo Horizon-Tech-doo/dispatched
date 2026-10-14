@@ -282,7 +282,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 &session,
                 &st,
             )?;
-            let explorer = Explorer::new(ns);
+            let explorer = Explorer::new(ns)?;
             let queues = explorer.list_queues().await?;
             if let Format::Json = cli.format {
                 let mut value = serde_json::json!({ "queues": queues });
@@ -352,7 +352,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 &session,
                 &st,
             )?;
-            let explorer = Explorer::new(ns);
+            let explorer = Explorer::new(ns)?;
             let path = EntityPath::parse(&entity)?;
             let view = match (dlq, transfer_dlq) {
                 (true, _) => PeekView::DeadLetter,

@@ -42,20 +42,39 @@ pub struct ManagementClient {
 
 impl ManagementClient {
     /// Client for `ns`.
-    pub fn new(ns: &Namespace) -> Self {
-        Self::with_base(ns.management_base(), ns.tokens().clone())
+    ///
+    /// Fails only if the proxy configured on `ns` cannot be used.
+    pub fn new(ns: &Namespace) -> Result<Self> {
+        let proxy = match ns.proxy() {
+            Some(p) => Some(
+                reqwest::Proxy::all(p.url_for_reqwest())
+                    .map_err(|e| Error::Invalid(format!("proxy: {}", e.without_url())))?,
+            ),
+            None => None,
+        };
+        Ok(Self::build(
+            ns.management_base(),
+            ns.tokens().clone(),
+            proxy,
+        ))
     }
 
     /// Client for an explicit base URL (tests).
     pub fn with_base(base: impl Into<String>, tokens: Arc<dyn TokenSource>) -> Self {
-        let http = reqwest::Client::builder()
+        Self::build(base.into(), tokens, None)
+    }
+
+    fn build(base: String, tokens: Arc<dyn TokenSource>, proxy: Option<reqwest::Proxy>) -> Self {
+        let mut builder = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .expect("reqwest client builds");
+            .timeout(REQUEST_TIMEOUT);
+        if let Some(proxy) = proxy {
+            builder = builder.proxy(proxy);
+        }
+        let http = builder.build().expect("reqwest client builds");
         Self {
             http,
-            base: base.into().trim_end_matches('/').to_string(),
+            base: base.trim_end_matches('/').to_string(),
             tokens,
         }
     }

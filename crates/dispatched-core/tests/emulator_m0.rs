@@ -70,7 +70,7 @@ async fn m0_gate_flow_against_emulator() {
     );
     conn.close().await.unwrap();
 
-    let explorer = Explorer::new(ns);
+    let explorer = Explorer::new(ns).unwrap();
 
     // 1. List queues over ATOM (HTTP :5300).
     let queues = explorer

@@ -25,6 +25,7 @@ fe2o3-amqp = { version = "0.18.2", features = ["rustls"] }
 fe2o3-amqp-cbs = "0.18"
 fe2o3-amqp-management = "0.18"
 fe2o3-amqp-types = "0.18"
+fe2o3-amqp-ws = { version = "0.18", features = ["rustls-tls-webpki-roots"] }
 mockito = "1"
 open = "5"
 percent-encoding = "2"
