@@ -7,7 +7,9 @@ mod state;
 use anyhow::Context;
 use clap::{Parser, Subcommand, ValueEnum};
 use dispatched_core::discovery::discover_namespaces;
-use dispatched_core::{EntityPath, Explorer, MessageBody, PeekOptions, PeekView, PeekedMessage};
+use dispatched_core::{
+    EntityCounts, EntityPath, Explorer, MessageBody, PeekOptions, PeekView, PeekedMessage,
+};
 use horizon_azure_kit::AzureCloud;
 use horizon_azure_kit::arm::ArmClient;
 use output::{ellipsize, table};
@@ -120,8 +122,20 @@ fn format_error(e: &anyhow::Error) -> String {
     output::sanitize(&text)
 }
 
-fn count_cell(n: Option<u64>) -> String {
-    n.map(|n| n.to_string()).unwrap_or_else(|| "?".into())
+/// A count cell: `?` when unknown, `~N` when counted by peeking, `~N+` when
+/// that count hit its cap.
+fn count_cell(counts: Option<&EntityCounts>, pick: fn(&EntityCounts) -> u64) -> String {
+    match counts {
+        None => "?".into(),
+        Some(c) => {
+            let n = pick(c);
+            match (c.approximate, c.truncated) {
+                (_, true) => format!("~{n}+"),
+                (true, false) => format!("~{n}"),
+                (false, false) => n.to_string(),
+            }
+        }
+    }
 }
 
 fn body_cell(body: &MessageBody) -> String {
@@ -302,9 +316,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 .map(|q| {
                     vec![
                         q.name.clone(),
-                        count_cell(q.counts.as_ref().map(|c| c.active)),
-                        count_cell(q.counts.as_ref().map(|c| c.dead_letter)),
-                        count_cell(q.counts.as_ref().map(|c| c.scheduled)),
+                        count_cell(q.counts.as_ref(), |c| c.active),
+                        count_cell(q.counts.as_ref(), |c| c.dead_letter),
+                        count_cell(q.counts.as_ref(), |c| c.scheduled),
                         if q.requires_session {
                             "yes".into()
                         } else {
@@ -327,8 +341,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     for s in explorer.list_subscriptions(&t.name).await? {
                         rows.push(vec![
                             format!("{}/subscriptions/{}", t.name, s.name),
-                            count_cell(s.counts.as_ref().map(|c| c.active)),
-                            count_cell(s.counts.as_ref().map(|c| c.dead_letter)),
+                            count_cell(s.counts.as_ref(), |c| c.active),
+                            count_cell(s.counts.as_ref(), |c| c.dead_letter),
                             s.status.clone().unwrap_or_default(),
                         ]);
                     }

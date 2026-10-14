@@ -17,6 +17,12 @@ pub struct EntityCounts {
     pub transfer: u64,
     /// Transfer dead-letter messages.
     pub transfer_dead_letter: u64,
+    /// Counted by peeking (the service did not report counts); may be capped.
+    #[serde(default)]
+    pub approximate: bool,
+    /// A peek count hit its cap, so the numbers are lower bounds. Implies `approximate`.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 /// A queue.
@@ -106,6 +112,8 @@ fn counts(desc: &Node) -> Option<EntityCounts> {
         scheduled: opt(c, "ScheduledMessageCount").unwrap_or_default(),
         transfer: opt(c, "TransferMessageCount").unwrap_or_default(),
         transfer_dead_letter: opt(c, "TransferDeadLetterMessageCount").unwrap_or_default(),
+        approximate: false,
+        truncated: false,
     })
 }
 

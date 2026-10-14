@@ -1,7 +1,7 @@
 //! Peek through an entity, keeping only messages that match a view and filter.
 
 use super::connection::ServiceBusConnection;
-use super::message::PeekedMessage;
+use super::message::{MessageState, PeekedMessage};
 use super::peek::{self, MAX_PER_REQUEST};
 use crate::Result;
 use crate::filter::MessageFilter;
@@ -163,6 +163,73 @@ pub async fn scan_messages(
         next_sequence,
         exhausted,
     })
+}
+
+/// Message tallies by state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StateCounts {
+    /// Active.
+    pub active: u64,
+    /// Deferred.
+    pub deferred: u64,
+    /// Scheduled.
+    pub scheduled: u64,
+    /// All examined.
+    pub total: u64,
+    /// More messages exist beyond the cap, so the tallies are lower bounds.
+    pub truncated: bool,
+}
+
+/// Count messages in `address` by peeking, examining at most `cap`.
+///
+/// `truncated` is set only when a message exists beyond the cap (an entity of
+/// exactly `cap` messages is not truncated). Like [`scan_messages`], a message
+/// without a sequence number ends the count and stale messages (below the
+/// current position) are skipped and not counted; a batch that makes no
+/// progress ends the count, so it always terminates.
+pub async fn count_messages(
+    src: &mut (impl PeekSource + ?Sized),
+    address: &str,
+    cap: u32,
+) -> Result<StateCounts> {
+    let mut counts = StateCounts::default();
+    let mut next = 0i64;
+    'outer: loop {
+        // When the cap is reached, ask for one more message to see whether
+        // anything lies beyond it.
+        let want = (u64::from(cap).saturating_sub(counts.total))
+            .min(u64::from(MAX_PER_REQUEST))
+            .max(1) as u32;
+        let batch = src.peek_batch(address, next, want).await?;
+        if batch.is_empty() {
+            break;
+        }
+        let mut advanced = false;
+        for m in &batch {
+            if m.sequence_number < 0 {
+                break 'outer;
+            }
+            if m.sequence_number < next {
+                continue;
+            }
+            if counts.total >= u64::from(cap) {
+                counts.truncated = true;
+                break 'outer;
+            }
+            counts.total += 1;
+            match m.state {
+                MessageState::Active => counts.active += 1,
+                MessageState::Deferred => counts.deferred += 1,
+                MessageState::Scheduled => counts.scheduled += 1,
+            }
+            next = m.sequence_number + 1;
+            advanced = true;
+        }
+        if !advanced {
+            break;
+        }
+    }
+    Ok(counts)
 }
 
 #[cfg(test)]
@@ -486,5 +553,68 @@ mod tests {
             .await
             .unwrap();
         assert!(page.exhausted && page.messages.is_empty() && page.scanned == 0);
+    }
+
+    #[tokio::test]
+    async fn count_messages_tallies_states_and_respects_cap() {
+        let mut src = entity(10, 5);
+        src.messages[0].state = MessageState::Deferred;
+        let c = count_messages(&mut src, "q", 1_000).await.unwrap();
+        assert_eq!(
+            (c.active, c.deferred, c.scheduled, c.total, c.truncated),
+            (7, 1, 2, 10, false)
+        );
+        let capped = count_messages(&mut src, "q", 4).await.unwrap();
+        assert_eq!(capped.total, 4);
+        assert!(capped.truncated);
+    }
+
+    #[tokio::test]
+    async fn count_at_exactly_the_cap_is_not_truncated() {
+        let mut src = entity(10, 0);
+        let c = count_messages(&mut src, "q", 10).await.unwrap();
+        assert_eq!((c.total, c.truncated), (10, false));
+        let c = count_messages(&mut src, "q", 9).await.unwrap();
+        assert_eq!((c.total, c.truncated), (9, true));
+        let mut empty = entity(0, 0);
+        let c = count_messages(&mut empty, "q", 0).await.unwrap();
+        assert_eq!((c.total, c.truncated), (0, false));
+    }
+
+    #[tokio::test]
+    async fn count_pages_past_one_request() {
+        let mut src = entity(600, 0);
+        let c = count_messages(&mut src, "q", 10_000).await.unwrap();
+        assert_eq!((c.total, c.truncated), (600, false));
+        assert!(src.calls <= 4, "got {}", src.calls);
+    }
+
+    #[tokio::test]
+    async fn count_terminates_on_a_stuck_source() {
+        let mut src = Stuck { calls: 0 };
+        let c = count_messages(&mut src, "q", 100).await.unwrap();
+        assert_eq!(src.calls, 1);
+        assert_eq!((c.total, c.truncated), (0, false));
+        // Stale replays only: no progress, must not loop.
+        let mut src = Scripted {
+            batches: [seqs(&[1, 2]), seqs(&[1, 2]), seqs(&[1, 2])].into(),
+            calls: 0,
+        };
+        let c = count_messages(&mut src, "q", 100).await.unwrap();
+        assert_eq!(c.total, 2);
+        assert_eq!(src.calls, 2, "second batch is all stale and ends the count");
+    }
+
+    #[tokio::test]
+    async fn count_skips_duplicates_and_stops_at_unsequenced() {
+        let mut batch = seqs(&[5, 5, 6]);
+        batch.push(test_message(-1));
+        batch.push(test_message(7));
+        let mut src = Scripted {
+            batches: [batch].into(),
+            calls: 0,
+        };
+        let c = count_messages(&mut src, "q", 100).await.unwrap();
+        assert_eq!(c.total, 2);
     }
 }

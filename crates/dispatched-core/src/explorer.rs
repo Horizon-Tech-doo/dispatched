@@ -1,8 +1,11 @@
 //! The facade every surface uses: one namespace, lazily-opened AMQP connection.
 
-use crate::messaging::{PeekOptions, PeekPage, ServiceBusConnection, scan_messages};
-use crate::mgmt::{ManagementClient, QueueInfo, SubscriptionInfo, TopicInfo};
-use crate::namespace::{EntityPath, Namespace, PeekView};
+use crate::messaging::{
+    PeekOptions, PeekPage, PeekSource, ServiceBusConnection, StateCounts, count_messages,
+    scan_messages,
+};
+use crate::mgmt::{EntityCounts, ManagementClient, QueueInfo, SubscriptionInfo, TopicInfo};
+use crate::namespace::{EntityPath, Namespace, PeekView, SubQueue};
 use crate::{Error, Result};
 use tokio::sync::Mutex;
 
@@ -14,6 +17,11 @@ pub struct Explorer {
 }
 
 impl Explorer {
+    /// Most messages examined per sub-queue when counting by peek.
+    const COUNT_CAP: u32 = 10_000;
+    /// Most entities per list call that get counted by peek.
+    const MAX_COUNTED_ENTITIES: usize = 50;
+
     /// Explorer for `ns`. No network I/O until first use.
     pub fn new(ns: Namespace) -> Result<Self> {
         let mgmt = ManagementClient::new(&ns)?;
@@ -29,9 +37,25 @@ impl Explorer {
         &self.ns
     }
 
-    /// Queues with counts.
+    /// Queues with counts. Where the service reports none (the emulator),
+    /// counts are taken by peeking and marked approximate; if that fails
+    /// (for example no Listen right), `counts` stays `None`.
     pub async fn list_queues(&self) -> Result<Vec<QueueInfo>> {
-        self.mgmt.list_queues().await
+        let mut queues = self.mgmt.list_queues().await?;
+        for (counted, q) in queues.iter_mut().filter(|q| q.counts.is_none()).enumerate() {
+            if counted == Self::MAX_COUNTED_ENTITIES {
+                tracing::info!(
+                    "approximate counts limited to the first {} queues",
+                    Self::MAX_COUNTED_ENTITIES
+                );
+                break;
+            }
+            q.counts = self
+                .count_by_peek(&EntityPath::queue(&q.name), Self::COUNT_CAP)
+                .await
+                .ok();
+        }
+        Ok(queues)
     }
 
     /// Topics.
@@ -40,8 +64,50 @@ impl Explorer {
     }
 
     /// Subscriptions of `topic`.
+    ///
+    /// Missing counts are filled by peeking, as in [`Explorer::list_queues`].
     pub async fn list_subscriptions(&self, topic: &str) -> Result<Vec<SubscriptionInfo>> {
-        self.mgmt.list_subscriptions(topic).await
+        let mut subs = self.mgmt.list_subscriptions(topic).await?;
+        for (counted, s) in subs.iter_mut().filter(|s| s.counts.is_none()).enumerate() {
+            if counted == Self::MAX_COUNTED_ENTITIES {
+                tracing::info!(
+                    "approximate counts limited to the first {} subscriptions of {topic}",
+                    Self::MAX_COUNTED_ENTITIES
+                );
+                break;
+            }
+            s.counts = self
+                .count_by_peek(&EntityPath::subscription(topic, &s.name), Self::COUNT_CAP)
+                .await
+                .ok();
+        }
+        Ok(subs)
+    }
+
+    /// Count messages by peeking, for namespaces such as the emulator that
+    /// report no counts. At most `cap` messages are examined per sub-queue;
+    /// the result is `approximate`, and `truncated` when a cap was hit (the
+    /// numbers are then lower bounds). `active` includes deferred messages, as
+    /// Service Bus counts them.
+    pub async fn count_by_peek(&self, entity: &EntityPath, cap: u32) -> Result<EntityCounts> {
+        with_one_retry(|_attempt| self.count_once(entity, cap)).await
+    }
+
+    /// One counting attempt; drops the cached connection on connection-level
+    /// failures, like [`Explorer::peek_once`].
+    async fn count_once(&self, entity: &EntityPath, cap: u32) -> Result<EntityCounts> {
+        let mut guard = self.amqp.lock().await;
+        if guard.is_none() {
+            *guard = Some(ServiceBusConnection::open(&self.ns).await?);
+        }
+        let conn = guard.as_mut().expect("opened above");
+        let result = count_sub_queues(conn, entity, cap).await;
+        if result.as_ref().is_err_and(|e| retry_after(e, 0))
+            && let Some(conn) = guard.take()
+        {
+            let _ = conn.close().await;
+        }
+        result
     }
 
     /// Peek `view` of `entity` according to `opts`.
@@ -84,6 +150,31 @@ impl Explorer {
             let _ = conn.close().await;
         }
     }
+}
+
+async fn count_sub_queues(
+    conn: &mut (impl PeekSource + ?Sized),
+    entity: &EntityPath,
+    cap: u32,
+) -> Result<EntityCounts> {
+    let main = count_messages(conn, &entity.address(SubQueue::Active), cap).await?;
+    let dlq = count_messages(conn, &entity.address(SubQueue::DeadLetter), cap).await?;
+    // Entities without transfer support have no transfer dead-letter queue.
+    let tdlq = match count_messages(conn, &entity.address(SubQueue::TransferDeadLetter), cap).await
+    {
+        Ok(c) => c,
+        Err(Error::NotFound(_)) => StateCounts::default(),
+        Err(e) => return Err(e),
+    };
+    Ok(EntityCounts {
+        active: main.active + main.deferred,
+        dead_letter: dlq.total,
+        scheduled: main.scheduled,
+        transfer: 0,
+        transfer_dead_letter: tdlq.total,
+        approximate: true,
+        truncated: main.truncated || dlq.truncated || tdlq.truncated,
+    })
 }
 
 /// Whether a failed operation should be retried on a fresh connection.
@@ -197,5 +288,84 @@ mod tests {
         .await;
         assert!(matches!(out, Err(Error::Network(m)) if m == "second"));
         assert_eq!(calls.get(), 2);
+    }
+
+    /// Serves fixed message lists by address; unknown addresses are `NotFound`.
+    struct ByAddress(std::collections::HashMap<String, Vec<crate::messaging::PeekedMessage>>);
+
+    #[async_trait::async_trait]
+    impl PeekSource for ByAddress {
+        async fn peek_batch(
+            &mut self,
+            address: &str,
+            from: i64,
+            max: u32,
+        ) -> Result<Vec<crate::messaging::PeekedMessage>> {
+            let list = self
+                .0
+                .get(address)
+                .ok_or_else(|| Error::NotFound(address.into()))?;
+            Ok(list
+                .iter()
+                .filter(|m| m.sequence_number >= from)
+                .take(max as usize)
+                .cloned()
+                .collect())
+        }
+    }
+
+    fn msgs(n: i64) -> Vec<crate::messaging::PeekedMessage> {
+        (1..=n).map(crate::messaging::test_message).collect()
+    }
+
+    #[tokio::test]
+    async fn sub_queue_counts_combine_and_flag_truncation() {
+        let q = EntityPath::queue("orders");
+        let mut deferred = msgs(3);
+        deferred[0].state = crate::messaging::MessageState::Deferred;
+        let mut src = ByAddress(
+            [
+                ("orders".to_string(), deferred),
+                ("orders/$DeadLetterQueue".to_string(), msgs(5)),
+                ("orders/$Transfer/$DeadLetterQueue".to_string(), msgs(1)),
+            ]
+            .into(),
+        );
+        let c = count_sub_queues(&mut src, &q, 100).await.unwrap();
+        assert_eq!(
+            (
+                c.active,
+                c.dead_letter,
+                c.scheduled,
+                c.transfer,
+                c.transfer_dead_letter
+            ),
+            (3, 5, 0, 0, 1),
+            "deferred counts as active"
+        );
+        assert!(c.approximate && !c.truncated);
+        let c = count_sub_queues(&mut src, &q, 4).await.unwrap();
+        assert!(c.approximate && c.truncated, "the DLQ has more than 4");
+        assert_eq!(c.dead_letter, 4);
+    }
+
+    #[tokio::test]
+    async fn missing_transfer_dlq_counts_as_zero_but_other_errors_propagate() {
+        let q = EntityPath::queue("orders");
+        let mut src = ByAddress(
+            [
+                ("orders".to_string(), msgs(2)),
+                ("orders/$DeadLetterQueue".to_string(), msgs(0)),
+            ]
+            .into(),
+        );
+        let c = count_sub_queues(&mut src, &q, 100).await.unwrap();
+        assert_eq!((c.active, c.transfer_dead_letter), (2, 0));
+        // A missing main queue is an error.
+        let mut src = ByAddress(Default::default());
+        assert!(matches!(
+            count_sub_queues(&mut src, &q, 100).await,
+            Err(Error::NotFound(_))
+        ));
     }
 }
