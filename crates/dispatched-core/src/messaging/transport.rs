@@ -66,6 +66,11 @@ pub(crate) async fn proxy_connect<S: AsyncRead + AsyncWrite + Unpin>(
                 "the proxy sent an invalid response to CONNECT".into(),
             ));
         }
+        if code.len() != 3 || !code.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(Error::Network(
+                "the proxy sent an invalid response to CONNECT".into(),
+            ));
+        }
         match code {
             "200" => Ok(()),
             "407" => Err(Error::Network(
@@ -213,5 +218,99 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(e, Error::Timeout(_)));
+    }
+
+    #[tokio::test]
+    async fn proxy_connect_leaves_bytes_after_the_headers_unread() {
+        let (mut s, server) = proxy_replying(b"HTTP/1.1 200 OK\r\n\r\nEXTRA").await;
+        proxy_connect(&mut s, "h", 443, None, Duration::from_secs(2))
+            .await
+            .unwrap();
+        let mut extra = [0u8; 5];
+        s.read_exact(&mut extra).await.unwrap();
+        assert_eq!(&extra, b"EXTRA");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn proxy_request_names_the_target_in_host_header() {
+        let (mut s, server) = proxy_replying(b"HTTP/1.1 200 OK\r\n\r\n").await;
+        proxy_connect(
+            &mut s,
+            "ns.servicebus.windows.net",
+            443,
+            None,
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        let req = String::from_utf8(server.await.unwrap()).unwrap();
+        assert!(
+            req.contains("\r\nHost: ns.servicebus.windows.net:443\r\n"),
+            "{req}"
+        );
+        assert!(!req.contains("Proxy-Authorization"), "{req}");
+    }
+
+    #[tokio::test]
+    async fn proxy_refusals_are_named_without_leaking_credentials() {
+        for reply in [
+            &b"HTTP/1.1 403 Forbidden\r\n\r\n"[..],
+            &b"HTTP/1.1 502 Bad Gateway\r\n\r\n"[..],
+        ] {
+            let (mut s, _server) = proxy_replying(reply).await;
+            let e = proxy_connect(
+                &mut s,
+                "h",
+                443,
+                Some(("alice", "hunter2")),
+                Duration::from_secs(2),
+            )
+            .await
+            .unwrap_err();
+            let text = e.to_string();
+            assert!(matches!(e, Error::Network(_)), "{text}");
+            assert!(
+                text.contains("HTTP 403") || text.contains("HTTP 502"),
+                "{text}"
+            );
+            assert!(
+                !text.contains("hunter2") && !text.contains("alice"),
+                "{text}"
+            );
+            assert!(!text.contains("YWxpY2U6aHVudGVyMg"), "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_with_a_non_numeric_status_is_invalid_and_not_echoed() {
+        let (mut s, _server) =
+            proxy_replying(b"HTTP/1.1 <script>alert(1)</script> x\r\n\r\n").await;
+        let e = proxy_connect(&mut s, "h", 443, None, Duration::from_secs(2))
+            .await
+            .unwrap_err();
+        let text = e.to_string();
+        assert!(text.contains("invalid response"), "{text}");
+        assert!(!text.contains("script"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn proxy_closing_before_replying_is_an_error_not_a_hang() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 1024];
+            let _ = s.read(&mut buf).await;
+            // dropped: closes without replying
+        });
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        let e = proxy_connect(&mut s, "h", 443, None, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&e, Error::Network(m) if m.contains("closed")),
+            "{e}"
+        );
     }
 }

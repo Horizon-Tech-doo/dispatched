@@ -211,10 +211,14 @@ impl ProxyConfig {
                 "only http:// proxies are supported (the tunnel itself is TLS)".into(),
             ));
         }
-        let host = parsed
-            .host_str()
-            .filter(|h| !h.is_empty())
-            .ok_or_else(|| Error::Invalid("proxy URL has no host".into()))?;
+        // Store the dialable host: `host_str()` brackets IPv6 literals, which
+        // `TcpStream::connect` cannot resolve.
+        let host = match parsed.host() {
+            Some(url::Host::Domain(d)) if !d.is_empty() => d.to_string(),
+            Some(url::Host::Ipv4(a)) => a.to_string(),
+            Some(url::Host::Ipv6(a)) => a.to_string(),
+            _ => return Err(Error::Invalid("proxy URL has no host".into())),
+        };
         let port = parsed.port_or_known_default().unwrap_or(80);
         let user = (!parsed.username().is_empty()).then(|| {
             percent_encoding::percent_decode_str(parsed.username())
@@ -229,7 +233,7 @@ impl ProxyConfig {
             )
         });
         Ok(Self {
-            host: host.to_string(),
+            host,
             port,
             user,
             password,
@@ -273,6 +277,12 @@ impl ProxyConfig {
     /// URL for reqwest (contains credentials — never log it).
     pub fn url_for_reqwest(&self) -> String {
         use secrecy::ExposeSecret;
+        // IPv6 literals need brackets in an authority.
+        let host = if self.host.contains(':') {
+            format!("[{}]", self.host)
+        } else {
+            self.host.clone()
+        };
         let enc = |s: &str| {
             percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
         };
@@ -281,11 +291,11 @@ impl ProxyConfig {
                 "http://{}:{}@{}:{}",
                 enc(u),
                 enc(p.expose_secret()),
-                self.host,
+                host,
                 self.port
             ),
-            (Some(u), None) => format!("http://{}@{}:{}", enc(u), self.host, self.port),
-            _ => format!("http://{}:{}", self.host, self.port),
+            (Some(u), None) => format!("http://{}@{}:{}", enc(u), host, self.port),
+            _ => format!("http://{host}:{}", self.port),
         }
     }
 }
@@ -561,5 +571,18 @@ mod tests {
         assert!(!dbg.contains("s3cr"), "{dbg}");
         assert!(ProxyConfig::parse("https://proxy:443").is_err());
         assert!(ProxyConfig::parse("socks5://p:1").is_err());
+    }
+
+    #[test]
+    fn ipv6_proxy_host_is_stored_unbracketed() {
+        let p = ProxyConfig::parse("http://[::1]:3128").unwrap();
+        assert_eq!(p.host(), "::1");
+        assert_eq!(p.port(), 3128);
+        assert_eq!(p.url_for_reqwest(), "http://[::1]:3128");
+        let p = ProxyConfig::parse("http://u:p@[2001:db8::2]:8080").unwrap();
+        assert_eq!(p.host(), "2001:db8::2");
+        assert_eq!(p.url_for_reqwest(), "http://u:p@[2001:db8::2]:8080");
+        let p = ProxyConfig::parse("http://proxy.corp:3128").unwrap();
+        assert_eq!(p.host(), "proxy.corp");
     }
 }

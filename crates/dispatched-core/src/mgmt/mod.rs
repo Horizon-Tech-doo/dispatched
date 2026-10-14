@@ -43,7 +43,8 @@ pub struct ManagementClient {
 impl ManagementClient {
     /// Client for `ns`.
     ///
-    /// Fails only if the proxy configured on `ns` cannot be used.
+    /// Fails if the proxy configured on `ns` is unusable (`Error::Invalid`)
+    /// or the HTTP client cannot be initialised (`Error::Network`).
     pub fn new(ns: &Namespace) -> Result<Self> {
         let proxy = match ns.proxy() {
             Some(p) => Some(
@@ -52,31 +53,36 @@ impl ManagementClient {
             ),
             None => None,
         };
-        Ok(Self::build(
-            ns.management_base(),
-            ns.tokens().clone(),
-            proxy,
-        ))
+        Self::build(ns.management_base(), ns.tokens().clone(), proxy)
     }
 
-    /// Client for an explicit base URL (tests).
+    /// Client for an explicit base URL (tests; panics if the HTTP client cannot be built).
     pub fn with_base(base: impl Into<String>, tokens: Arc<dyn TokenSource>) -> Self {
-        Self::build(base.into(), tokens, None)
+        Self::build(base.into(), tokens, None).expect("reqwest client builds")
     }
 
-    fn build(base: String, tokens: Arc<dyn TokenSource>, proxy: Option<reqwest::Proxy>) -> Self {
+    fn build(
+        base: String,
+        tokens: Arc<dyn TokenSource>,
+        proxy: Option<reqwest::Proxy>,
+    ) -> Result<Self> {
         let mut builder = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT);
         if let Some(proxy) = proxy {
             builder = builder.proxy(proxy);
         }
-        let http = builder.build().expect("reqwest client builds");
-        Self {
+        let http = builder.build().map_err(|e| {
+            Error::Network(format!(
+                "cannot initialise the HTTP client: {}",
+                e.without_url()
+            ))
+        })?;
+        Ok(Self {
             http,
             base: base.trim_end_matches('/').to_string(),
             tokens,
-        }
+        })
     }
 
     /// All queues with counts.
