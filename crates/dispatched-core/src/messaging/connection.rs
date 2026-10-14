@@ -2,7 +2,7 @@
 //! plus cached management links per entity address.
 
 use super::management::{ManagementLink, SETUP_TIMEOUT, map_put_token_error};
-use super::tokens_ledger::{LinkLru, TokenLedger};
+use super::tokens_ledger::{LinkLru, TokenLedger, must_reattach};
 use crate::namespace::Namespace;
 use crate::{Error, Result};
 use fe2o3_amqp::connection::ConnectionHandle;
@@ -104,11 +104,23 @@ impl ServiceBusConnection {
     }
 
     /// The management link for `address`, attached on first use. Tokens are
-    /// re-put when missing or near expiry; at most 64 links are kept (LRU).
+    /// re-put when missing or near expiry; a cached link whose token lapsed is
+    /// closed and re-attached (the broker closes links when their token
+    /// expires). At most 64 links are kept (LRU).
     pub async fn management(&mut self, address: &str) -> Result<&mut ManagementLink> {
+        let mgmt_address = format!("{address}/$management");
+        let audiences = [
+            self.ns.amqp_audience(address),
+            self.ns.amqp_audience(&mgmt_address),
+        ];
+        if self.management.contains_key(address)
+            && must_reattach(&self.ledger, &audiences, OffsetDateTime::now_utc())
+            && let Some(stale) = self.management.remove(address)
+        {
+            close_link(stale).await;
+        }
         self.ensure_authorized(address).await?;
-        self.ensure_authorized(&format!("{address}/$management"))
-            .await?;
+        self.ensure_authorized(&mgmt_address).await?;
         if !self.management.contains_key(address) {
             let link = ManagementLink::attach(&mut self.session, address).await?;
             self.management.insert(address.to_string(), link);
@@ -116,7 +128,7 @@ impl ServiceBusConnection {
         if let Some(evicted) = self.lru.touch(address)
             && let Some(old) = self.management.remove(&evicted)
         {
-            old.close().await;
+            close_link(old).await;
             self.ledger.forget(&self.ns.amqp_audience(&evicted));
             self.ledger
                 .forget(&self.ns.amqp_audience(&format!("{evicted}/$management")));
@@ -153,5 +165,15 @@ impl ServiceBusConnection {
                 Ok(())
             }
         }
+    }
+}
+
+/// Close a link, bounded so an unresponsive peer cannot stall the caller.
+async fn close_link(link: ManagementLink) {
+    if tokio::time::timeout(CLOSE_TIMEOUT, link.close())
+        .await
+        .is_err()
+    {
+        tracing::warn!("closing a management link timed out; dropped it");
     }
 }
