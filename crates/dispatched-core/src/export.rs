@@ -59,7 +59,9 @@ impl ExportFormat {
 }
 
 fn io(e: impl std::fmt::Display) -> Error {
-    Error::Invalid(format!("cannot write export: {e}"))
+    Error::Io(format!(
+        "cannot write export: {e} \u{2014} check the output path, permissions and free space"
+    ))
 }
 
 /// Write `messages` to `w`. Returns the number written.
@@ -88,7 +90,11 @@ pub fn write_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::messaging::test_message;
+    use crate::messaging::{MessageState, test_message};
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+    use time::OffsetDateTime;
+    use time::format_description::well_known::Rfc3339;
 
     fn two() -> Vec<PeekedMessage> {
         let mut a = test_message(1);
@@ -96,6 +102,12 @@ mod tests {
         let mut b = test_message(2);
         b.body = MessageBody::Binary(vec![0xff, 0x00]);
         vec![a, b]
+    }
+
+    fn export_json(messages: &[PeekedMessage]) -> serde_json::Value {
+        let mut out = Vec::new();
+        write_messages(&mut out, messages, ExportFormat::Json).unwrap();
+        serde_json::from_slice(&out).unwrap()
     }
 
     #[test]
@@ -114,6 +126,13 @@ mod tests {
     }
 
     #[test]
+    fn json_output_is_a_single_array_of_two() {
+        let v = export_json(&two());
+        let arr = v.as_array().expect("top-level JSON array");
+        assert_eq!(arr.len(), 2);
+    }
+
+    #[test]
     fn ndjson_is_one_object_per_line() {
         let mut out = Vec::new();
         write_messages(&mut out, &two(), ExportFormat::Ndjson).unwrap();
@@ -127,8 +146,90 @@ mod tests {
     }
 
     #[test]
+    fn ndjson_has_exactly_two_newline_terminated_lines() {
+        let mut out = Vec::new();
+        write_messages(&mut out, &two(), ExportFormat::Ndjson).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.ends_with('\n'));
+        assert_eq!(text.matches('\n').count(), 2, "no other newlines: {text:?}");
+        assert!(!text.contains('\r'));
+        let seqs: Vec<i64> = text
+            .lines()
+            .map(|l| {
+                serde_json::from_str::<serde_json::Value>(l).unwrap()["sequence_number"]
+                    .as_i64()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(seqs, vec![1, 2]);
+    }
+
+    #[test]
+    fn exported_state_is_pinned() {
+        let mut m = test_message(7);
+        m.state = MessageState::Scheduled;
+        let v = export_json(&[m]);
+        assert_eq!(v[0]["state"], "scheduled");
+    }
+
+    #[test]
+    fn binary_body_round_trips_through_base64() {
+        let bytes = vec![0u8, 1, 2, 254, 255];
+        let mut m = test_message(1);
+        m.body = MessageBody::Binary(bytes.clone());
+        let v = export_json(&[m]);
+        assert_eq!(v[0]["body"]["kind"], "binary");
+        let encoded = v[0]["body"]["value"].as_str().unwrap();
+        assert_eq!(STANDARD.decode(encoded).unwrap(), bytes);
+        // Not valid UTF-8, so no text convenience field.
+        assert!(v[0].get("body_text").is_none());
+    }
+
+    #[test]
+    fn enqueued_time_is_rfc3339_and_parses_back() {
+        let t = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let mut m = test_message(1);
+        m.enqueued_time = Some(t);
+        let v = export_json(&[m]);
+        let s = v[0]["enqueued_time"].as_str().unwrap();
+        assert_eq!(OffsetDateTime::parse(s, &Rfc3339).unwrap(), t);
+    }
+
+    #[test]
+    fn text_body_has_no_body_text_convenience() {
+        let mut m = test_message(1);
+        m.body = MessageBody::Text("hello".into());
+        let v = export_json(&[m]);
+        assert_eq!(
+            v[0]["body"],
+            serde_json::json!({"kind": "text", "value": "hello"})
+        );
+        assert!(v[0].get("body_text").is_none());
+    }
+
+    #[test]
     fn format_names() {
         assert_eq!(ExportFormat::parse("NDJSON").unwrap(), ExportFormat::Ndjson);
+        assert_eq!(ExportFormat::parse("jsonl").unwrap(), ExportFormat::Ndjson);
+        assert_eq!(ExportFormat::parse(" json ").unwrap(), ExportFormat::Json);
         assert!(ExportFormat::parse("csv").is_err());
+    }
+
+    #[test]
+    fn write_failure_is_io_error_with_hint() {
+        struct Failing;
+        impl Write for Failing {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("disk full"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let err = write_messages(Failing, &two(), ExportFormat::Ndjson).unwrap_err();
+        assert!(
+            matches!(err, Error::Io(ref m) if m.contains("disk full") && m.contains("free space")),
+            "{err}"
+        );
     }
 }
