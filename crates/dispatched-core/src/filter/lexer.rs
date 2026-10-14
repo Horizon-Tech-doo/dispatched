@@ -120,7 +120,12 @@ pub(crate) fn lex(src: &str) -> Result<Vec<Token>> {
                 }
                 Tok::Ident(chars[start..i].iter().collect())
             }
-            other => return Err(err(col, format!("unexpected character `{other}`"))),
+            other => {
+                return Err(err(
+                    col,
+                    format!("unexpected character `{}`", other.escape_debug()),
+                ));
+            }
         };
         out.push(Token { tok, col });
     }
@@ -153,6 +158,13 @@ mod tests {
             toks("x = -2.5"),
             vec![Tok::Ident("x".into()), Tok::Op("="), Tok::Num(-2.5)]
         );
+    }
+
+    #[test]
+    fn unexpected_control_char_is_not_echoed_raw() {
+        let e = lex("a = \u{1b}").unwrap_err().to_string();
+        assert!(!e.contains('\u{1b}'), "{e:?}");
+        assert!(e.contains("unexpected character"), "{e}");
     }
 
     #[test]
