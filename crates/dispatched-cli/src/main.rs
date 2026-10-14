@@ -6,9 +6,9 @@ mod output;
 mod resolve;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use commands::browse::ViewArgs;
 use commands::profile::ProfileCmd;
 use context::Ctx;
-use dispatched_core::PeekView;
 use resolve::Selection;
 use std::process::ExitCode;
 
@@ -35,9 +35,10 @@ struct Cli {
     /// DISPATCHED_PROFILE, then the default profile.
     #[arg(long, global = true, conflicts_with_all = ["connection_string", "namespace"])]
     profile: Option<String>,
-    /// Output format.
-    #[arg(long, value_enum, default_value_t = Format::Table, global = true)]
-    format: Format,
+    /// Output format: table (default) or json; `export` also takes ndjson
+    /// (its default is json).
+    #[arg(long, value_enum, global = true)]
+    format: Option<Format>,
     #[command(subcommand)]
     command: Command,
 }
@@ -46,6 +47,9 @@ struct Cli {
 pub enum Format {
     Table,
     Json,
+    /// One JSON object per line; `export` only.
+    #[value(alias = "jsonl")]
+    Ndjson,
 }
 
 #[derive(Subcommand)]
@@ -79,20 +83,25 @@ enum Command {
     },
     /// Peek messages without removing them.
     Peek {
-        /// `queue` or `topic/subscriptions/subscription`.
-        entity: String,
-        /// Read the dead-letter queue.
-        #[arg(long, conflicts_with = "transfer_dlq")]
-        dlq: bool,
-        /// Read the transfer dead-letter queue.
-        #[arg(long)]
-        transfer_dlq: bool,
-        /// Maximum messages.
-        #[arg(long, default_value_t = 20)]
+        #[command(flatten)]
+        view: ViewArgs,
+        /// Maximum matching messages.
+        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..))]
         top: u32,
-        /// Start at this sequence number.
-        #[arg(long, default_value_t = 0)]
-        from_seq: i64,
+    },
+    /// Write peeked messages to a file or stdout (JSON or NDJSON).
+    Export {
+        #[command(flatten)]
+        view: ViewArgs,
+        /// Maximum matching messages to write.
+        #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u32).range(1..))]
+        top: u32,
+        /// Output file, or `-` for stdout.
+        #[arg(long)]
+        out: String,
+        /// Replace the output file if it exists.
+        #[arg(long)]
+        force: bool,
     },
     /// Manage saved profiles.
     Profile {
@@ -148,34 +157,35 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         .profile
         .clone()
         .or_else(|| env(resolve::ENV_PROFILE).filter(|v| !v.trim().is_empty()));
+    // NDJSON is a file layout: only `export` writes it.
+    let format = cli.format.unwrap_or(Format::Table);
+    if matches!(format, Format::Ndjson) && !matches!(cli.command, Command::Export { .. }) {
+        anyhow::bail!("--format ndjson is only supported by `export`; use table or json");
+    }
     match cli.command {
         Command::Login {
             device_code,
             tenant,
         } => commands::auth::login(&ctx, device_code, &tenant).await,
         Command::Logout => commands::auth::logout(&ctx).await,
-        Command::Whoami => commands::auth::whoami(&ctx, cli.format).await,
+        Command::Whoami => commands::auth::whoami(&ctx, format).await,
         Command::Namespaces {
             tenant,
             all_tenants,
-        } => commands::auth::namespaces(&ctx, tenant, all_tenants, cli.format).await,
-        Command::Ls { topics } => commands::browse::ls(&ctx, &sel, topics, cli.format).await,
-        Command::Peek {
-            entity,
-            dlq,
-            transfer_dlq,
+        } => commands::auth::namespaces(&ctx, tenant, all_tenants, format).await,
+        Command::Ls { topics } => commands::browse::ls(&ctx, &sel, topics, format).await,
+        Command::Peek { view, top } => commands::browse::peek(&ctx, &sel, &view, top, format).await,
+        Command::Export {
+            view,
             top,
-            from_seq,
+            out,
+            force,
         } => {
-            let view = match (dlq, transfer_dlq) {
-                (true, _) => PeekView::DeadLetter,
-                (_, true) => PeekView::TransferDeadLetter,
-                _ => PeekView::Active,
-            };
-            commands::browse::peek(&ctx, &sel, &entity, view, top, from_seq, cli.format).await
+            let fmt = commands::browse::export_format(cli.format)?;
+            commands::browse::export(&ctx, &sel, &view, top, &out, fmt, force).await
         }
         Command::Profile { cmd } => {
-            commands::profile::run(&ctx, cmd, cli.format, profile_hint.as_deref()).await
+            commands::profile::run(&ctx, cmd, format, profile_hint.as_deref()).await
         }
     }
 }
@@ -242,6 +252,58 @@ mod tests {
         assert_eq!(cli.profile.as_deref(), Some("p"));
         assert!(cli.connection_string.is_none());
     }
+    #[test]
+    fn peek_and_export_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "dispatched",
+            "peek",
+            "q",
+            "--view",
+            "deferred",
+            "--top",
+            "5",
+            "--body-contains",
+            "x",
+        ])
+        .unwrap();
+        let Command::Peek { view, top } = cli.command else {
+            panic!("not peek")
+        };
+        assert_eq!(view.entity.as_deref(), Some("q"));
+        assert_eq!(view.view.as_deref(), Some("deferred"));
+        assert_eq!(top, 5);
+
+        let cli = Cli::try_parse_from([
+            "dispatched",
+            "export",
+            "--out",
+            "-",
+            "--format",
+            "ndjson",
+            "--dlq",
+        ])
+        .unwrap();
+        assert!(matches!(cli.format, Some(Format::Ndjson)));
+        let Command::Export {
+            view,
+            top,
+            out,
+            force,
+        } = cli.command
+        else {
+            panic!("not export")
+        };
+        assert!(view.entity.is_none() && view.dlq);
+        assert_eq!((top, out.as_str(), force), (1000, "-", false));
+        // `jsonl` is an alias; --out is required; --top 0 is refused.
+        let cli = Cli::try_parse_from(["dispatched", "--format", "jsonl", "export", "--out", "x"])
+            .unwrap();
+        assert!(matches!(cli.format, Some(Format::Ndjson)));
+        assert!(Cli::try_parse_from(["dispatched", "export"]).is_err());
+        assert!(Cli::try_parse_from(["dispatched", "peek", "--top", "0"]).is_err());
+        assert!(Cli::try_parse_from(["dispatched", "peek", "--dlq", "--view", "active"]).is_err());
+    }
+
     use dispatched_core::Error as CoreError;
     use horizon_azure_kit::KitError;
 
