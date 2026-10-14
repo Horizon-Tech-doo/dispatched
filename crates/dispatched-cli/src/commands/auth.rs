@@ -16,7 +16,7 @@ use serde::Serialize;
 pub async fn login(ctx: &Ctx, device_code: bool, tenant: &str) -> anyhow::Result<()> {
     // Read the previous sign-in before the new token exists, so a database
     // problem here can only mean "no previous", never a stranded new token.
-    let previous = ctx.store.current_sign_in().ok().flatten();
+    let previous = ctx.store()?.current_sign_in().ok().flatten();
     let sign_in = if device_code {
         ctx.session
             .login_device_code(tenant, |dc| eprintln!("{}", dc.message))
@@ -44,14 +44,14 @@ pub async fn login(ctx: &Ctx, device_code: bool, tenant: &str) -> anyhow::Result
 /// M0 did. Returns notes for the user, e.g. which saved profiles used the
 /// previous account.
 fn finish_login(ctx: &Ctx, new: &SignIn, previous: Option<&SignIn>) -> anyhow::Result<Vec<String>> {
-    ctx.store.save_sign_in(new)?;
-    ctx.store.set_current_sign_in(Some(&new.id))?;
+    ctx.store()?.save_sign_in(new)?;
+    ctx.store()?.set_current_sign_in(Some(&new.id))?;
     let mut notes = Vec::new();
     let Some(old) = previous.filter(|old| old.id != new.id) else {
         return Ok(notes);
     };
     let users: Vec<String> = ctx
-        .store
+        .store()?
         .list()
         .unwrap_or_default()
         .into_iter()
@@ -68,7 +68,7 @@ fn finish_login(ctx: &Ctx, new: &SignIn, previous: Option<&SignIn>) -> anyhow::R
             old.user_principal
         ));
     }
-    let _ = ctx.store.remove_sign_in(&old.id);
+    let _ = ctx.store()?.remove_sign_in(&old.id);
     if !users.is_empty() {
         let label = if users.len() == 1 {
             "Profile"
@@ -86,10 +86,10 @@ fn finish_login(ctx: &Ctx, new: &SignIn, previous: Option<&SignIn>) -> anyhow::R
 }
 
 pub async fn logout(ctx: &Ctx) -> anyhow::Result<()> {
-    if let Some(sign_in) = ctx.store.current_sign_in()? {
+    if let Some(sign_in) = ctx.store()?.current_sign_in()? {
         ctx.session.logout(&sign_in)?;
-        ctx.store.set_current_sign_in(None)?;
-        ctx.store.remove_sign_in(&sign_in.id)?;
+        ctx.store()?.set_current_sign_in(None)?;
+        ctx.store()?.remove_sign_in(&sign_in.id)?;
         eprintln!("Signed out {}.", sign_in.user_principal);
     } else {
         eprintln!("Not signed in.");
@@ -287,17 +287,21 @@ mod tests {
         let ctx = ctx();
         let a = sign_in("a", "a@x.io");
         assert!(finish_login(&ctx, &a, None).unwrap().is_empty());
-        assert_eq!(ctx.store.current_sign_in().unwrap().unwrap().id, "a");
+        assert_eq!(
+            ctx.store().unwrap().current_sign_in().unwrap().unwrap().id,
+            "a"
+        );
     }
 
     #[test]
     fn account_switch_forgets_the_old_sign_in_and_names_its_profiles() {
         let ctx = ctx();
         let (a, b) = (sign_in("a", "a@x.io"), sign_in("b", "b@x.io"));
-        ctx.store.save_sign_in(&a).unwrap();
-        ctx.store.set_current_sign_in(Some("a")).unwrap();
+        ctx.store().unwrap().save_sign_in(&a).unwrap();
+        ctx.store().unwrap().set_current_sign_in(Some("a")).unwrap();
         for (name, owner) in [("one", "a"), ("two", "a"), ("other", "b")] {
-            ctx.store
+            ctx.store()
+                .unwrap()
                 .insert(&Profile::entra(
                     name,
                     "n.servicebus.windows.net",
@@ -311,8 +315,11 @@ mod tests {
             notes,
             ["Profiles `one`, `two` use a@x.io; sign in as that account again to use them."]
         );
-        assert_eq!(ctx.store.current_sign_in().unwrap().unwrap().id, "b");
-        assert!(ctx.store.sign_in("a").unwrap().is_none());
+        assert_eq!(
+            ctx.store().unwrap().current_sign_in().unwrap().unwrap().id,
+            "b"
+        );
+        assert!(ctx.store().unwrap().sign_in("a").unwrap().is_none());
     }
 
     #[test]
@@ -320,12 +327,13 @@ mod tests {
         let ctx = ctx();
         let (a, b) = (sign_in("a", "a@x.io"), sign_in("b", "b@x.io"));
         assert!(finish_login(&ctx, &b, Some(&a)).unwrap().is_empty());
-        ctx.store
+        ctx.store()
+            .unwrap()
             .insert(&Profile::entra("p", "n.servicebus.windows.net", "b", None))
             .unwrap();
         // Same account again: nothing is cleared, no note.
         assert!(finish_login(&ctx, &b, Some(&b)).unwrap().is_empty());
-        assert!(ctx.store.sign_in("b").unwrap().is_some());
+        assert!(ctx.store().unwrap().sign_in("b").unwrap().is_some());
     }
 
     #[test]

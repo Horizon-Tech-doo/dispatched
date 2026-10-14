@@ -133,7 +133,7 @@ impl NetworkOptions {
 }
 
 fn find(ctx: &Ctx, name: &str) -> anyhow::Result<Profile> {
-    ctx.store
+    ctx.store()?
         .get(name)?
         .with_context(|| format!("no profile named `{name}`; see `dispatched profile ls`"))
 }
@@ -175,13 +175,13 @@ fn add(
         let cs = cs.trim();
         net.check_emulator(ConnectionString::parse(cs)?.use_development_emulator)?;
         let mut profile =
-            ctx.store
+            ctx.store()?
                 .add_connection_string(name, cs, ctx.secrets.as_ref(), production)?;
         profile.color = color;
         net.apply(&mut profile);
-        if let Err(e) = ctx.store.update(&profile) {
+        if let Err(e) = ctx.store()?.update(&profile) {
             // Do not leave a half-configured profile (and its secret) behind.
-            let _ = ctx.store.delete(&profile.name, ctx.secrets.as_ref());
+            let _ = ctx.store()?.delete(&profile.name, ctx.secrets.as_ref());
             return Err(e.into());
         }
         Ok(profile)
@@ -189,13 +189,13 @@ fn add(
         let sign_in = ctx
             .current_sign_in()?
             .context("not signed in: run `dispatched login` first")?;
-        ctx.store.save_sign_in(&sign_in)?;
+        ctx.store()?.save_sign_in(&sign_in)?;
         let mut profile =
-            Profile::entra(name, &namespace_host(&ns), &sign_in.id, tenant.as_deref());
+            Profile::entra(name, &namespace_host(&ns)?, &sign_in.id, tenant.as_deref());
         profile.production = production;
         profile.color = color;
         net.apply(&mut profile);
-        ctx.store.insert(&profile)?;
+        ctx.store()?.insert(&profile)?;
         Ok(profile)
     } else {
         bail!(
@@ -231,8 +231,8 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     match cmd {
         ProfileCmd::Ls => {
-            let profiles = ctx.store.list()?;
-            let default_id = ctx.store.default_profile()?.map(|p| p.id);
+            let profiles = ctx.store()?.list()?;
+            let default_id = ctx.store()?.default_profile()?.map(|p| p.id);
             if let Format::Json = format {
                 println!("{}", serde_json::to_string_pretty(&profiles)?);
                 return Ok(());
@@ -307,7 +307,7 @@ pub async fn run(
             );
         }
         ProfileCmd::Rm { name } => {
-            if ctx.store.delete(&name, ctx.secrets.as_ref())? {
+            if ctx.store()?.delete(&name, ctx.secrets.as_ref())? {
                 eprintln!(
                     "Removed profile `{}` and its stored secret.",
                     sanitize(&name)
@@ -318,13 +318,13 @@ pub async fn run(
         }
         ProfileCmd::Default { name, clear } => {
             if clear {
-                ctx.store.set_default(None)?;
+                ctx.store()?.set_default(None)?;
                 eprintln!("Cleared the default profile.");
             } else if let Some(n) = name {
-                ctx.store.set_default(Some(&n))?;
+                ctx.store()?.set_default(Some(&n))?;
                 eprintln!("Default profile: {}", sanitize(&n));
             } else {
-                match ctx.store.default_profile()? {
+                match ctx.store()?.default_profile()? {
                     Some(p) => println!("{}", sanitize(&p.name)),
                     None => println!("(none)"),
                 }
@@ -342,7 +342,7 @@ pub async fn run(
             } else {
                 let msg = format!("Pinned `{entity}` on profile `{}`.", p.name);
                 p.pinned_entities.push(entity);
-                ctx.store.update(&p)?;
+                ctx.store()?.update(&p)?;
                 msg
             };
             eprintln!("{}", sanitize(&msg));
@@ -355,7 +355,7 @@ pub async fn run(
             let msg = if p.pinned_entities.len() == before {
                 format!("`{entity}` is not pinned on profile `{}`.", p.name)
             } else {
-                ctx.store.update(&p)?;
+                ctx.store()?.update(&p)?;
                 format!("Unpinned `{entity}` from profile `{}`.", p.name)
             };
             eprintln!("{}", sanitize(&msg));
@@ -364,7 +364,7 @@ pub async fn run(
             let p = match name.as_deref().or(selected_profile) {
                 Some(n) => find(ctx, n)?,
                 None => ctx
-                    .store
+                    .store()?
                     .default_profile()?
                     .context("no default profile; pass a name")?,
             };
@@ -495,7 +495,7 @@ mod tests {
             o,
         )
         .unwrap();
-        let saved = ctx.store.get("PROD").unwrap().unwrap();
+        let saved = ctx.store().unwrap().get("PROD").unwrap().unwrap();
         assert_eq!(saved, p);
         assert!(saved.production);
         assert_eq!(saved.color.as_deref(), Some("red"));
@@ -519,7 +519,7 @@ mod tests {
             let e = add_cs(&ctx, "emu", EMU, o).unwrap_err().to_string();
             assert!(e.contains("emulator"), "{e}");
         }
-        assert!(ctx.store.list().unwrap().is_empty());
+        assert!(ctx.store().unwrap().list().unwrap().is_empty());
         add_cs(&ctx, "emu", EMU, NetworkOptions::default()).unwrap();
     }
 
@@ -529,7 +529,7 @@ mod tests {
         add_cs(&ctx, "a", SAS, NetworkOptions::default()).unwrap();
         assert!(add_cs(&ctx, "A", SAS, NetworkOptions::default()).is_err());
         assert!(add_cs(&ctx, "  ", SAS, NetworkOptions::default()).is_err());
-        assert_eq!(ctx.store.list().unwrap().len(), 1);
+        assert_eq!(ctx.store().unwrap().list().unwrap().len(), 1);
     }
 
     #[test]
@@ -578,7 +578,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(ctx.store.default_profile().unwrap().unwrap().id, p.id);
+        assert_eq!(
+            ctx.store().unwrap().default_profile().unwrap().unwrap().id,
+            p.id
+        );
 
         let pin = |e: &str| ProfileCmd::Pin {
             name: "emu".into(),
@@ -587,7 +590,12 @@ mod tests {
         run(&ctx, pin("orders"), Format::Table, None).await.unwrap();
         run(&ctx, pin("ORDERS"), Format::Table, None).await.unwrap();
         assert_eq!(
-            ctx.store.get("emu").unwrap().unwrap().pinned_entities,
+            ctx.store()
+                .unwrap()
+                .get("emu")
+                .unwrap()
+                .unwrap()
+                .pinned_entities,
             ["orders"]
         );
         assert!(
@@ -607,7 +615,8 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            ctx.store
+            ctx.store()
+                .unwrap()
                 .get("emu")
                 .unwrap()
                 .unwrap()
@@ -639,7 +648,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(ctx.store.default_profile().unwrap().is_none());
+        assert!(ctx.store().unwrap().default_profile().unwrap().is_none());
 
         run(
             &ctx,
@@ -649,7 +658,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(ctx.store.list().unwrap().is_empty());
+        assert!(ctx.store().unwrap().list().unwrap().is_empty());
         assert!(ctx.secrets.get(&secret_key(&p.id)).unwrap().is_none());
         let e = run(
             &ctx,

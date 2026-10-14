@@ -78,6 +78,7 @@ enum Command {
     },
     /// List queues (and with --topics, topics and subscriptions) with counts.
     Ls {
+        /// Also list topics and their subscriptions.
         #[arg(long)]
         topics: bool,
     },
@@ -115,18 +116,30 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("error: {}", format_error(&e));
+        Err((e, hints)) => {
+            eprintln!("error: {}", format_error(&e, hints));
             ExitCode::FAILURE
         }
     }
 }
 
 pub const LOGIN_HINT: &str = "run `dispatched login`";
+pub const TENANT_HINT: &str = "if this namespace is in another tenant, add a profile with \
+    `dispatched profile add <name> --namespace <ns> --tenant <tenant-id>`";
+
+/// Extra context for `format_error`.
+#[derive(Clone, Copy, Default)]
+struct Hints {
+    /// The namespace came from `--namespace` / DISPATCHED_NAMESPACE, whose
+    /// tokens are always issued by the sign-in's home tenant.
+    namespace_selected: bool,
+}
 
 /// One-line, terminal-safe error text. A not-signed-in root cause gets the
-/// login hint appended; control characters from remote text are neutralised.
-fn format_error(e: &anyhow::Error) -> String {
+/// login hint appended; a rejected credential on a `--namespace` selection
+/// gets the other-tenant hint; control characters from remote text are
+/// neutralised.
+fn format_error(e: &anyhow::Error, hints: Hints) -> String {
     let mut text = format!("{e:#}");
     let not_signed_in = matches!(
         e.root_cause().downcast_ref::<dispatched_core::Error>(),
@@ -139,11 +152,43 @@ fn format_error(e: &anyhow::Error) -> String {
         text.push_str("; ");
         text.push_str(LOGIN_HINT);
     }
+    let token_rejected = matches!(
+        e.root_cause().downcast_ref::<dispatched_core::Error>(),
+        Some(dispatched_core::Error::Auth(_) | dispatched_core::Error::Forbidden { .. })
+    ) || matches!(
+        e.root_cause().downcast_ref::<horizon_azure_kit::KitError>(),
+        Some(
+            horizon_azure_kit::KitError::AuthFailed(_) | horizon_azure_kit::KitError::Forbidden(_)
+        )
+    );
+    if hints.namespace_selected && token_rejected {
+        text.push_str("; ");
+        text.push_str(TENANT_HINT);
+    }
     output::sanitize(&text)
 }
 
-async fn run(cli: Cli) -> anyhow::Result<()> {
-    let ctx = Ctx::open()?;
+/// Run the command; on failure also report which hints apply.
+async fn run(cli: Cli) -> Result<(), (anyhow::Error, Hints)> {
+    let env = |k: &str| std::env::var(k).ok();
+    let flags = Selection {
+        connection_string: cli.connection_string.as_deref(),
+        namespace: cli.namespace.as_deref(),
+        profile: cli.profile.as_deref(),
+    };
+    let hints = Hints {
+        namespace_selected: matches!(
+            cli.command,
+            Command::Ls { .. } | Command::Peek { .. } | Command::Export { .. }
+        ) && resolve::select(&flags, &env).namespace.is_some(),
+    };
+    run_command(cli).await.map_err(|e| (e, hints))
+}
+
+async fn run_command(cli: Cli) -> anyhow::Result<()> {
+    // Opens nothing: the profile store and keychain are touched only by
+    // commands and selections that need them.
+    let ctx = Ctx::open();
     let env = |k: &str| std::env::var(k).ok();
     let flags = Selection {
         connection_string: cli.connection_string.as_deref(),
@@ -311,7 +356,7 @@ mod tests {
     fn core_not_signed_in_gets_the_login_hint() {
         let e = anyhow::Error::from(CoreError::NotSignedIn("a@x.io is not signed in".into()));
         assert_eq!(
-            format_error(&e),
+            format_error(&e, Hints::default()),
             "not signed in: a@x.io is not signed in; run `dispatched login`"
         );
     }
@@ -320,20 +365,49 @@ mod tests {
     fn kit_not_signed_in_gets_the_login_hint_even_with_context() {
         let e = anyhow::Error::from(KitError::NotSignedIn("session expired".into()))
             .context("listing namespaces");
-        assert!(format_error(&e).ends_with("; run `dispatched login`"));
+        assert!(format_error(&e, Hints::default()).ends_with("; run `dispatched login`"));
     }
 
     #[test]
     fn other_errors_get_no_hint_and_are_sanitised() {
         let e = anyhow::Error::from(CoreError::Protocol("bad\x1b[31m\nthing".into()));
-        let text = format_error(&e);
+        let text = format_error(&e, Hints::default());
         assert!(!text.contains("login"));
         assert!(!text.contains('\x1b') && !text.contains('\n'));
     }
 
     #[test]
+    fn rejected_token_on_a_namespace_selection_hints_at_the_tenant() {
+        let on = Hints {
+            namespace_selected: true,
+        };
+        for e in [
+            anyhow::Error::from(CoreError::Auth("401".into())),
+            anyhow::Error::from(CoreError::Forbidden {
+                needed: None,
+                detail: "d".into(),
+            }),
+            anyhow::Error::from(KitError::AuthFailed("AADSTS".into())).context("sending"),
+        ] {
+            let text = format_error(&e, on);
+            assert!(
+                text.ends_with(TENANT_HINT) && text.contains("--namespace <ns> --tenant"),
+                "{text}"
+            );
+            // Not a `--namespace` selection: no hint.
+            assert!(!format_error(&e, Hints::default()).contains("tenant"));
+        }
+        // Other failures on a namespace selection get none.
+        let e = anyhow::Error::from(CoreError::Network("down".into()));
+        assert!(!format_error(&e, on).contains("tenant"));
+    }
+
+    #[test]
     fn hint_is_not_duplicated() {
         let e = anyhow::anyhow!("not signed in; run `dispatched login`");
-        assert_eq!(format_error(&e), "not signed in; run `dispatched login`");
+        assert_eq!(
+            format_error(&e, Hints::default()),
+            "not signed in; run `dispatched login`"
+        );
     }
 }

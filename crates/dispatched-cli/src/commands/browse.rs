@@ -19,14 +19,14 @@ use time::format_description::well_known::Rfc3339;
 /// The namespace the user selected. The sign-in (a keychain read) is only
 /// looked up when the selection uses Entra.
 fn namespace(ctx: &Ctx, sel: &Selection<'_>) -> anyhow::Result<Namespace> {
-    let sign_in = if needs_sign_in(sel, &ctx.store)? {
+    let sign_in = if needs_sign_in(sel, ctx)? {
         ctx.current_sign_in()?
     } else {
         None
     };
     resolve(
         sel,
-        &ctx.store,
+        ctx,
         ctx.secrets.as_ref(),
         &ctx.session,
         sign_in.as_ref(),
@@ -40,8 +40,8 @@ fn pins_for(ctx: &Ctx, sel: &Selection<'_>) -> anyhow::Result<Vec<String>> {
         return Ok(Vec::new());
     }
     let profile = match sel.profile {
-        Some(name) => ctx.store.get(name)?,
-        None => ctx.store.default_profile()?,
+        Some(name) => ctx.store()?.get(name)?,
+        None => ctx.store()?.default_profile()?,
     };
     Ok(profile.map(|p| p.pinned_entities).unwrap_or_default())
 }
@@ -68,7 +68,8 @@ pub struct ViewArgs {
     /// Start at this sequence number.
     #[arg(long, default_value_t = 0)]
     pub from_seq: i64,
-    /// Examine at most this many messages per request (matching or not).
+    /// Examine at most this many messages (matching or not) per peek call; for
+    /// `export`, per page of the export.
     #[arg(long, default_value_t = DEFAULT_SCAN_LIMIT, value_parser = clap::value_parser!(u32).range(1..))]
     pub scan_limit: u32,
     /// Property filter, e.g. "sys.DeliveryCount > 1 AND user.kind = 'x'".
@@ -231,7 +232,7 @@ pub struct ScanSummary {
     pub matched: usize,
     /// The match limit that was asked for.
     pub top: u32,
-    /// The per-request scan limit, when it can end the scan (`peek`).
+    /// The per-peek-call scan limit, when it can end the scan (`peek`).
     pub scan_limit: Option<u32>,
     pub end: Continuation,
 }
@@ -1343,6 +1344,45 @@ mod tests {
     }
 
     #[test]
+    fn connection_string_selection_never_opens_the_store() {
+        use dispatched_core::profiles::ProfileStore;
+        use horizon_azure_kit::secrets::MemoryStore;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let opens = Arc::new(AtomicUsize::new(0));
+        let counter = opens.clone();
+        let ctx = Ctx::lazy(
+            Box::new(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok(ProfileStore::open_in_memory()?)
+            }),
+            Arc::new(MemoryStore::new()),
+        );
+        let cs = "Endpoint=sb://n.servicebus.windows.net/;SharedAccessKeyName=k;SharedAccessKey=v;EntityPath=q";
+        let by_cs = Selection {
+            connection_string: Some(cs),
+            namespace: None,
+            profile: None,
+        };
+        let ns = namespace(&ctx, &by_cs).unwrap();
+        assert_eq!(ns.entity_path(), Some("q"));
+        assert!(pins_for(&ctx, &by_cs).unwrap().is_empty());
+        assert_eq!(
+            opens.load(Ordering::SeqCst),
+            0,
+            "store opened for a connection string"
+        );
+        // A profile selection (or the default profile) does open it.
+        let none = Selection {
+            connection_string: None,
+            namespace: None,
+            profile: None,
+        };
+        assert!(namespace(&ctx, &none).is_err());
+        assert_eq!(opens.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn pins_come_from_the_selected_profile_only() {
         use dispatched_core::profiles::ProfileStore;
         use horizon_azure_kit::secrets::MemoryStore;
@@ -1353,12 +1393,14 @@ mod tests {
         );
         let cs = "Endpoint=sb://n.servicebus.windows.net/;SharedAccessKeyName=k;SharedAccessKey=v";
         let mut a = ctx
-            .store
+            .store()
+            .unwrap()
             .add_connection_string("a", cs, ctx.secrets.as_ref(), false)
             .unwrap();
         a.pinned_entities = vec!["orders".into()];
-        ctx.store.update(&a).unwrap();
-        ctx.store
+        ctx.store().unwrap().update(&a).unwrap();
+        ctx.store()
+            .unwrap()
             .add_connection_string("b", cs, ctx.secrets.as_ref(), false)
             .unwrap();
         let by_profile = |name| Selection {
@@ -1370,7 +1412,7 @@ mod tests {
         assert!(pins_for(&ctx, &by_profile(Some("b"))).unwrap().is_empty());
         // No selection: the default profile.
         assert!(pins_for(&ctx, &by_profile(None)).unwrap().is_empty());
-        ctx.store.set_default(Some("a")).unwrap();
+        ctx.store().unwrap().set_default(Some("a")).unwrap();
         assert_eq!(pins_for(&ctx, &by_profile(None)).unwrap(), ["orders"]);
         // A connection string or bare namespace has no profile.
         let cs_sel = Selection {

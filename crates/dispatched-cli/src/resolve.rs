@@ -1,7 +1,8 @@
 //! Turn CLI flags (or saved profiles) into a `Namespace`.
 
+use crate::context::StoreSource;
 use anyhow::{Context, bail};
-use dispatched_core::profiles::{self, ProfileStore};
+use dispatched_core::profiles;
 use dispatched_core::tokens::EntraSource;
 use dispatched_core::{ConnectionString, Namespace};
 use horizon_azure_kit::auth::{EntraSession, SignIn};
@@ -15,13 +16,29 @@ pub struct Selection<'a> {
     pub profile: Option<&'a str>,
 }
 
-pub fn namespace_host(input: &str) -> String {
+/// A bare namespace name expands to the public-cloud host; a dotted input is
+/// taken as the full host. Only hostname characters (letters, digits, `.`,
+/// `-`) are accepted, so a URL, port or path is rejected rather than guessed at.
+pub fn namespace_host(input: &str) -> anyhow::Result<String> {
     let input = input.trim().to_ascii_lowercase();
-    if input.contains('.') {
+    let valid = !input.is_empty()
+        && !input.starts_with(['.', '-'])
+        && !input.ends_with(['.', '-'])
+        && !input.contains("..")
+        && input
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
+    if !valid {
+        bail!(
+            "invalid namespace: expected a name like `myns` or a host like \
+             `myns.servicebus.windows.net` (letters, digits, `.` and `-` only)"
+        );
+    }
+    Ok(if input.contains('.') {
         input
     } else {
         format!("{input}.servicebus.windows.net")
-    }
+    })
 }
 
 pub const ENV_CONNECTION_STRING: &str = "DISPATCHED_CONNECTION_STRING";
@@ -80,14 +97,16 @@ pub fn select(flags: &Selection<'_>, env: &dyn Fn(&str) -> Option<String>) -> Ow
 }
 
 /// Whether resolving `sel` needs the Entra sign-in (so the keychain is only
-/// read when it matters). Unknown profiles return false; `resolve` reports them.
-pub fn needs_sign_in(sel: &Selection<'_>, store: &ProfileStore) -> anyhow::Result<bool> {
+/// read when it matters). A connection string or bare namespace never opens
+/// the profile store here. Unknown profiles return false; `resolve` reports them.
+pub fn needs_sign_in(sel: &Selection<'_>, store: &dyn StoreSource) -> anyhow::Result<bool> {
     if sel.connection_string.is_some() {
         return Ok(false);
     }
     if sel.namespace.is_some() {
         return Ok(true);
     }
+    let store = store.store()?;
     let profile = match sel.profile {
         Some(name) => store.get(name)?,
         None => store.default_profile()?,
@@ -99,10 +118,11 @@ pub fn needs_sign_in(sel: &Selection<'_>, store: &ProfileStore) -> anyhow::Resul
 }
 
 /// Resolution order: `--connection-string`, `--namespace` (with the current
-/// sign-in), `--profile`, then the default profile.
+/// sign-in), `--profile`, then the default profile. The profile store is only
+/// opened for the last two.
 pub fn resolve(
     sel: &Selection<'_>,
-    store: &ProfileStore,
+    store: &dyn StoreSource,
     secrets: &dyn CredentialStore,
     session: &Arc<EntraSession>,
     sign_in: Option<&SignIn>,
@@ -118,10 +138,11 @@ pub fn resolve(
         )?;
         let tokens = Arc::new(EntraSource::new(session.clone(), sign_in, None));
         return Ok(profiles::with_env_proxy(Namespace::new(
-            namespace_host(ns),
+            namespace_host(ns)?,
             tokens,
         ))?);
     }
+    let store = store.store()?;
     let profile = match sel.profile {
         Some(name) => store
             .get(name)?
@@ -162,11 +183,38 @@ mod tests {
 
     #[test]
     fn short_names_expand_to_public_cloud_host() {
-        assert_eq!(namespace_host("MyNs"), "myns.servicebus.windows.net");
         assert_eq!(
-            namespace_host("x.servicebus.chinacloudapi.cn"),
+            namespace_host("MyNs").unwrap(),
+            "myns.servicebus.windows.net"
+        );
+        assert_eq!(
+            namespace_host(" x.servicebus.chinacloudapi.cn ").unwrap(),
             "x.servicebus.chinacloudapi.cn"
         );
+    }
+
+    #[test]
+    fn namespace_input_must_be_a_hostname() {
+        for bad in [
+            "",
+            "  ",
+            "https://myns.servicebus.windows.net",
+            "myns.servicebus.windows.net:5671",
+            "myns/queue",
+            "my ns",
+            "user@myns",
+            "sb://myns",
+            "my_ns",
+            ".myns",
+            "myns.",
+            "-myns",
+            "a..b",
+            "my\u{1b}[31mns",
+        ] {
+            let e = namespace_host(bad).unwrap_err().to_string();
+            assert!(e.contains("expected a name like"), "{bad:?}: {e}");
+            assert!(!e.contains('\x1b'), "{e}");
+        }
     }
 
     fn env_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
