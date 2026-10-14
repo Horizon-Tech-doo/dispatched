@@ -455,7 +455,7 @@ mod tests {
         }
     }
 
-    fn with_state(state: Option<i32>) -> Message<Body<Value>> {
+    fn with_state(state: Option<Value>) -> Message<Body<Value>> {
         let mut ann = MessageAnnotations::builder().insert("x-opt-sequence-number", 5i64);
         if let Some(s) = state {
             ann = ann.insert("x-opt-message-state", s);
@@ -475,26 +475,46 @@ mod tests {
     fn message_state_comes_from_annotation() {
         assert_eq!(decode_message(with_state(None)).state, MessageState::Active);
         assert_eq!(
-            decode_message(with_state(Some(0))).state,
+            decode_message(with_state(Some(Value::Int(0)))).state,
             MessageState::Active
         );
         assert_eq!(
-            decode_message(with_state(Some(1))).state,
+            decode_message(with_state(Some(Value::Int(1)))).state,
             MessageState::Deferred
         );
         assert_eq!(
-            decode_message(with_state(Some(2))).state,
+            decode_message(with_state(Some(Value::Int(2)))).state,
             MessageState::Scheduled
         );
         assert_eq!(
-            decode_message(with_state(Some(9))).state,
+            decode_message(with_state(Some(Value::Int(9)))).state,
             MessageState::Active
         );
     }
 
     #[test]
+    fn message_state_accepts_every_integer_width() {
+        let state = |v: Value| decode_message(with_state(Some(v))).state;
+        assert_eq!(state(Value::Byte(1)), MessageState::Deferred);
+        assert_eq!(state(Value::Short(2)), MessageState::Scheduled);
+        assert_eq!(state(Value::Long(2)), MessageState::Scheduled);
+        assert_eq!(state(Value::Ubyte(1)), MessageState::Deferred);
+        assert_eq!(state(Value::Ushort(2)), MessageState::Scheduled);
+        assert_eq!(state(Value::Uint(1)), MessageState::Deferred);
+        assert_eq!(state(Value::Ulong(2)), MessageState::Scheduled);
+        assert_eq!(state(Value::Ulong(u64::MAX)), MessageState::Active);
+    }
+
+    #[test]
+    fn message_state_as_str_is_lowercase_name() {
+        assert_eq!(MessageState::Active.as_str(), "active");
+        assert_eq!(MessageState::Deferred.as_str(), "deferred");
+        assert_eq!(MessageState::Scheduled.as_str(), "scheduled");
+    }
+
+    #[test]
     fn message_state_serialises_lowercase() {
-        let json = serde_json::to_value(decode_message(with_state(Some(2)))).unwrap();
+        let json = serde_json::to_value(decode_message(with_state(Some(Value::Int(2))))).unwrap();
         assert_eq!(json["state"], "scheduled");
     }
 
