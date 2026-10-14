@@ -74,7 +74,7 @@ pub(crate) async fn proxy_connect<S: AsyncRead + AsyncWrite + Unpin>(
         match code {
             "200" => Ok(()),
             "407" => Err(Error::Network(
-                "the proxy requires authentication (407); put credentials in the proxy URL (http://user:pass@host:port)".into(),
+                "the proxy requires authentication (407); set HTTPS_PROXY=http://user:pass@host:port and remove the profile's proxy (profiles store no credentials, and a profile proxy takes precedence over HTTPS_PROXY)".into(),
             )),
             other => Err(Error::Network(format!("the proxy refused the tunnel to {host}:{port} (HTTP {other})"))),
         }
@@ -200,6 +200,25 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(&e, Error::Network(m) if m.contains("407")), "{e}");
+    }
+
+    #[tokio::test]
+    async fn proxy_407_points_at_https_proxy_and_never_echoes_credentials() {
+        let (mut s, _server) =
+            proxy_replying(b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n").await;
+        let e = proxy_connect(
+            &mut s,
+            "h",
+            443,
+            Some(("alice", "s3cret")),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("HTTPS_PROXY=http://user:pass@host:port"), "{e}");
+        assert!(e.contains("remove the profile's proxy"), "{e}");
+        assert!(!e.contains("alice") && !e.contains("s3cret"), "{e}");
     }
 
     #[tokio::test]
