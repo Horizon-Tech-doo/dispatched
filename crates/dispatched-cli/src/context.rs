@@ -97,6 +97,7 @@ impl Ctx {
         }
     }
 
+    #[cfg(test)]
     /// A context over the given store and credential store (tests use
     /// in-memory ones, so they never touch the keychain or the config dir).
     pub fn from_parts(store: ProfileStore, secrets: Arc<dyn CredentialStore>) -> Self {
