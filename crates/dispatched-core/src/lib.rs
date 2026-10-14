@@ -9,6 +9,7 @@ pub mod connstr;
 pub mod discovery;
 pub mod error;
 pub mod explorer;
+pub mod filter;
 pub mod messaging;
 pub mod mgmt;
 pub mod namespace;

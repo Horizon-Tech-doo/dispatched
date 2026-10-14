@@ -387,8 +387,6 @@ pub fn decode_bytes(bytes: &[u8]) -> Result<PeekedMessage> {
 }
 
 #[cfg(test)]
-// Shared fixture for later M1a tests; no caller yet.
-#[allow(dead_code)]
 pub(crate) fn test_message(seq: i64) -> PeekedMessage {
     PeekedMessage {
         sequence_number: seq,

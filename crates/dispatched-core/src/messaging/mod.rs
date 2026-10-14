@@ -9,6 +9,8 @@ pub mod testing;
 
 pub use connection::ServiceBusConnection;
 pub use management::{ManagementLink, MgmtResponse};
+#[cfg(test)]
+pub(crate) use message::test_message;
 pub use message::{
     MessageBody, MessageState, PeekedMessage, PropValue, decode_bytes, decode_message,
 };
