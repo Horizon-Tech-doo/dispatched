@@ -7,6 +7,12 @@ export type Scenario = "default" | "empty" | "forbidden" | "missing-secret" | "n
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** The namespace host from an `Endpoint=sb://<host>/` segment; the secret is never echoed back. */
+function hostFromConnectionString(cs: string | null | undefined): string {
+  const m = /Endpoint=sb:\/\/([^/;\s]+)/i.exec(cs ?? "");
+  return m?.[1]?.toLowerCase() ?? "new.servicebus.windows.net";
+}
+
 export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Record<string, unknown> = {}) {
   const listeners = new Map<string, Set<(p: unknown) => void>>();
   const calls: { cmd: string; args?: unknown }[] = [];
@@ -49,7 +55,7 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
         const p: Profile = {
           id: existing?.id ?? `p-${Math.random().toString(36).slice(2, 8)}`,
           name: d.name.trim(),
-          host: d.auth.kind === "entra" ? (d.auth.namespace.includes(".") ? d.auth.namespace : `${d.auth.namespace}.servicebus.windows.net`) : existing?.host ?? "new.servicebus.windows.net",
+          host: d.auth.kind === "entra" ? (d.auth.namespace.includes(".") ? d.auth.namespace : `${d.auth.namespace}.servicebus.windows.net`) : existing?.host ?? hostFromConnectionString(d.auth.connection_string),
           auth: d.auth.kind === "entra" ? { kind: "entra", sign_in_id: account?.id ?? "oid-1", tenant: d.auth.tenant ?? null } : { kind: "connection-string" },
           emulator: false,
           production: d.production,

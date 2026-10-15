@@ -19,7 +19,9 @@ test("browse: counts in the tree, open a subscription, read its views", async ({
   await page.keyboard.press("Enter");
   await expect(page.getByRole("tablist", { name: "Open entities" }).getByRole("tab", { name: /tracking-sync/ })).toHaveAttribute("aria-selected", "true");
   const views = page.getByRole("tablist", { name: "Entity views" });
-  await expect(views.getByText("3,417")).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1, name: "tracking-sync" })).toBeVisible();
+  // 3,417 is the subscription's dead-letter count, so it is amber.
+  await expect(views.getByText("3,417")).toHaveClass(/text-accent/);
   await views.getByRole("tab", { name: /Dead-letter/ }).click();
   await expect(page.getByRole("heading", { name: "Dead-letter isn't available yet" })).toBeVisible();
   await expect(page.getByRole("banner").getByText("PROD", { exact: true })).toBeVisible();
@@ -43,7 +45,8 @@ test("first connection from an empty start", async ({ page }) => {
   await sheet.getByLabel("Name", { exact: true }).fill("Orders");
   await sheet.getByLabel("Connection string").fill("Endpoint=sb://orders.servicebus.windows.net/;SharedAccessKeyName=reader;SharedAccessKey=c2VjcmV0");
   await sheet.getByRole("button", { name: "Save" }).click();
-  await expect(page.getByRole("button", { name: /^Connection: Orders/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Connection: Orders, orders/ })).toBeVisible();
+  await expect(sheet).toHaveCount(0);
   await expect(tree(page)).toBeVisible();
   // The secret goes to the keychain and never back to the page.
   await expect(page.getByText("c2VjcmV0")).toHaveCount(0);
