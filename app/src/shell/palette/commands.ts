@@ -1,7 +1,7 @@
 import type { EntityListing, Profile, SubscriptionInfo } from "@/engine";
 import type { SheetState } from "../context";
 import type { EntityKind, Prefs } from "../state";
-import { entityIdOf } from "../tree/model";
+import { entityIdOf } from "../entityId";
 
 export interface PaletteCommand {
   id: string;

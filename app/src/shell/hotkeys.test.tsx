@@ -44,6 +44,24 @@ describe("hotkeys", () => {
     expect(screen.getByRole("searchbox", { name: "Filter entities" })).toHaveFocus();
   });
 
+  it("mod+f focuses the tree filter from any text field, never the webview's find bar", async () => {
+    renderShell("default", { last_profile: "p-logistics" }, <input aria-label="Other field" />);
+    await screen.findByRole("tree", { name: "Namespace" });
+    await focus(screen.getByRole("textbox", { name: "Other field" }));
+    await userEvent.keyboard(mod("f"));
+    expect(screen.getByRole("searchbox", { name: "Filter entities" })).toHaveFocus();
+  });
+
+  it("mod+r does not reload the window, even while typing", async () => {
+    renderShell("default", { last_profile: "p-logistics" });
+    const filter = await screen.findByRole("searchbox", { name: "Filter entities" });
+    for (const target of [document.body, filter]) {
+      const e = new KeyboardEvent("keydown", { key: "r", ctrlKey: true, bubbles: true, cancelable: true });
+      target.dispatchEvent(e);
+      expect(e.defaultPrevented).toBe(true);
+    }
+  });
+
   it("mod+, opens settings, also while typing", async () => {
     renderShell("default", { last_profile: "p-logistics" }, <SheetProbe />);
     await focus(await screen.findByRole("searchbox", { name: "Filter entities" }));

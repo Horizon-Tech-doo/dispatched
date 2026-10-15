@@ -5,8 +5,7 @@ import { useShell } from "./context";
 import { useUpdate } from "./sheets/useUpdate";
 import { useJobs } from "./drawer/activity";
 import { useIsFetching, useQueryState } from "./queryState";
-
-const LOST = new Set(["network", "timeout", "auth", "not_signed_in"]);
+import { troubleLabel, useConnectionTrouble } from "./trouble";
 
 export function StatusBar() {
   const { conn, shell, live, dispatch, openSheet } = useShell();
@@ -15,37 +14,39 @@ export function StatusBar() {
   const running = useJobs().filter((j) => !j.finished).length;
   const entities = useQueryState(keys.entities(conn.status === "connected" ? conn.profileId : null));
   const fetching = useIsFetching({ queryKey: ["entities"] }) > 0;
-  const lost = conn.status === "connected" && entities.error != null && LOST.has(entities.error.kind);
+  const trouble = useConnectionTrouble();
   const state =
     conn.status === "connecting" ? "Connecting…"
-    : lost ? "Connection lost"
+    : trouble ? troubleLabel[trouble]
     : conn.status === "connected" ? "Peek only, nothing locked"
     : "Not connected";
+  const editConnection = () => conn.profileId && openSheet({ kind: "profile", profileId: conn.profileId });
   return (
     <footer className="flex h-[22px] shrink-0 items-center gap-4 border-t border-line bg-chrome px-3 text-11 text-muted">
-      {conn.view && <span>{conn.view.transport === "websockets" ? "AMQP over WebSockets" : "AMQP"}</span>}
-      <span className="flex items-center gap-1.5">
-        {lost && <CircleAlert aria-hidden="true" className="size-3 text-accent" />}
-        <span role="status" className={lost ? "text-fg" : undefined}>{state}</span>
-        {lost && <Button size="sm" variant="quiet" onClick={conn.retry}>Reconnect</Button>}
+      {conn.view && <span className="shrink-0">{conn.view.transport === "websockets" ? "AMQP over WebSockets" : "AMQP"}</span>}
+      <span className="flex shrink-0 items-center gap-1.5">
+        {trouble && <CircleAlert aria-hidden="true" className="size-3 text-accent" />}
+        <span role="status" className={trouble ? "text-fg" : undefined}>{state}</span>
+        {trouble === "lost" && <Button size="sm" className="h-[18px]" onClick={conn.retry}>Reconnect</Button>}
+        {trouble && trouble !== "lost" && <Button size="sm" className="h-[18px]" onClick={editConnection}>Edit connection</Button>}
       </span>
       {live && !shell.layout.drawerOpen && (
-        <Button size="sm" variant="quiet" onClick={() => dispatch({ type: "layout", patch: { drawerOpen: true } })}>
+        <Button size="sm" variant="quiet" className="h-[18px] shrink-0" onClick={() => dispatch({ type: "layout", patch: { drawerOpen: true } })}>
           Show activity{running > 0 && <span className="tabular-nums"> · {running} running</span>}
         </Button>
       )}
       {info?.startup_error && (
-        <span className="flex items-center gap-1.5 text-fg">
-          <CircleAlert aria-hidden="true" className="size-3 text-accent" />
-          {info.startup_error}
+        <span className="flex min-w-0 items-center gap-1.5 text-fg" title={info.startup_error}>
+          <CircleAlert aria-hidden="true" className="size-3 shrink-0 text-accent" />
+          <span className="truncate">{info.startup_error}</span>
         </span>
       )}
       <div className="flex-1" />
       {update && (
-        <Button size="sm" variant="quiet" onClick={() => openSheet({ kind: "update" })}>Update {update.version} available</Button>
+        <Button size="sm" variant="quiet" className="h-[18px] shrink-0" onClick={() => openSheet({ kind: "update" })}>Update {update.version} available</Button>
       )}
       {conn.status === "connected" && entities.dataUpdatedAt > 0 && (
-        <span className="tabular-nums">{fetching ? "Refreshing…" : `Refreshed ${formatClock(new Date(entities.dataUpdatedAt).toISOString())}`}</span>
+        <span className="shrink-0 tabular-nums">{fetching ? "Refreshing…" : `Refreshed ${formatClock(new Date(entities.dataUpdatedAt).toISOString())}`}</span>
       )}
     </footer>
   );

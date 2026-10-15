@@ -1,6 +1,9 @@
 import type { EntityCounts, EntityListing, EntityRef, SubscriptionInfo } from "@/engine";
 import type { TreeNode } from "@/ui";
+import { entityIdOf, splitSubscriptionId } from "../entityId";
 import type { EntityKind } from "../state";
+
+export { entityIdOf };
 
 export type NodeKind = "namespace" | "group" | "queue" | "topic" | "subscription" | "known" | "note" | "loading" | "error";
 
@@ -20,17 +23,12 @@ export interface SubsState {
   pending: boolean;
 }
 
-/** The tab id of an entity, which is also a valid `EntityPath`. */
-export function entityIdOf(kind: EntityKind, name: string, topic?: string): string {
-  return kind === "subscription" ? `${topic}/subscriptions/${name}` : name;
-}
-
 /** The tree row that shows an entity, and the rows above it that must be open for it to be visible. */
 export function treeRowOf(tab: { id: string; kind: EntityKind }, limited: boolean): { rowId: string; ancestors: string[] } {
   if (limited) return { rowId: `k:${tab.id}`, ancestors: [] };
   if (tab.kind === "queue") return { rowId: `q:${tab.id}`, ancestors: ["group:queues"] };
   if (tab.kind === "topic") return { rowId: `t:${tab.id}`, ancestors: ["group:topics"] };
-  const [topic, , name] = tab.id.split("/");
+  const { topic, name } = splitSubscriptionId(tab.id);
   return { rowId: `s:${topic}/${name}`, ancestors: ["group:topics", `t:${topic}`] };
 }
 

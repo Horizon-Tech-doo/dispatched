@@ -1,7 +1,7 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
-import { EngineError, setTransport } from "@/engine";
+import { EngineError, keys, setTransport } from "@/engine";
 import { renderShell } from "./test-utils";
 
 const treePanel = () => document.querySelector('[data-panel-id="tree"]');
@@ -41,6 +41,22 @@ describe("Shell", () => {
     expect(within(screen.getByRole("contentinfo")).getByText("Peek only, nothing locked")).toBeInTheDocument();
   });
 
+  it("shows a startup error on the welcome screen as an error block", async () => {
+    const { client } = renderShell("default");
+    await screen.findByRole("list", { name: "Saved connections" });
+    await waitFor(() => expect(client.getQueryData(keys.appInfo)).toBeDefined());
+    act(() =>
+      client.setQueryData(keys.appInfo, {
+        version: "0.0.1",
+        startup_error: "Your saved connections could not be opened (disk I/O error). Changes made now will not be kept.",
+      }),
+    );
+    expect(await screen.findByRole("heading", { name: "Saved connections couldn't be opened" })).toBeInTheDocument();
+    const bar = within(screen.getByRole("contentinfo")).getByText(/could not be opened/);
+    expect(bar).toHaveClass("truncate");
+    expect(bar.parentElement).toHaveAttribute("title", expect.stringContaining("disk I/O error"));
+  });
+
   it("reconnects to the last profile on start", async () => {
     renderShell("default", { last_profile: "p-logistics-dev" });
     await waitFor(() => expect(screen.getByRole("button", { name: /Connection: Logistics dev/ })).toBeInTheDocument());
@@ -56,8 +72,11 @@ describe("Shell", () => {
   it("missing secret shows the fix", async () => {
     renderShell("missing-secret", { last_profile: "p-logistics" });
     expect(await screen.findByRole("heading", { name: "Couldn't connect to Logistics" })).toBeInTheDocument();
-    expect(screen.getByText(/isn't in the system keychain/)).toHaveAttribute("title", expect.stringContaining("no stored connection string"));
+    expect(screen.getByText(/isn't in the system keychain/)).toBeInTheDocument();
+    // The engine's own words sit beneath the sentence, in mono.
+    expect(screen.getByText(/no stored connection string/)).toHaveClass("font-mono", "text-11");
     expect(screen.getByRole("button", { name: "Edit connection" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
   });
 
   it("keeps the workbench mounted while the same profile reconnects", async () => {

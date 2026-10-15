@@ -1,9 +1,10 @@
-import { Check, ChevronDown } from "lucide-react";
+import { Check, ChevronDown, CircleAlert } from "lucide-react";
 import { useProfiles } from "@/engine";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger, LabelSwatch, ProdBadge,
 } from "@/ui";
 import { useShell } from "./context";
+import { useConnectionTrouble } from "./trouble";
 
 export const shortHost = (host: string) => host.replace(/\.servicebus\.(windows\.net|chinacloudapi\.cn|usgovcloudapi\.net)$/, "");
 
@@ -11,12 +12,16 @@ export function ConnectionSelector() {
   const { conn, openSheet } = useShell();
   const profiles = useProfiles().data ?? [];
   const current = profiles.find((p) => p.id === conn.profileId);
+  const trouble = useConnectionTrouble();
+  const troubleText = trouble === "lost" ? ", connection lost" : trouble === "sign-in" ? ", sign-in expired" : trouble ? ", credentials rejected" : "";
   const label =
     conn.status === "connecting" && current ? `Connecting to ${current.name}…`
     : conn.status === "connected" && current ? current.name
     : "Choose a connection";
   const description =
-    conn.status === "connected" && current ? `${current.name}, ${shortHost(current.host)}${current.production ? ", production" : ""}` : label;
+    conn.status === "connected" && current
+      ? `${current.name}, ${shortHost(current.host)}${current.production ? ", production" : ""}${troubleText}`
+      : label;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -29,6 +34,7 @@ export function ConnectionSelector() {
           <span className="truncate font-semibold">{label}</span>
           {conn.status === "connected" && current && <span className="truncate text-muted">{shortHost(current.host)}</span>}
           {conn.status === "connected" && current?.production && <ProdBadge />}
+          {trouble && <CircleAlert aria-hidden="true" className="size-3.5 shrink-0 text-accent" />}
           <ChevronDown aria-hidden="true" className="size-3 shrink-0 text-icon" />
         </button>
       </DropdownMenuTrigger>

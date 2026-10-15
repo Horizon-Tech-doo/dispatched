@@ -20,7 +20,7 @@ export function SettingsSheet() {
   const { prefs, setPrefs, closeSheet, openSheet } = useShell();
   const info = useAppInfo().data;
   return (
-    <Sheet open onOpenChange={(o) => !o && closeSheet()} title="Settings" width={440}>
+    <Sheet open onOpenChange={(o) => !o && closeSheet()} title="Settings">
       <div className="flex flex-col divide-y divide-line">
         <Row label="Theme" hint="System follows the operating system.">
           <Segmented
@@ -38,7 +38,7 @@ export function SettingsSheet() {
             options={[{ value: "compact", label: "Compact" }, { value: "comfortable", label: "Comfortable" }]}
           />
         </Row>
-        <Row label="Auto-refresh" hint="Refreshes counts for what is on screen.">
+        <Row label="Auto-refresh" hint="Refreshes the connected namespace's counts.">
           <Segmented
             label="Auto-refresh"
             value={String(prefs.autoRefresh)}
@@ -48,7 +48,7 @@ export function SettingsSheet() {
         </Row>
         <Row label="Version">
           <div className="flex items-center gap-3">
-            <span className="font-mono text-11 text-muted">{info?.version}</span>
+            <span className="text-12 tabular-nums text-muted">{info?.version}</span>
             <Button size="sm" onClick={() => openSheet({ kind: "update" })}>Check for updates</Button>
           </div>
         </Row>

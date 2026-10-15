@@ -8,7 +8,6 @@ import {
   Button, Field, Input, LabelSwatch, Segmented, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Sheet, Textarea,
   labelColors,
 } from "@/ui";
-import { shortHost } from "../ConnectionSelector";
 import { useShell } from "../context";
 import { placeError, sentence, type Errors } from "./profileErrors";
 import { SignInPanel } from "./SignInPanel";
@@ -29,13 +28,22 @@ interface Form {
   pins: string;
 }
 
+const PUBLIC_SUFFIX = ".servicebus.windows.net";
+
+/** What the Namespace field shows for a saved host: the short name only when adding the public suffix back
+ *  gives the same host (`sb-orders`); a private link or another cloud keeps its full host. */
+export function namespaceField(host: string): string {
+  const short = host.endsWith(PUBLIC_SUFFIX) ? host.slice(0, -PUBLIC_SUFFIX.length) : null;
+  return short && !short.includes(".") ? short : host;
+}
+
 function initial(p: Profile | undefined, auth: AuthKind | undefined): Form {
   return {
     name: p?.name ?? "",
     auth: p ? (p.auth.kind === "entra" ? "entra" : "connection-string") : (auth ?? "connection-string"),
     connectionString: "",
     replaceSecret: false,
-    namespace: p ? shortHost(p.host) : "",
+    namespace: p ? namespaceField(p.host) : "",
     tenant: p?.auth.kind === "entra" ? (p.auth.tenant ?? "") : "",
     production: p?.production ?? false,
     color: p?.color ?? "none",
@@ -159,6 +167,7 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
       onOpenChange={(o) => !o && closeSheet()}
       title={title}
       description={editing ? undefined : "Saved on this computer. Secrets go to the system keychain."}
+      initialFocus="field"
       footer={
         <div className="flex w-full flex-col gap-2">
           {confirmDelete && profile ? (

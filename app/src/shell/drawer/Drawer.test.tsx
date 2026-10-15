@@ -33,6 +33,20 @@ describe("Drawer", () => {
     expect(within(drawer).queryByText("Cancelled")).not.toBeInTheDocument();
   });
 
+  it("logs a cancelled sign-in as cancelled, never as a failure", async () => {
+    const { mock } = renderShell("default", { last_profile: "p-logistics" });
+    const drawer = await screen.findByRole("region", { name: "Jobs and activity" });
+    await within(drawer).findByText("Connected to Logistics");
+    const pending = mock.invoke("sign_in", { tenant: null, deviceCode: false }).catch(() => {});
+    await act(async () => {
+      await mock.invoke("sign_in_cancel");
+      await pending;
+    });
+    expect(await within(drawer).findByText("Sign-in cancelled")).toBeInTheDocument();
+    expect(within(drawer).queryByText(/Sign-in failed/)).not.toBeInTheDocument();
+    expect(within(drawer).queryByText("cancelled")).not.toBeInTheDocument();
+  });
+
   it("lists running jobs with progress and a count on the tab", async () => {
     renderShell("default", { last_profile: "p-logistics" });
     const drawer = await screen.findByRole("region", { name: "Jobs and activity" });

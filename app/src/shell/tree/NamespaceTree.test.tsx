@@ -10,6 +10,10 @@ const tree = () => screen.findByRole("tree", { name: "Namespace" });
 // their handle and swallow it: clicks never move focus. Focus explicitly where a test types or presses keys.
 const focus = (el: HTMLElement) => act(() => el.focus());
 
+/** A sentence that may be split across elements (a host kept on one line): match the element that holds all of it. */
+const sentence = (text: string) =>
+  screen.getByText((_, el) => el?.textContent === text && ![...(el?.children ?? [])].some((c) => c.textContent === text));
+
 describe("NamespaceTree", () => {
   it("lists queues and topics with counts, amber only on dead letters", async () => {
     renderShell("default", { last_profile: "p-logistics" });
@@ -66,7 +70,7 @@ describe("NamespaceTree", () => {
     await focus(t);
     await userEvent.keyboard("{ArrowRight}");
     expect(await within(t).findByRole("treeitem", { name: "tracking-sync" })).toBeInTheDocument();
-    expect(mock.calls).toContainEqual({ cmd: "list_subscriptions", args: { topic: "shipment-events" } });
+    expect(mock.calls).toContainEqual({ cmd: "list_subscriptions", args: { profileId: "p-logistics", topic: "shipment-events" } });
   });
 
   it("does not load subscriptions of collapsed topics", async () => {
@@ -102,8 +106,10 @@ describe("NamespaceTree", () => {
 
   it("explains a limited listing and shows pinned entities", async () => {
     renderShell("forbidden", { last_profile: "p-logistics" });
-    expect(await screen.findByText(/This identity can't list entities in sb-logistics-prod, so only pinned entities are shown\./)).toBeInTheDocument();
-    expect(screen.getByText(/Grant it Manage rights to see everything, or edit this connection to pin more\./)).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Showing pinned entities only" })).toBeInTheDocument();
+    expect(
+      sentence("This identity can't list entities in sb-logistics-prod. Grant it Manage rights to see everything, or edit this connection to pin more."),
+    ).toBeInTheDocument();
     expect(screen.queryByText(/needs Manage,EntityRead/)).not.toBeInTheDocument(); // the engine's wording is not echoed
     expect(within(await tree()).getByRole("treeitem", { name: "orders" })).toBeInTheDocument();
   });
@@ -129,12 +135,41 @@ describe("NamespaceTree", () => {
     renderShell("network", { last_profile: "p-logistics" });
     // One automatic retry for network errors, after the query client's default delay.
     expect(await screen.findByRole("heading", { name: "Can't list this namespace" }, { timeout: 4000 })).toBeInTheDocument();
-    expect(screen.getByText("The connection to sb-logistics-prod was interrupted. Check your network or VPN, then retry.")).toBeInTheDocument();
-    // The drawer logs the same failure; the tree's own line is the one outside it.
+    expect(sentence("The connection to sb-logistics-prod was interrupted. Check your network or VPN, then try again.")).toBeInTheDocument();
+    // The host never breaks across lines.
+    expect(screen.getByText("sb-logistics-prod", { selector: "span.whitespace-nowrap" })).toBeInTheDocument();
+    // The drawer logs the same failure; the tree's own line is the one outside it, in mono on its own line.
     const raw = screen.getAllByText("network error: connection reset by peer").find((el) => !el.closest("[aria-label='Jobs and activity']"))!;
-    expect(raw.className).toContain("text-11");
-    expect(raw.className).toContain("text-muted");
-    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(raw.tagName).toBe("P");
+    expect(raw).toHaveClass("font-mono", "text-11", "text-muted");
+    expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+  });
+
+  it("sends an expired sign-in to the connection sheet, in the tree, the status bar and the selector", async () => {
+    const user = userEvent.setup();
+    function SheetProbe() {
+      const { sheet } = useShell();
+      return <output aria-label="Open sheet">{sheet ? JSON.stringify(sheet) : "none"}</output>;
+    }
+    renderShell("sign-in-expired", { last_profile: "p-logistics-dev" }, <SheetProbe />);
+    expect(await screen.findByRole("heading", { name: "Can't list this namespace" })).toBeInTheDocument();
+    expect(sentence("Your sign-in for Logistics dev has expired. Edit the connection to sign in again.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
+    const bar = screen.getByRole("contentinfo");
+    expect(within(bar).getByRole("status")).toHaveTextContent("Sign-in expired");
+    expect(within(bar).queryByRole("button", { name: "Reconnect" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Connection: Logistics dev, sb-logistics-dev, sign-in expired$/ })).toBeInTheDocument();
+    await user.click(within(bar).getByRole("button", { name: "Edit connection" }));
+    expect(screen.getByLabelText("Open sheet")).toHaveTextContent('{"kind":"profile","profileId":"p-logistics-dev"}');
+  });
+
+  it("marks a lost connection on the status bar and the selector", async () => {
+    renderShell("network", { last_profile: "p-logistics" });
+    expect(await screen.findByRole("heading", { name: "Can't list this namespace" }, { timeout: 4000 })).toBeInTheDocument();
+    const bar = screen.getByRole("contentinfo");
+    expect(within(bar).getByRole("status")).toHaveTextContent("Connection lost");
+    expect(within(bar).getByRole("button", { name: "Reconnect" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Connection: Logistics, sb-logistics-prod, production, connection lost" })).toBeInTheDocument();
   });
 
   it("opens the context menu from the keyboard on the selected row", async () => {

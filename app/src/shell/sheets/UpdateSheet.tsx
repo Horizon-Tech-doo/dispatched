@@ -1,7 +1,6 @@
-import { CircleAlert } from "lucide-react";
 import { useEffect } from "react";
 import { useAppInfo } from "@/engine";
-import { Button, Sheet, formatClock } from "@/ui";
+import { Button, Problem, Sheet, formatClock } from "@/ui";
 import { useShell } from "../context";
 import { useJobs } from "../drawer/activity";
 import { installStore, reasonOf, useInstall } from "./installState";
@@ -9,18 +8,6 @@ import { useUpdate } from "./useUpdate";
 
 /** The updater reports dates like "2026-10-20 10:00:00.0 +00:00:00"; the day is all a reader needs. */
 const day = (date: string) => (/^\d{4}-\d{2}-\d{2}/.test(date) ? date.slice(0, 10) : date);
-
-function Problem({ title, reason }: { title: string; reason: string }) {
-  return (
-    <div role="alert" className="flex items-start gap-1.5 text-12">
-      <CircleAlert aria-hidden="true" className="mt-px size-3.5 shrink-0 text-accent" />
-      <div className="flex min-w-0 flex-col">
-        <span className="font-semibold">{title}</span>
-        <span className="break-words">{reason}</span>
-      </div>
-    </div>
-  );
-}
 
 /** A 2px bar. `value` null: size unknown, so a full-width static bar at half strength. */
 function Bar({ value }: { value: number | null }) {
@@ -71,7 +58,6 @@ export function UpdateSheet() {
       onOpenChange={(o) => !o && !installing && closeSheet()}
       dismissible={!installing}
       title="Updates"
-      width={440}
       footer={
         <div className="flex w-full flex-col gap-2">
           {u && running > 0 && (
@@ -82,9 +68,10 @@ export function UpdateSheet() {
           <div className="flex justify-end gap-2">
             {u ? (
               <>
-                {checkError && <Button variant="quiet" onClick={() => void update.refetch()} disabled={installing}>Check again</Button>}
+                {checkError && <Button onClick={() => void update.refetch()} disabled={installing}>Check again</Button>}
                 <Button variant="quiet" onClick={closeSheet} disabled={installing}>Later</Button>
-                <Button variant="primary" onClick={() => void installStore.start()} disabled={installing}>{label}</Button>
+                {/* Retrying a failed install is a recovery action: bordered, not primary. */}
+                <Button variant={install.error ? "default" : "primary"} onClick={() => void installStore.start()} disabled={installing}>{label}</Button>
               </>
             ) : (
               <Button onClick={() => void update.refetch()} disabled={checking}>Check again</Button>
@@ -95,7 +82,9 @@ export function UpdateSheet() {
     >
       <div className="flex flex-col gap-3">
         {checking && !u && <p role="status" className="m-0 text-12 text-muted">Checking for updates…</p>}
-        {checkError && <Problem title="Couldn't check for updates" reason={checkError} />}
+        {checkError && (
+          <Problem role="alert" title="Couldn't check for updates" body="Check your network connection, then check again." detail={checkError} />
+        )}
         {u && (
           <div className="flex flex-col gap-2">
             <p className="m-0 text-13">
@@ -112,7 +101,9 @@ export function UpdateSheet() {
             <p role="status" className="m-0 text-12 text-muted">{status}</p>
           </div>
         )}
-        {install.error && <Problem title="Couldn't install the update" reason={install.error} />}
+        {install.error && (
+          <Problem role="alert" title="Couldn't install the update" body="Try again now, or later from Settings." detail={install.error} />
+        )}
         {!u && !checking && !update.error && (
           <p className="m-0 text-12 text-muted">
             Dispatched{version && ` ${version}`}.{update.dataUpdatedAt > 0 && ` Checked ${formatClock(new Date(update.dataUpdatedAt).toISOString())}.`}

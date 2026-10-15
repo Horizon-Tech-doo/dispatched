@@ -1,12 +1,13 @@
 import { CircleAlert } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { useEntities, useProfiles, useSubscriptionsFor } from "@/engine";
 import {
   Button, ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger,
-  CountBadge, EmptyState, EntityGlyph, Input, Skeleton, SkeletonRows, Tree, formatNumber, rowHeight,
+  CountBadge, EmptyState, EntityGlyph, Input, Problem, Skeleton, SkeletonRows, Tree, formatNumber, rowHeight,
 } from "@/ui";
 import { shortHost } from "../ConnectionSelector";
 import { useShell } from "../context";
+import { keepTogether } from "../text";
 import { describeListError } from "./listError";
 import { buildNodes, type NsNode, type SubsState } from "./model";
 
@@ -38,8 +39,8 @@ function Row({ n, production, onRetry }: { n: NsNode; production: boolean; onRet
         <>
           <CircleAlert aria-hidden="true" className="size-3 shrink-0 text-accent" />
           <span className="truncate" title={n.message}>{n.label}: {n.message}</span>
-          <Button size="sm" variant="quiet" className="ml-auto h-[18px] shrink-0" onClick={(e) => { e.stopPropagation(); onRetry(n.topic!); }}>
-            Retry
+          <Button size="sm" className="ml-auto h-[18px] shrink-0" onClick={(e) => { e.stopPropagation(); onRetry(n.topic!); }}>
+            Try again
           </Button>
         </>
       );
@@ -126,19 +127,17 @@ export function NamespaceTree() {
 
   const summary = listing && !listing.limited ? `${formatNumber(listing.queues.length)} queues, ${formatNumber(listing.topics.length)} topics` : "";
   const editConnection = profileId ? () => openSheet({ kind: "profile", profileId }) : undefined;
-  const notice = (text: string, detail?: string, action?: { label: string; run: () => void }) => (
-    <div className="flex shrink-0 items-start gap-1.5 border-y border-line px-3 py-2 text-12 text-fg">
-      <CircleAlert aria-hidden="true" className="mt-px size-3.5 shrink-0 text-accent" />
-      <div className="min-w-0 flex-1">
-        <p className="m-0">{text}</p>
-        {detail && <p className="m-0 mt-0.5 break-words text-11 text-muted">{detail}</p>}
-        {action && <Button size="sm" variant="quiet" className="-ml-1.5 mt-1" onClick={action.run}>{action.label}</Button>}
-      </div>
-    </div>
-  );
-  const retry = { label: "Retry", run: () => void entities.refetch() };
-  const limitedText = `This identity can't list entities in ${host}, so only pinned entities are shown. Grant it Manage rights to see everything, or edit this connection to pin more.`;
-
+  const failure = entities.error
+    ? describeListError(errorKind(entities.error), { name: profile?.name ?? conn.view?.profile_name ?? host, host, entra: profile?.auth.kind === "entra" })
+    : null;
+  // A listing that needs the connection fixed offers to edit it; anything else runs the listing again.
+  const recover =
+    failure?.fix === "edit" && editConnection ? (
+      <Button onClick={editConnection}>Edit connection</Button>
+    ) : (
+      <Button onClick={() => void entities.refetch()}>Try again</Button>
+    );
+  const banner = (children: ReactNode) => <div className="shrink-0 border-y border-line px-3 py-2.5">{children}</div>;
   return (
     <nav aria-label="Namespace" className="flex h-full min-h-0 flex-col">
       <div className="flex h-[30px] shrink-0 items-center justify-between border-b border-line px-3">
@@ -157,28 +156,32 @@ export function NamespaceTree() {
           className="[&::-webkit-search-cancel-button]:appearance-none"
         />
       </div>
-      {entities.error && listing &&
-        notice(`${describeListError(errorKind(entities.error), host)} Showing the last loaded data.`, entities.error.message, retry)}
-      {listing?.limited && notice(limitedText, undefined, editConnection && { label: "Edit connection", run: editConnection })}
+      {entities.error && failure && listing &&
+        banner(
+          <Problem
+            title="Couldn't refresh"
+            body={<>{keepTogether(failure.message, host)} Showing the last loaded data.</>}
+            detail={entities.error.message}
+            action={recover}
+          />,
+        )}
+      {listing?.limited &&
+        banner(
+          <Problem
+            title="Showing pinned entities only"
+            body={keepTogether(`This identity can't list entities in ${host}. Grant it Manage rights to see everything, or edit this connection to pin more.`, host)}
+            action={editConnection && <Button onClick={editConnection}>Edit connection</Button>}
+          />,
+        )}
       <div className="min-h-0 flex-1">
         {entities.isPending ? (
           <SkeletonRows rows={12} columns={2} />
-        ) : entities.error && !listing ? (
-          <EmptyState
-            tone="error"
-            title="Can't list this namespace"
-            body={
-              <>
-                <span className="block text-fg">{describeListError(errorKind(entities.error), host)}</span>
-                <span className="mt-1 block break-words text-11 text-muted">{entities.error.message}</span>
-              </>
-            }
-            action={<Button onClick={() => void entities.refetch()}>Retry</Button>}
-          />
+        ) : entities.error && failure && !listing ? (
+          <EmptyState tone="error" title="Can't list this namespace" body={keepTogether(failure.message, host)} detail={entities.error.message} action={recover} />
         ) : listing?.limited && listing.known.length === 0 ? (
           <EmptyState
             title="No pinned entities"
-            body={`This identity can't list entities in ${host} and none are pinned. Edit this connection to pin the queues or subscriptions you use, or grant it Manage rights.`}
+            body={keepTogether(`This identity can't list entities in ${host} and none are pinned. Edit this connection to pin the queues or subscriptions you use, or grant it Manage rights.`, host)}
             action={editConnection && <Button onClick={editConnection}>Edit connection</Button>}
           />
         ) : nodes.length === 1 && filter.trim() ? (

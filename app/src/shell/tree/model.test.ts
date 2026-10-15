@@ -116,4 +116,11 @@ describe("treeRowOf", () => {
     });
     expect(treeRowOf({ id: "orders", kind: "queue" }, true)).toEqual({ rowId: "k:orders", ancestors: [] });
   });
+
+  it("finds a subscription whose topic name contains a slash", () => {
+    expect(treeRowOf({ id: "orders/eu/subscriptions/audit", kind: "subscription" }, false)).toEqual({
+      rowId: "s:orders/eu/audit",
+      ancestors: ["group:topics", "t:orders/eu"],
+    });
+  });
 });

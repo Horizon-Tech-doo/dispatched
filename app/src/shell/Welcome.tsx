@@ -1,12 +1,14 @@
-import { useProfiles } from "@/engine";
+import { useAppInfo, useProfiles } from "@/engine";
 import { Button, EmptyState, LabelSwatch, ProdBadge, SkeletonRows } from "@/ui";
 import { shortHost } from "./ConnectionSelector";
 import { describeConnectError } from "./connectError";
 import { useShell } from "./context";
+import { keepTogether } from "./text";
 
 export function Welcome() {
   const { conn, openSheet } = useShell();
   const profiles = useProfiles();
+  const startupError = useAppInfo().data?.startup_error;
   const failed = conn.status === "failed" ? profiles.data?.find((p) => p.id === conn.profileId) : undefined;
 
   if (profiles.isPending) {
@@ -24,25 +26,25 @@ export function Welcome() {
   return (
     <div className="flex h-full w-full justify-center overflow-y-auto">
       <div className="flex w-[480px] max-w-full flex-col gap-4 py-16">
-        {failed && (
+        {startupError && <EmptyState tone="error" title="Saved connections couldn't be opened" body={startupError} />}
+        {failed && failure && (
           <EmptyState
             tone="error"
             title={`Couldn't connect to ${failed.name}`}
-            body={<span title={conn.error?.message}>{failure?.message}</span>}
+            body={keepTogether(failure.message, shortHost(failed.host))}
+            detail={conn.error?.message}
             action={
-              <div className="flex gap-2">
-                {failure?.retryable ? (
-                  <>
-                    <Button onClick={conn.retry}>Try again</Button>
-                    <Button variant="quiet" onClick={edit}>Edit connection</Button>
-                  </>
-                ) : (
-                  <>
-                    <Button onClick={edit}>Edit connection</Button>
-                    <Button variant="quiet" onClick={conn.retry}>Try again</Button>
-                  </>
-                )}
-              </div>
+              failure.retryable ? (
+                <>
+                  <Button onClick={conn.retry}>Try again</Button>
+                  <Button onClick={edit}>Edit connection</Button>
+                </>
+              ) : (
+                <>
+                  <Button onClick={edit}>Edit connection</Button>
+                  <Button onClick={conn.retry}>Try again</Button>
+                </>
+              )
             }
           />
         )}
@@ -68,7 +70,7 @@ export function Welcome() {
                     aria-label={`${p.name}, ${shortHost(p.host)}${p.production ? ", production" : ""}`}
                     onClick={() => void conn.connect(p.id)}
                     disabled={conn.status === "connecting"}
-                    className="flex h-8 w-full items-center gap-2 px-2 text-left text-12 hover:bg-hover disabled:opacity-60"
+                    className="flex h-[26px] w-full items-center gap-2 px-2 text-left text-12 hover:bg-hover disabled:opacity-60"
                   >
                     <LabelSwatch color={p.color} />
                     <span className="font-semibold">{p.name}</span>

@@ -40,7 +40,12 @@ export function EntityView({ tab }: { tab: OpenTab }) {
             return (
               <TabsTrigger key={d.id} value={d.id}>
                 <span>{d.label}</span>
-                {c && <CountBadge value={c.value} quality={info.counts ?? undefined} attention={c.attention} />}
+                {c ? (
+                  <CountBadge value={c.value} quality={info.counts ?? undefined} attention={c.attention} className="min-w-[3ch]" />
+                ) : (
+                  // Hold the count's place while it loads, so the row does not shift when it arrives.
+                  d.count && info.status === "loading" && <span aria-hidden="true" data-count-placeholder className="min-w-[3ch]" />
+                )}
               </TabsTrigger>
             );
           })}

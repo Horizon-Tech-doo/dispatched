@@ -4,7 +4,7 @@ import { Copy, RefreshCw, Settings } from "lucide-react";
 import {
   Button, CommandGroup, CommandInput, CommandItem, CommandList, CommandPaletteDialog, CommandShortcut,
   CountBadge, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
-  EmptyState, EntityGlyph, Field, Hint, IconButton, Input, Kbd, LabelSwatch, MenuShortcut, Panel, PanelGroup, ProdBadge,
+  EmptyState, EntityGlyph, Problem, Field, Hint, IconButton, Input, Kbd, LabelSwatch, MenuShortcut, Panel, PanelGroup, ProdBadge,
   ResizeHandle, Segmented, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Sheet, SkeletonRows, Textarea,
   DataGrid, Tabs, TabsList, TabsTrigger, ThemeScope, TooltipProvider, Tree,
   labelColors, rowHeight, shortcutLabel, type Density, type EntityKind, type ThemeName, type TreeNode,
@@ -329,7 +329,16 @@ function Column({ theme, density }: { theme: ThemeName; density: Density }) {
         <Section title="Loading and empty">
           <div className="w-72 border border-line"><SkeletonRows rows={4} columns={2} /></div>
           <EmptyState title="No dead letters" body="Messages that fail delivery land here. This subscription has none." />
-          <EmptyState tone="error" title="Can't list subscriptions" body="This identity needs Listen or Manage on shipment-events." action={<Button>Retry</Button>} />
+          <EmptyState
+            tone="error"
+            title="Can't list subscriptions"
+            body="This identity needs Listen or Manage on shipment-events."
+            detail="access denied (needs Listen): the token does not include the claim"
+            action={<Button>Try again</Button>}
+          />
+          <div className="w-72 border-y border-line px-3 py-2.5">
+            <Problem title="Couldn't refresh" body="The connection was interrupted. Showing the last loaded data." detail="network error: connection reset by peer" action={<Button>Try again</Button>} />
+          </div>
         </Section>
         <Overlays />
       </div>

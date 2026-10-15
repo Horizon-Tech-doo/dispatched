@@ -1,8 +1,9 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
-import { EngineError } from "@/engine";
+import { EngineError, type Profile } from "@/engine";
 import { renderShell } from "../test-utils";
+import { namespaceField } from "./ProfileSheet";
 
 /** Open the connection selector from the keyboard (jsdom's resizable panels can swallow the pointer-down). */
 async function chooseMenuItem(user: ReturnType<typeof userEvent.setup>, trigger: RegExp, item: string) {
@@ -256,6 +257,48 @@ describe("ProfileSheet details", () => {
     await user.click(within(sheet).getByRole("button", { name: "Use another account" }));
     expect(await within(sheet).findByText("The sign-in window was closed before it finished.")).toBeInTheDocument();
     expect(within(sheet).getByText(/Signed in as ops@contoso.example/)).toBeInTheDocument();
+  });
+
+  it("shows a public namespace by its short name and any other host in full", () => {
+    expect(namespaceField("sb-orders.servicebus.windows.net")).toBe("sb-orders");
+    expect(namespaceField("myns.privatelink.servicebus.windows.net")).toBe("myns.privatelink.servicebus.windows.net");
+    expect(namespaceField("x.servicebus.chinacloudapi.cn")).toBe("x.servicebus.chinacloudapi.cn");
+  });
+
+  it.each(["myns.privatelink.servicebus.windows.net", "x.servicebus.chinacloudapi.cn"])(
+    "saving an unchanged Entra connection keeps its host %s",
+    async (host) => {
+      const user = userEvent.setup();
+      const { mock, client } = renderShell("default");
+      await mock.invoke("sign_in", { tenant: null, deviceCode: false });
+      const added = await mock.invoke<Profile>("profile_save", {
+        draft: { name: "Private", auth: { kind: "entra", namespace: host }, production: false, transport: "amqp", pinned_entities: [] },
+      });
+      expect(added.host).toBe(host);
+      await client.invalidateQueries({ queryKey: ["profiles"] });
+      const sheet = await openEdit(user, "Private");
+      expect(within(sheet).getByLabelText("Namespace")).toHaveValue(host);
+      await user.click(within(sheet).getByRole("button", { name: "Save" }));
+      await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+      const last = mock.calls.filter((c) => c.cmd === "profile_save").at(-1)!.args as { draft: { auth: { namespace: string } } };
+      expect(last.draft.auth.namespace).toBe(host);
+      const saved = (await mock.invoke<Profile[]>("profiles_list")).find((p) => p.id === added.id)!;
+      expect(saved.host).toBe(host);
+    },
+  );
+
+  it("focuses the first field of a form sheet and the sheet itself otherwise", async () => {
+    const user = userEvent.setup();
+    renderShell("default");
+    await user.click(await screen.findByRole("button", { name: "Add connection…" }));
+    const add = await screen.findByRole("dialog", { name: "Add connection" });
+    await waitFor(() => expect(within(add).getByLabelText("Name")).toHaveFocus());
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await user.click(await screen.findByRole("button", { name: /Connection: Choose a connection/ }));
+    await user.click(await screen.findByRole("menuitem", { name: "Manage connections…" }));
+    const list = await screen.findByRole("dialog", { name: "Connections" });
+    await waitFor(() => expect(list).toHaveFocus());
   });
 
   it("disconnects before deleting the active connection", async () => {

@@ -103,7 +103,7 @@ export function Drawer() {
     <section aria-label="Jobs and activity" className="flex h-full min-h-0 flex-col">
       <Tabs value={shell.layout.drawerTab} onValueChange={(v) => dispatch({ type: "layout", patch: { drawerTab: v as "jobs" | "activity" } })} className="flex min-h-0 flex-1 flex-col">
         <div className="flex h-[26px] shrink-0 items-stretch border-b border-line pr-1">
-          <TabsList variant="underline" aria-label="Drawer" className="h-[26px] px-1.5">
+          <TabsList variant="underline" aria-label="Drawer" className="h-full px-1.5">
             <TabsTrigger value="jobs">Jobs {running > 0 && <span className="tabular-nums text-muted">{running}</span>}</TabsTrigger>
             <TabsTrigger value="activity">Activity</TabsTrigger>
           </TabsList>

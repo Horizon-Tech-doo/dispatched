@@ -11,7 +11,10 @@ export function Hotkeys() {
     { combo: "mod+k", run: () => setPaletteOpen(!paletteOpen), inInputs: true },
     { combo: "mod+,", run: () => { setPaletteOpen(false); openSheet({ kind: "settings" }); }, inInputs: true },
     { combo: "f5", run: () => free && refresh(), inInputs: true },
-    { combo: "mod+f", run: () => free && document.getElementById("tree-filter")?.focus() },
+    // Even in a text field: the webview's own find bar and reload are not part of this app.
+    { combo: "mod+f", run: () => free && document.getElementById("tree-filter")?.focus(), inInputs: true },
+    { combo: "mod+r", run: () => {}, inInputs: true },
+    { combo: "mod+shift+r", run: () => {}, inInputs: true },
     { combo: "mod+j", run: () => free && dispatch({ type: "layout", patch: { drawerOpen: !shell.layout.drawerOpen } }) },
     { combo: "mod+w", run: () => free && shell.activeTab && dispatch({ type: "close", id: shell.activeTab }) },
     ...Array.from({ length: 9 }, (_, i) => ({ combo: `mod+${i + 1}`, run: () => free && dispatch({ type: "activateIndex", index: i }) })),

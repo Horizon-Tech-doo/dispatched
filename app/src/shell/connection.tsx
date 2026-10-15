@@ -17,17 +17,23 @@ export function useConnectionController() {
   const qc = useQueryClient();
   const [s, setS] = useState<ConnState>(idle);
   const autoTried = useRef(false);
+  // Every connect or disconnect takes a number; a connect whose number is no longer the latest
+  // finished after the user moved on, and its result is dropped.
+  const latest = useRef(0);
 
   const connect = useCallback(
     async (profileId: string) => {
+      const n = ++latest.current;
       setS({ status: "connecting", view: null, error: null, profileId });
       try {
         const view = await commands.connect(profileId);
+        if (n !== latest.current) return;
         qc.removeQueries({ queryKey: ["entities"] });
         qc.removeQueries({ queryKey: ["subscriptions"] });
         setS({ status: "connected", view, error: null, profileId });
         void commands.settingsSet("last_profile", profileId).catch(() => {});
       } catch (e) {
+        if (n !== latest.current) return;
         setS({ status: "failed", view: null, error: e as EngineError, profileId });
       }
     },
@@ -35,6 +41,7 @@ export function useConnectionController() {
   );
 
   const disconnect = useCallback(async () => {
+    latest.current++;
     await commands.disconnect().catch(() => {});
     qc.removeQueries({ queryKey: ["entities"] });
     qc.removeQueries({ queryKey: ["subscriptions"] });

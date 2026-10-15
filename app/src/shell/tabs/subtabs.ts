@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { commands, keys, useEntities, type EntityCounts } from "@/engine";
 import { useShell } from "../context";
+import { splitSubscriptionId } from "../entityId";
 import type { EntityKind, OpenTab, SubTabId } from "../state";
 
 export interface SubTabDef {
@@ -31,10 +32,7 @@ export function subTabsFor(kind: EntityKind): SubTabDef[] {
 }
 
 /** A subscription's tab id is `${topic}/subscriptions/${name}`. */
-export function splitSubscription(id: string): { topic: string; name: string } {
-  const [topic, , name] = id.split("/");
-  return { topic, name };
-}
+export const splitSubscription = splitSubscriptionId;
 
 const iso = (d: string | null) => {
   const m = d?.match(/^PT(?:(\d+)M)?(?:(\d+)S)?$/);
@@ -61,7 +59,7 @@ export function useEntityInfo(tab: OpenTab): EntityInfo {
   const sub = tab.kind === "subscription" ? splitSubscription(tab.id) : null;
   const subs = useQuery({
     queryKey: keys.subscriptions(conn.profileId, sub?.topic ?? ""),
-    queryFn: () => commands.listSubscriptions(sub!.topic),
+    queryFn: () => commands.listSubscriptions(conn.profileId!, sub!.topic),
     enabled: sub !== null && conn.profileId !== null && !entities.data?.limited && !!entities.data?.topics.some((t) => t.name === sub.topic),
   });
   const listing = entities.data;
