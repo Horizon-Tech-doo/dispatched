@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { applyTheme, resolveTheme, rowHeight } from "./theme";
-import { themes } from "./tokens";
+import { labelColors, themes } from "./tokens";
 
 describe("theme", () => {
   it("resolves system to the OS preference", () => {
@@ -14,6 +14,7 @@ describe("theme", () => {
     applyTheme("light", "comfortable", root);
     expect(root.style.getPropertyValue("--c-accent")).toBe(themes.light.accent);
     expect(root.style.getPropertyValue("--c-accent-ink")).toBe(themes.light.accentInk);
+    expect(root.style.getPropertyValue("--label-blue")).toBe(labelColors.blue.light);
     expect(root.dataset.theme).toBe("light");
     expect(root.style.getPropertyValue("--row")).toBe(`${rowHeight.comfortable}px`);
   });

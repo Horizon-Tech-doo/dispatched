@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { contrastPairs, roles, themes } from "./tokens";
+import { contrastPairs, labelColors, roles, themes } from "./tokens";
 import { contrastRatio } from "./contrast";
 
 describe("tokens", () => {
@@ -23,5 +23,15 @@ describe("tokens", () => {
   it("computes known ratios", () => {
     expect(contrastRatio("#000000", "#ffffff")).toBeCloseTo(21, 0);
     expect(contrastRatio("#ffffff", "#ffffff")).toBeCloseTo(1, 5);
+  });
+});
+
+describe("label colours", () => {
+  it("are distinguishable on the side surface (3:1) in both themes", () => {
+    for (const [name, c] of Object.entries(labelColors)) {
+      for (const theme of ["dark", "light"] as const) {
+        expect(contrastRatio(c[theme], themes[theme].side), `${name} ${theme}`).toBeGreaterThanOrEqual(3);
+      }
+    }
   });
 });

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { roles, themes, type Role, type ThemeName } from "./tokens";
+import { labelColors, roles, themes, type Role, type ThemeName } from "./tokens";
 
 export type { ThemeName } from "./tokens";
 export type ThemePref = "system" | ThemeName;
@@ -13,11 +13,12 @@ export function resolveTheme(pref: ThemePref, systemDark: boolean): ThemeName {
   return pref === "system" ? (systemDark ? "dark" : "light") : pref;
 }
 
-export function applyTheme(name: ThemeName, density: Density, root: HTMLElement = document.documentElement): void {
-  for (const role of roles) root.style.setProperty(cssVar(role), themes[name][role]);
+export function applyTheme(themeName: ThemeName, density: Density, root: HTMLElement = document.documentElement): void {
+  for (const role of roles) root.style.setProperty(cssVar(role), themes[themeName][role]);
+  for (const [name, c] of Object.entries(labelColors)) root.style.setProperty(`--label-${name}`, c[themeName]);
   root.style.setProperty("--row", `${rowHeight[density]}px`);
-  root.style.colorScheme = name;
-  root.dataset.theme = name;
+  root.style.colorScheme = themeName;
+  root.dataset.theme = themeName;
   root.dataset.density = density;
 }
 

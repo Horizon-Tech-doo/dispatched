@@ -1,5 +1,5 @@
 import { useProfiles } from "@/engine";
-import { Button, EmptyState, ProdBadge, SkeletonRows } from "@/ui";
+import { Button, EmptyState, LabelSwatch, ProdBadge, SkeletonRows } from "@/ui";
 import { shortHost } from "./ConnectionSelector";
 import { describeConnectError } from "./connectError";
 import { useShell } from "./context";
@@ -70,6 +70,7 @@ export function Welcome() {
                     disabled={conn.status === "connecting"}
                     className="flex h-8 w-full items-center gap-2 px-2 text-left text-12 hover:bg-hover disabled:opacity-60"
                   >
+                    <LabelSwatch color={p.color} />
                     <span className="font-semibold">{p.name}</span>
                     <span className="truncate text-muted">{shortHost(p.host)}</span>
                     {p.production && <ProdBadge className="ml-auto" />}

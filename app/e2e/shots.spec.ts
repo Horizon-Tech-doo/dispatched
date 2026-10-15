@@ -197,6 +197,76 @@ export const shots: {
       await page.getByText("Exports and bulk operations show their progress here").waitFor();
     },
   },
+  {
+    name: "profile-add",
+    path: "/?scenario=empty",
+    ready: (p) => p.getByRole("heading", { name: "Add a connection" }),
+    prepare: async (page) => {
+      await page.getByRole("button", { name: "Add connection string" }).click();
+      const sheet = page.getByRole("dialog", { name: "Add connection" });
+      await sheet.getByLabel("Name", { exact: true }).fill("Orders production");
+      await sheet.getByRole("button", { name: "Save" }).click(); // shows the field errors
+      await sheet.getByText("Paste the namespace's connection string.").waitFor();
+    },
+    holds: (p) => p.getByRole("dialog", { name: "Add connection" }),
+    viewportOnly: true,
+  },
+  {
+    name: "profile-entra",
+    path: "/?scenario=empty",
+    ready: (p) => p.getByRole("heading", { name: "Add a connection" }),
+    prepare: async (page) => {
+      await page.getByRole("button", { name: "Sign in with Entra ID" }).click();
+      const sheet = page.getByRole("dialog", { name: "Add connection" });
+      await sheet.getByRole("button", { name: "Use a device code instead" }).click();
+      await sheet.getByText("QX4T-9KLM").waitFor();
+    },
+    holds: (p) => p.getByRole("dialog", { name: "Add connection" }),
+    viewportOnly: true,
+  },
+  {
+    name: "profile-entra-signed-in",
+    path: "/?scenario=empty",
+    ready: (p) => p.getByRole("heading", { name: "Add a connection" }),
+    prepare: async (page) => {
+      await page.getByRole("button", { name: "Sign in with Entra ID" }).click();
+      const sheet = page.getByRole("dialog", { name: "Add connection" });
+      await sheet.getByRole("button", { name: "Sign in with Entra ID" }).click();
+      await sheet.getByText("Signed in as ops@contoso.example").waitFor();
+      await sheet.getByLabel("Name", { exact: true }).fill("Ops");
+    },
+    holds: (p) => p.getByRole("dialog", { name: "Add connection" }),
+    viewportOnly: true,
+  },
+  {
+    name: "profile-edit",
+    path: "/?scenario=default",
+    ready: (p) => p.getByRole("list", { name: "Saved connections" }),
+    prepare: async (page) => {
+      await page.getByRole("button", { name: "Connection: Choose a connection" }).click();
+      await page.getByRole("menuitem", { name: "Manage connections…" }).click();
+      await page.getByRole("dialog", { name: "Connections" }).getByRole("button", { name: "Edit Logistics", exact: true }).click();
+      const sheet = page.getByRole("dialog", { name: "Edit Logistics", exact: true });
+      await sheet.getByRole("button", { name: "Test connection" }).click();
+      await sheet.getByText(/listed 4 queue/).waitFor();
+      await sheet.getByRole("button", { name: "Delete…" }).click();
+      await sheet.getByRole("button", { name: "Delete Logistics" }).waitFor();
+    },
+    holds: (p) => p.getByRole("dialog", { name: "Edit Logistics", exact: true }),
+    viewportOnly: true,
+  },
+  {
+    name: "profiles",
+    path: "/?scenario=default",
+    ready: (p) => p.getByRole("list", { name: "Saved connections" }),
+    prepare: async (page) => {
+      await page.getByRole("button", { name: "Connection: Choose a connection" }).click();
+      await page.getByRole("menuitem", { name: "Manage connections…" }).click();
+      await page.getByRole("dialog", { name: "Connections" }).getByRole("button", { name: "Edit Logistics", exact: true }).waitFor();
+    },
+    holds: (p) => p.getByRole("dialog", { name: "Connections" }),
+    viewportOnly: true,
+  },
 ];
 
 for (const colorScheme of ["dark", "light"] as const) {

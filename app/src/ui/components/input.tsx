@@ -16,3 +16,18 @@ export function Input({ className, mono, ...props }: ComponentProps<"input"> & {
     />
   );
 }
+
+export function Textarea({ className, mono, ...props }: ComponentProps<"textarea"> & { mono?: boolean }) {
+  return (
+    <textarea
+      spellCheck={false}
+      className={cn(
+        "min-h-16 w-full resize-y rounded-ctl border border-line bg-field px-2 py-1 text-12 text-fg placeholder:text-muted",
+        "focus-visible:outline focus-visible:outline-1 focus-visible:outline-fg focus-visible:-outline-offset-1 aria-invalid:border-accent disabled:opacity-45",
+        mono && "font-mono text-11",
+        className,
+      )}
+      {...props}
+    />
+  );
+}

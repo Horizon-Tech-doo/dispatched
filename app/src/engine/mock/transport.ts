@@ -13,6 +13,7 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
   let profiles: Profile[] = scenario === "empty" ? [] : structuredClone(fx.profiles);
   let active: Profile | null = null;
   let account: AccountView | null = null;
+  let cancelSignIn: (() => void) | null = null;
 
   const emit = (event: string, payload: unknown) => listeners.get(event)?.forEach((cb) => cb(payload));
   const activity = (action: string, started: number, error: EngineError | null = null) =>
@@ -40,6 +41,10 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
       case "profile_save": {
         const d = args.draft as ProfileDraft;
         const existing = d.id ? profiles.find((p) => p.id === d.id) : undefined;
+        if (d.auth.kind === "connection-string" && !existing && !d.auth.connection_string?.trim())
+          throw new EngineError("invalid", "paste the namespace's connection string");
+        if (d.auth.kind === "entra" && !existing && !account)
+          throw new EngineError("not_signed_in", "sign in with Entra ID first, then add the profile");
         const p: Profile = {
           id: existing?.id ?? `p-${Math.random().toString(36).slice(2, 8)}`,
           name: d.name.trim(),
@@ -66,6 +71,7 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
         if (!p) throw new EngineError("not_found", "That profile no longer exists.");
         profiles = profiles.filter((o) => o.id !== args.id);
         if (active?.id === p.id) active = null;
+        settings.delete(`shell:${p.id}`);
         activity(`Removed profile ${p.name}`, started);
         return null;
       }
@@ -85,12 +91,28 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
         emit("sign-in-prompt", args.deviceCode
           ? { kind: "device-code", url: "https://microsoft.com/devicelogin", user_code: "QX4T-9KLM", message: "Open the page and enter the code." }
           : { kind: "browser", url: "https://login.microsoftonline.com/", user_code: null, message: "Finish signing in in your browser." });
-        await wait(400);
+        const cancelled = await new Promise<boolean>((resolve) => {
+          const timer = setTimeout(() => {
+            cancelSignIn = null;
+            resolve(false);
+          }, 400);
+          cancelSignIn = () => {
+            clearTimeout(timer);
+            cancelSignIn = null;
+            resolve(true);
+          };
+        });
+        if (cancelled) {
+          const e = new EngineError("cancelled", "Sign-in cancelled.");
+          activity("Sign-in cancelled", started, e);
+          throw e;
+        }
         account = { id: "oid-1", user_principal: "ops@contoso.example", display_name: "Ops", tenant_id: "tenant-1" };
         activity(`Signed in as ${account.user_principal}`, started);
         return account;
       }
       case "sign_in_cancel":
+        cancelSignIn?.();
         return null;
       case "connect": {
         const p = profiles.find((o) => o.id === args.profileId);

@@ -4,10 +4,10 @@ import { Copy, RefreshCw, Settings } from "lucide-react";
 import {
   Button, CommandGroup, CommandInput, CommandItem, CommandList, CommandPaletteDialog, CommandShortcut,
   CountBadge, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
-  EmptyState, EntityGlyph, Field, Hint, IconButton, Input, Kbd, MenuShortcut, Panel, PanelGroup, ProdBadge,
-  ResizeHandle, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Sheet, SkeletonRows,
+  EmptyState, EntityGlyph, Field, Hint, IconButton, Input, Kbd, LabelSwatch, MenuShortcut, Panel, PanelGroup, ProdBadge,
+  ResizeHandle, Segmented, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Sheet, SkeletonRows, Textarea,
   DataGrid, Tabs, TabsList, TabsTrigger, ThemeScope, TooltipProvider, Tree,
-  rowHeight, shortcutLabel, type Density, type EntityKind, type ThemeName, type TreeNode,
+  labelColors, rowHeight, shortcutLabel, type Density, type EntityKind, type ThemeName, type TreeNode,
 } from "@/ui";
 
 const SUB_TABS = ["Overview", "Messages", "Dead-letter", "Subscriptions", "Rules", "Properties", "Metrics", "Access", "Settings"];
@@ -182,6 +182,18 @@ function GridDemo({ density }: { density: Density }) {
   );
 }
 
+function SegmentedDemo() {
+  const [value, setValue] = useState("system");
+  return (
+    <Segmented
+      label="Theme"
+      value={value}
+      onChange={setValue}
+      options={[{ value: "system", label: "System" }, { value: "dark", label: "Dark" }, { value: "light", label: "Light" }]}
+    />
+  );
+}
+
 function Overlays() {
   const [sheetOpen, setSheetOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -280,6 +292,17 @@ function Column({ theme, density }: { theme: ThemeName; density: Density }) {
                 <SelectItem value="websockets">AMQP over WebSockets</SelectItem>
               </SelectContent>
             </Select>
+          </div>
+        </Section>
+        <Section title="Segmented, text area and labels">
+          <SegmentedDemo />
+          <div className="w-64">
+            <Field label="Pinned entities" hint="One per line">{(ids) => <Textarea {...ids} mono defaultValue={"orders\nevents/subscriptions/audit"} />}</Field>
+          </div>
+          <div className="flex items-center gap-3">
+            {Object.keys(labelColors).map((c) => (
+              <span key={c} className="flex items-center gap-1.5"><LabelSwatch color={c} />{c}</span>
+            ))}
           </div>
         </Section>
         <Section title="Badges and counts">

@@ -62,4 +62,33 @@ describe("commands over the mock transport", () => {
     setTransport(createMockTransport("empty"));
     expect(await commands.profilesList()).toEqual([]);
   });
+
+  it("cancels a pending sign-in", async () => {
+    const pending = commands.signIn(null, false);
+    const outcome = pending.then(() => null, (e: unknown) => e);
+    await commands.signInCancel();
+    expect(await outcome).toMatchObject({ kind: "cancelled", message: "Sign-in cancelled." });
+    expect(await commands.accountCurrent()).toBeNull();
+  });
+
+  it("validates new drafts like the engine does", async () => {
+    await expect(
+      commands.profileSave({ name: "A", auth: { kind: "connection-string" }, production: false, transport: "amqp", pinned_entities: [] }),
+    ).rejects.toMatchObject({ kind: "invalid", message: expect.stringContaining("paste the namespace's connection string") });
+    await expect(
+      commands.profileSave({ name: "B", auth: { kind: "entra", namespace: "sb-b" }, production: false, transport: "amqp", pinned_entities: [] }),
+    ).rejects.toMatchObject({ kind: "not_signed_in", message: expect.stringContaining("sign in with Entra ID first") });
+    await commands.signIn(null, false);
+    await expect(
+      commands.profileSave({ name: "B", auth: { kind: "entra", namespace: "sb-b" }, production: false, transport: "amqp", pinned_entities: [] }),
+    ).resolves.toMatchObject({ name: "B" });
+  });
+
+  it("removes the profile's shell state when it is deleted", async () => {
+    mock = createMockTransport("default", 0, { "shell:p-logistics": { tabs: [], activeTab: null } });
+    setTransport(mock);
+    expect(await commands.settingsGet("shell:p-logistics")).not.toBeNull();
+    await commands.profileDelete("p-logistics");
+    expect(await commands.settingsGet("shell:p-logistics")).toBeNull();
+  });
 });

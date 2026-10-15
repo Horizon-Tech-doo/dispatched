@@ -1,7 +1,7 @@
 import { Check, ChevronDown } from "lucide-react";
 import { useProfiles } from "@/engine";
 import {
-  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger, ProdBadge,
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger, LabelSwatch, ProdBadge,
 } from "@/ui";
 import { useShell } from "./context";
 
@@ -25,6 +25,7 @@ export function ConnectionSelector() {
           aria-label={`Connection: ${description}`}
           className="flex h-[26px] max-w-[420px] items-center gap-2 rounded-ctl border border-line bg-field px-2 text-12 hover:bg-hover"
         >
+          {conn.status === "connected" && current && <LabelSwatch color={current.color} />}
           <span className="truncate font-semibold">{label}</span>
           {conn.status === "connected" && current && <span className="truncate text-muted">{shortHost(current.host)}</span>}
           {conn.status === "connected" && current?.production && <ProdBadge />}
@@ -36,6 +37,7 @@ export function ConnectionSelector() {
         {profiles.map((p) => (
           <DropdownMenuItem key={p.id} onSelect={() => void conn.connect(p.id)}>
             <span aria-hidden="true" className="w-3.5">{p.id === conn.profileId && conn.status === "connected" && <Check />}</span>
+            <LabelSwatch color={p.color} />
             <span className="truncate">{p.name}</span>
             <span className="truncate text-faint">{shortHost(p.host)}</span>
             {p.production && <ProdBadge className="ml-auto" />}

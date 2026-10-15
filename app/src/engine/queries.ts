@@ -59,7 +59,8 @@ export function useSaveProfile() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (draft: ProfileDraft) => commands.profileSave(draft),
-    onSuccess: () => qc.invalidateQueries({ queryKey: keys.profiles }),
+    // Pinned entities can change what the tree lists.
+    onSuccess: () => Promise.all([qc.invalidateQueries({ queryKey: keys.profiles }), qc.invalidateQueries({ queryKey: ["entities"] })]),
   });
 }
 
@@ -67,7 +68,11 @@ export function useDeleteProfile() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => commands.profileDelete(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: keys.profiles }),
+    onSuccess: (_, id) => {
+      qc.removeQueries({ queryKey: keys.entities(id) });
+      qc.removeQueries({ queryKey: ["subscriptions", id] });
+      return qc.invalidateQueries({ queryKey: keys.profiles });
+    },
   });
 }
 

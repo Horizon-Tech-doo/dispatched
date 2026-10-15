@@ -10,6 +10,8 @@ export * from "./components/icon-button";
 export * from "./components/input";
 export * from "./components/field";
 export * from "./components/select";
+export * from "./components/segmented";
+export * from "./components/label-swatch";
 export * from "./components/badge";
 export * from "./components/kbd";
 export * from "./components/skeleton";

@@ -31,6 +31,17 @@ export const themes: Record<ThemeName, Record<Role, string>> = {
   },
 };
 
+export type LabelColor = "slate" | "blue" | "green" | "violet" | "rose";
+
+/** User-chosen connection labels: an 8px swatch only, never text or surfaces. */
+export const labelColors: Record<LabelColor, Record<ThemeName, string>> = {
+  slate: { dark: "#8a94a6", light: "#5f6b7d" },
+  blue: { dark: "#6f9fd8", light: "#2f6db5" },
+  green: { dark: "#6fb88a", light: "#2f7d4f" },
+  violet: { dark: "#a08ad8", light: "#6b4fb5" },
+  rose: { dark: "#d88a9f", light: "#b04a66" },
+};
+
 const surfaces: Role[] = ["chrome", "side", "content", "field", "hover", "selection"];
 
 /** Text roles drawn on each surface, with their minimum WCAG ratio. `faint`
