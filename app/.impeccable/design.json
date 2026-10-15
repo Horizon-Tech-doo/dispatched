@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-15T00:00:00Z",
+  "title": "Design System: Dispatched (desktop app)",
+  "extensions": {
+    "colorMeta": {
+      "dark-accent": {"role": "primary", "displayName": "Attention Amber (dark)", "canonical": "#f0a537", "tonalRamp": ["#1d1406","#372e22","#5a3d12","#8a5a14","#b9791f","#f0a537","#f6c06a","#fbe0b3"]},
+      "light-accent": {"role": "primary", "displayName": "Attention Amber (light)", "canonical": "#8f4f00", "tonalRamp": ["#2e1900","#5a3200","#8f4f00","#b8721a","#d9a15c","#efc994","#fbf0e2","#fff9f1"]},
+      "dark-content": {"role": "neutral", "displayName": "Graphite Content", "canonical": "#141518", "tonalRamp": ["#121316","#141518","#191b1e","#1d1f23","#262c36","#727780","#959aa3","#d9dce1"]},
+      "light-content": {"role": "neutral", "displayName": "Paper White", "canonical": "#ffffff", "tonalRamp": ["#1d2127","#59606b","#767d86","#dde0e5","#e2e8f1","#eef0f3","#f6f7f9","#ffffff"]}
+    },
+    "typographyMeta": {
+      "title": {"displayName": "Title", "purpose": "Sheet titles and entity name."},
+      "heading": {"displayName": "Heading", "purpose": "Problem and EmptyState titles, palette input."},
+      "body": {"displayName": "Body", "purpose": "Default for rows, buttons, tabs, inputs."},
+      "caption": {"displayName": "Caption", "purpose": "Hints, status bar, badges, menu group labels."},
+      "data": {"displayName": "Data (mono)", "purpose": "Machine text: raw errors, activity log, durations, shortcuts."}
+    },
+    "shadows": [
+      {"name": "shadow-float-dark", "value": "0 10px 28px -8px rgb(0 0 0 / 0.55), 0 2px 6px -2px rgb(0 0 0 / 0.35)", "purpose": "Floating layers only: sheets, menus, palette, tooltips."},
+      {"name": "shadow-float-light", "value": "0 10px 28px -8px rgb(29 33 39 / 0.18), 0 2px 6px -2px rgb(29 33 39 / 0.12)", "purpose": "Same, light theme."}
+    ],
+    "motion": [
+      {"name": "ease-out-expo", "value": "cubic-bezier(0.16, 1, 0.3, 1)", "purpose": "Sheet slide (24px + opacity, 150ms). Nothing else animates."},
+      {"name": "reduced-motion", "value": "0.01ms", "purpose": "prefers-reduced-motion collapses animation and transition durations."}
+    ],
+    "breakpoints": []
+  },
+  "components": [
+    {"name": "Default Button", "kind": "button", "refersTo": "button-default", "description": "Standard bordered action and all recovery actions.", "html": "<button class=\"ds-btn\">Try again</button>", "css": ".ds-btn{height:24px;padding:0 8px;border:1px solid #2a2d32;border-radius:3px;background:#121316;color:#d9dce1;font:400 12px/16px -apple-system,system-ui,sans-serif}.ds-btn:hover{background:#1c1e22}.ds-btn:active{background:#262c36}.ds-btn:focus-visible{outline:1px solid #d9dce1;outline-offset:-1px}"},
+    {"name": "Primary Button", "kind": "button", "refersTo": "button-primary", "description": "fg-bordered, one per sheet footer; never amber.", "html": "<button class=\"ds-btn-primary\">Save</button>", "css": ".ds-btn-primary{height:24px;padding:0 8px;border:1px solid #d9dce1;border-radius:3px;background:#121316;color:#d9dce1;font:600 12px/16px -apple-system,system-ui,sans-serif}.ds-btn-primary:hover{background:#1c1e22}.ds-btn-primary:focus-visible{outline:1px solid #d9dce1;outline-offset:1px}"},
+    {"name": "Input", "kind": "input", "refersTo": "input", "description": "24px field, 1px line, fg focus outline.", "html": "<input class=\"ds-input\" placeholder=\"Filter\">", "css": ".ds-input{height:24px;width:220px;padding:0 8px;border:1px solid #2a2d32;border-radius:3px;background:#121316;color:#d9dce1;font:400 12px -apple-system,system-ui,sans-serif}.ds-input::placeholder{color:#959aa3}.ds-input:focus-visible{outline:1px solid #d9dce1;outline-offset:-1px}"},
+    {"name": "PROD Badge", "kind": "chip", "refersTo": "badge-prod", "description": "The only filled amber element.", "html": "<span class=\"ds-prod\">PROD</span>", "css": ".ds-prod{display:inline-flex;align-items:center;height:16px;padding:0 4px;border-radius:2px;background:#f0a537;color:#1d1406;font:600 11px/16px -apple-system,system-ui,sans-serif;letter-spacing:.04em}"},
+    {"name": "Count", "kind": "custom", "refersTo": "CountBadge", "description": "Plain tabular count; amber when dead-letter above zero.", "html": "<span class=\"ds-count\">1,284</span> <span class=\"ds-count ds-hot\">37</span>", "css": ".ds-count{font:400 12px -apple-system,system-ui,sans-serif;font-variant-numeric:tabular-nums;color:#959aa3}.ds-hot{color:#f0a537}"},
+    {"name": "Problem", "kind": "custom", "refersTo": "Problem", "description": "The one error form: amber icon + title, sentence, mono detail, action.", "html": "<div class=\"ds-problem\"><h3>Connection lost</h3><p>Check your network, then reconnect.</p><code>amqp:link:detach-forced</code></div>", "css": ".ds-problem{display:flex;flex-direction:column;gap:6px;max-width:440px;color:#d9dce1}.ds-problem h3{margin:0;font:600 13px/18px -apple-system,system-ui,sans-serif;color:#d9dce1;border-left:0}.ds-problem p{margin:0;font:400 12px/16px -apple-system,system-ui,sans-serif;color:#959aa3}.ds-problem code{font:400 11px/16px 'JetBrains Mono',monospace;color:#959aa3}"}
+  ],
+  "narrative": {
+    "northStar": "The Workbench",
+    "overview": "The data is the interface. Graphite or paper-white in three close surface tiers, 1px lines, square panels, 3px controls, 12px OS UI text with JetBrains Mono for data. One amber accent, only on dead-letter counts above zero, PROD, and errors.",
+    "keyCharacteristics": ["22px rows, 12px body", "Neutral selection, focus and buttons", "Amber always with icon or text", "Window never scrolls", "Dark and light follow the OS; offline fonts"],
+    "rules": [
+      {"name": "The Earned Amber Rule", "body": "Amber appears only on dead-letter count above zero, PROD, error icon+title, invalid-field border, connection-trouble alert mark. Never on a button.", "section": "colors"},
+      {"name": "The Two-Channel Rule", "body": "Amber always travels with a second carrier: the PROD word, a CircleAlert icon with text, or a number.", "section": "colors"},
+      {"name": "The Neutral Interaction Rule", "body": "Hover, active, selected, focused and primary resolve to neutral roles.", "section": "colors"},
+      {"name": "The Mono-Is-Data Rule", "body": "Mono marks machine output; names and prose stay in the UI face.", "section": "typography"},
+      {"name": "The Two-Weights Rule", "body": "400 or 600 only.", "section": "typography"},
+      {"name": "The Float-Only Rule", "body": "shadow-float on floating layers only.", "section": "elevation"}
+    ],
+    "dos": ["Do use amber only per the Earned Amber Rule, always with icon or text.", "Do keep selection, hover, focus and primary neutral.", "Do use Problem for every error.", "Do confirm destructive actions in context, never in a modal."],
+    "donts": ["Don't put amber on a button, tab, selection or link.", "Don't add cards, gradients, glows, pills or illustrations.", "Don't add radii above 3px or shadows on anything at rest.", "Don't use modal dialogs for confirmation or forms."]
+  }
+}
