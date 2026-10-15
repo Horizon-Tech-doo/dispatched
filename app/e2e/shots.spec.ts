@@ -16,6 +16,15 @@ export const shots: { name: string; path: string; scroll?: boolean; prepare?: (p
     },
   },
   {
+    name: "catalogue-grid",
+    path: "/#catalogue",
+    prepare: async (page) => {
+      await page.getByRole("heading", { name: "Grid" }).first().evaluate((el) => el.scrollIntoView({ block: "start" }));
+      await page.keyboard.press("Shift"); // keyboard modality so :focus-visible matches
+      await page.getByRole("grid", { name: "Dead-lettered messages" }).first().focus();
+    },
+  },
+  {
     name: "catalogue-overlays",
     path: "/#catalogue",
     prepare: async (page) => {

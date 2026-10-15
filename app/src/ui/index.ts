@@ -23,3 +23,4 @@ export * from "./components/sheet";
 export * from "./components/command";
 export * from "./components/resizable";
 export * from "./tree/Tree";
+export * from "./grid/DataGrid";

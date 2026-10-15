@@ -1,11 +1,12 @@
 import { useMemo, useState, type ReactNode } from "react";
+import type { ColumnDef } from "@tanstack/react-table";
 import { Copy, RefreshCw, Settings } from "lucide-react";
 import {
   Button, CommandGroup, CommandInput, CommandItem, CommandList, CommandPaletteDialog, CommandShortcut,
   CountBadge, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
   EmptyState, EntityGlyph, Field, Hint, IconButton, Input, Kbd, MenuShortcut, Panel, PanelGroup, ProdBadge,
   ResizeHandle, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Sheet, SkeletonRows,
-  Tabs, TabsList, TabsTrigger, ThemeScope, TooltipProvider, Tree,
+  DataGrid, Tabs, TabsList, TabsTrigger, ThemeScope, TooltipProvider, Tree,
   rowHeight, shortcutLabel, type Density, type EntityKind, type ThemeName, type TreeNode,
 } from "@/ui";
 
@@ -110,6 +111,73 @@ function TreeDemo({ density }: { density: Density }) {
           </>
         )}
       />
+    </div>
+  );
+}
+
+interface DeadLetter { seq: string; enqueued: string; subject: string; id: string; reason: string; deliveries: string; size: string }
+
+const DEAD_LETTERS: DeadLetter[] = ([
+  ["48213", "15 Oct 09:41:07", "ShipmentDelivered", "7f3c9e21-4a0b", "MaxDeliveryCountExceeded", "10", "1.8 KB"],
+  ["48207", "15 Oct 09:40:52", "ShipmentInTransit", "c1d84f0e-99a2", "MaxDeliveryCountExceeded", "10", "2.1 KB"],
+  ["48199", "15 Oct 09:40:31", "EtaChanged", "0b6e2a77-1fc4", "Schema validation failed", "1", "0.9 KB"],
+  ["48188", "15 Oct 09:39:58", "ShipmentDelivered", "5e02bd13-7c61", "MaxDeliveryCountExceeded", "10", "1.7 KB"],
+  ["48176", "15 Oct 09:39:14", "ShipmentException", "a93f0c58-2e7d", "Carrier API returned 503", "4", "3.4 KB"],
+  ["48164", "15 Oct 09:38:40", "EtaChanged", "2d7b91c4-ab08", "Schema validation failed", "1", "0.9 KB"],
+  ["48151", "15 Oct 09:37:22", "ShipmentInTransit", "e8c13a6f-5d90", "MaxDeliveryCountExceeded", "10", "2.0 KB"],
+  ["48140", "15 Oct 09:36:05", "ShipmentDelivered", "61af4e2b-0c37", "TTLExpiredException", "0", "1.8 KB"],
+  ["48133", "15 Oct 09:35:47", "ShipmentCreated", "9c5d27e0-8b14", "MaxDeliveryCountExceeded", "10", "4.6 KB"],
+  ["48121", "15 Oct 09:34:19", "EtaChanged", "4f80a3d9-62ce", "Schema validation failed", "1", "1.0 KB"],
+  ["48117", "15 Oct 09:33:58", "ShipmentException", "b7e6150c-d3a1", "Carrier API returned 503", "4", "3.1 KB"],
+  ["48102", "15 Oct 09:32:40", "ShipmentDelivered", "3a2c8f71-e946", "MaxDeliveryCountExceeded", "10", "1.8 KB"],
+  ["48096", "15 Oct 09:31:27", "ShipmentInTransit", "d05b6e9a-17f3", "TTLExpiredException", "0", "2.2 KB"],
+  ["48085", "15 Oct 09:30:02", "ShipmentCreated", "86e4d1b2-a05c", "MaxDeliveryCountExceeded", "10", "4.4 KB"],
+] as const).map(([seq, enqueued, subject, id, reason, deliveries, size]) => ({ seq, enqueued, subject, id, reason, deliveries, size }));
+
+const dim = (v: string) => <span className="text-muted">{v}</span>;
+
+const DEAD_LETTER_COLUMNS: ColumnDef<DeadLetter, string>[] = [
+  { accessorKey: "seq", header: "Seq", meta: { mono: true, width: "64px" } },
+  { accessorKey: "enqueued", header: "Enqueued", cell: (c) => dim(c.getValue()), meta: { mono: true, width: "118px" } },
+  { accessorKey: "subject", header: "Subject", meta: { width: "140px" } },
+  { accessorKey: "id", header: "Message ID", cell: (c) => dim(c.getValue()), meta: { mono: true, width: "120px" } },
+  { accessorKey: "reason", header: "Dead-letter reason", meta: { width: "minmax(190px, 1fr)" } },
+  { accessorKey: "deliveries", header: "Del.", meta: { mono: true, align: "end", width: "44px" } },
+  { accessorKey: "size", header: "Size", cell: (c) => dim(c.getValue()), meta: { mono: true, align: "end", width: "60px" } },
+];
+
+function GridDemo({ density }: { density: Density }) {
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set(["48199"]));
+  const [focusId, setFocusId] = useState<string | null>("48199");
+  const common = { columns: DEAD_LETTER_COLUMNS, getRowId: (r: DeadLetter) => r.seq, rowHeight: rowHeight[density] };
+  return (
+    <div className="flex w-full flex-col gap-3">
+      <div className="h-[360px] w-full border border-line">
+        <DataGrid
+          {...common}
+          label="Dead-lettered messages"
+          rows={DEAD_LETTERS}
+          selectedIds={selected}
+          focusId={focusId}
+          onSelectionChange={(ids, f) => { setSelected(ids); setFocusId(f); }}
+        />
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div className="h-[130px] min-w-0 border border-line">
+          <DataGrid {...common} label="Loading messages" rows={[]} loading selectedIds={new Set()} focusId={null} onSelectionChange={() => {}} />
+        </div>
+        <div className="h-[130px] min-w-0 border border-line">
+          <DataGrid
+            {...common}
+            label="No dead-lettered messages"
+            rows={[]}
+            empty={<EmptyState title="No dead letters" body="Messages that fail delivery land here." />}
+            selectedIds={new Set()}
+            focusId={null}
+            onSelectionChange={() => {}}
+          />
+        </div>
+      </div>
     </div>
   );
 }
@@ -231,6 +299,9 @@ function Column({ theme, density }: { theme: ThemeName; density: Density }) {
         </Section>
         <Section title="Tree">
           <TreeDemo density={density} />
+        </Section>
+        <Section title="Grid">
+          <GridDemo density={density} />
         </Section>
         <Section title="Loading and empty">
           <div className="w-72 border border-line"><SkeletonRows rows={4} columns={2} /></div>
