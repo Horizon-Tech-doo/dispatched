@@ -1,8 +1,8 @@
 //! SQLite storage for profiles, sign-ins and settings. Secrets never go here.
 
-use super::{Profile, ProfileAuth, secret_key};
+use super::{DraftAuth, Profile, ProfileAuth, ProfileDraft, namespace_host, secret_key};
 use crate::connstr::ConnectionString;
-use crate::namespace::{ProxyConfig, Transport};
+use crate::namespace::{EntityPath, ProxyConfig, Transport};
 use crate::{Error, Result};
 use horizon_azure_kit::auth::SignIn;
 use horizon_azure_kit::secrets::CredentialStore;
@@ -224,6 +224,125 @@ impl ProfileStore {
         Ok(profile)
     }
 
+    /// Create or edit a profile from a UI draft (see [`ProfileDraft`]).
+    pub fn save_draft(
+        &self,
+        draft: &ProfileDraft,
+        secrets: &dyn CredentialStore,
+        current_sign_in: Option<&SignIn>,
+    ) -> Result<Profile> {
+        let pins = clean_pins(&draft.pinned_entities)?;
+        match &draft.id {
+            None => self.create_from_draft(draft, pins, secrets, current_sign_in),
+            Some(id) => self.edit_from_draft(id, draft, pins, secrets),
+        }
+    }
+
+    fn create_from_draft(
+        &self,
+        draft: &ProfileDraft,
+        pins: Vec<String>,
+        secrets: &dyn CredentialStore,
+        current_sign_in: Option<&SignIn>,
+    ) -> Result<Profile> {
+        match &draft.auth {
+            DraftAuth::ConnectionString { connection_string } => {
+                let text = non_blank(connection_string.as_deref()).ok_or_else(|| {
+                    Error::Invalid("paste the namespace's connection string".into())
+                })?;
+                let cs = ConnectionString::parse(text)?;
+                let mut p = Profile::connection_string(&draft.name, &cs);
+                let from_cs = std::mem::take(&mut p.pinned_entities);
+                apply_draft_options(&mut p, draft, merge_pins(from_cs, pins));
+                check_emulator_options(&p)?;
+                self.insert(&p)?;
+                if let Err(e) =
+                    secrets.put(&secret_key(&p.id), &SecretString::from(text.to_string()))
+                {
+                    self.delete_row(&p.id);
+                    return Err(e.into());
+                }
+                Ok(p)
+            }
+            DraftAuth::Entra { namespace, tenant } => {
+                let sign_in = current_sign_in.ok_or_else(|| {
+                    Error::NotSignedIn("sign in with Entra ID first, then add the profile".into())
+                })?;
+                let host = namespace_host(namespace)?;
+                let mut p = Profile::entra(
+                    &draft.name,
+                    &host,
+                    &sign_in.id,
+                    non_blank(tenant.as_deref()),
+                );
+                apply_draft_options(&mut p, draft, pins);
+                self.save_sign_in(sign_in)?;
+                self.insert(&p)?;
+                Ok(p)
+            }
+        }
+    }
+
+    fn edit_from_draft(
+        &self,
+        id: &str,
+        draft: &ProfileDraft,
+        pins: Vec<String>,
+        secrets: &dyn CredentialStore,
+    ) -> Result<Profile> {
+        let mut p = self
+            .get_by_id(id)?
+            .ok_or_else(|| Error::NotFound(format!("profile {id}")))?;
+        match (&draft.auth, &p.auth) {
+            (DraftAuth::ConnectionString { connection_string }, ProfileAuth::ConnectionString) => {
+                if let Some(text) = non_blank(connection_string.as_deref()) {
+                    let cs = ConnectionString::parse(text)?;
+                    p.host = cs.host.clone();
+                    p.emulator = cs.use_development_emulator;
+                    apply_draft_options(
+                        &mut p,
+                        draft,
+                        merge_pins(cs.entity_path.into_iter().collect(), pins),
+                    );
+                    check_emulator_options(&p)?;
+                    let key = secret_key(&p.id);
+                    let previous = secrets.get(&key)?;
+                    secrets.put(&key, &SecretString::from(text.to_string()))?;
+                    if let Err(e) = self.update(&p) {
+                        let _ = match previous {
+                            Some(old) => secrets.put(&key, &old),
+                            None => secrets.delete(&key),
+                        };
+                        return Err(e);
+                    }
+                    return Ok(p);
+                }
+            }
+            (DraftAuth::Entra { namespace, tenant }, ProfileAuth::Entra { sign_in_id, .. }) => {
+                p.host = namespace_host(namespace)?;
+                p.auth = ProfileAuth::Entra {
+                    sign_in_id: sign_in_id.clone(),
+                    tenant: non_blank(tenant.as_deref()).map(str::to_string),
+                };
+            }
+            _ => {
+                return Err(Error::Invalid(
+                    "a profile's sign-in method can't be changed; add a new profile instead".into(),
+                ));
+            }
+        }
+        apply_draft_options(&mut p, draft, pins);
+        check_emulator_options(&p)?;
+        self.update(&p)?;
+        Ok(p)
+    }
+
+    /// Remove a profile row only (rollback helper; the secret is handled by the caller).
+    fn delete_row(&self, id: &str) {
+        let conn = self.conn.lock().expect("profile db poisoned");
+        let _ = conn.execute("DELETE FROM profiles WHERE id = ?1", params![id]);
+    }
+
     /// Delete a profile and its secret. Returns whether it existed.
     pub fn delete(&self, name: &str, secrets: &dyn CredentialStore) -> Result<bool> {
         let name = name.trim();
@@ -433,6 +552,46 @@ impl std::fmt::Display for CorruptProfile {
 }
 
 impl std::error::Error for CorruptProfile {}
+
+fn non_blank(s: Option<&str>) -> Option<&str> {
+    s.map(str::trim).filter(|s| !s.is_empty())
+}
+
+fn clean_pins(raw: &[String]) -> Result<Vec<String>> {
+    raw.iter()
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .map(|p| EntityPath::parse(p).map(|_| p.to_string()))
+        .collect()
+}
+
+fn merge_pins(first: Vec<String>, rest: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for p in first.into_iter().chain(rest) {
+        if !out.iter().any(|o| o.eq_ignore_ascii_case(&p)) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+fn apply_draft_options(p: &mut Profile, d: &ProfileDraft, pins: Vec<String>) {
+    p.name = d.name.trim().to_string();
+    p.production = d.production;
+    p.color = non_blank(d.color.as_deref()).map(str::to_string);
+    p.transport = d.transport;
+    p.proxy = non_blank(d.proxy.as_deref()).map(str::to_string);
+    p.pinned_entities = pins;
+}
+
+fn check_emulator_options(p: &Profile) -> Result<()> {
+    if p.emulator && (p.transport == Transport::WebSockets || p.proxy.is_some()) {
+        return Err(Error::Unsupported {
+            capability: "WebSockets and proxies on the Service Bus Emulator".into(),
+        });
+    }
+    Ok(())
+}
 
 fn row_to_profile(r: &rusqlite::Row<'_>) -> rusqlite::Result<Profile> {
     let id: String = r.get(0)?;
@@ -958,5 +1117,236 @@ mod tests {
             Some("3")
         );
         assert_eq!(store.app_setting("ui").unwrap().as_deref(), Some("4"));
+    }
+
+    use crate::profiles::{DraftAuth, ProfileDraft};
+    use horizon_azure_kit::AzureCloud;
+    use horizon_azure_kit::secrets::CredentialStore;
+
+    const DCS: &str = "Endpoint=sb://myns.servicebus.windows.net/;SharedAccessKeyName=reader;SharedAccessKey=c2VjcmV0LWtleQ==";
+    const DCS2: &str = "Endpoint=sb://other.servicebus.windows.net/;SharedAccessKeyName=reader;SharedAccessKey=bmV3LWtleQ==";
+    const EMU: &str = "Endpoint=sb://localhost;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;";
+
+    fn cs_draft(name: &str, cs: Option<&str>) -> ProfileDraft {
+        ProfileDraft {
+            id: None,
+            name: name.into(),
+            auth: DraftAuth::ConnectionString {
+                connection_string: cs.map(str::to_string),
+            },
+            production: false,
+            color: None,
+            transport: Transport::Amqp,
+            proxy: None,
+            pinned_entities: vec![],
+        }
+    }
+
+    fn draft_sign_in() -> SignIn {
+        SignIn {
+            id: "oid-1".into(),
+            user_principal: "ops@contoso.example".into(),
+            tenant_id: "tenant-1".into(),
+            display_name: None,
+            cloud: AzureCloud::Public,
+        }
+    }
+
+    fn stored(secrets: &MemoryStore, p: &Profile) -> Option<String> {
+        secrets
+            .get(&secret_key(&p.id))
+            .unwrap()
+            .map(|s| s.expose_secret().to_string())
+    }
+
+    #[test]
+    fn draft_secret_never_reaches_the_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dispatched.db");
+        let store = ProfileStore::open(&path).unwrap();
+        let secrets = MemoryStore::new();
+        let mut d = cs_draft("Logistics", Some(DCS));
+        d.production = true;
+        d.color = Some("  amber ".into());
+        let p = store.save_draft(&d, &secrets, None).unwrap();
+        assert_eq!(p.host, "myns.servicebus.windows.net");
+        assert!(p.production);
+        assert_eq!(p.color.as_deref(), Some("amber"));
+        assert_eq!(stored(&secrets, &p).as_deref(), Some(DCS));
+        drop(store);
+        let bytes = std::fs::read(&path).unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(!text.contains("c2VjcmV0LWtleQ"), "secret written to the DB");
+    }
+
+    #[test]
+    fn create_needs_a_connection_string() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        let e = store
+            .save_draft(&cs_draft("x", Some("  ")), &MemoryStore::new(), None)
+            .unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("paste the namespace's connection string"),
+            "{e}"
+        );
+        assert!(store.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn bad_connection_string_error_does_not_echo_it() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        let bad = "Endpoint=sb://x/;SharedAccessKey=TOPSECRET;SharedAccessKeyName";
+        let e = store
+            .save_draft(&cs_draft("x", Some(bad)), &MemoryStore::new(), None)
+            .unwrap_err();
+        assert!(!e.to_string().contains("TOPSECRET"), "{e}");
+    }
+
+    #[test]
+    fn edit_without_secret_keeps_it_and_with_secret_replaces_it() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        let secrets = MemoryStore::new();
+        let p = store
+            .save_draft(&cs_draft("Logistics", Some(DCS)), &secrets, None)
+            .unwrap();
+
+        let mut edit = cs_draft("Logistics prod", None);
+        edit.id = Some(p.id.clone());
+        let p2 = store.save_draft(&edit, &secrets, None).unwrap();
+        assert_eq!(p2.name, "Logistics prod");
+        assert_eq!(stored(&secrets, &p2).as_deref(), Some(DCS));
+
+        let mut edit = cs_draft("Logistics prod", Some(DCS2));
+        edit.id = Some(p.id.clone());
+        let p3 = store.save_draft(&edit, &secrets, None).unwrap();
+        assert_eq!(p3.host, "other.servicebus.windows.net");
+        assert_eq!(stored(&secrets, &p3).as_deref(), Some(DCS2));
+    }
+
+    #[test]
+    fn rename_conflict_restores_the_previous_secret() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        let secrets = MemoryStore::new();
+        store
+            .save_draft(&cs_draft("A", Some(DCS)), &secrets, None)
+            .unwrap();
+        let b = store
+            .save_draft(&cs_draft("B", Some(DCS)), &secrets, None)
+            .unwrap();
+        let mut edit = cs_draft("a", Some(DCS2));
+        edit.id = Some(b.id.clone());
+        let e = store.save_draft(&edit, &secrets, None).unwrap_err();
+        assert!(e.to_string().contains("already exists"), "{e}");
+        assert_eq!(stored(&secrets, &b).as_deref(), Some(DCS));
+        assert_eq!(
+            store.get_by_id(&b.id).unwrap().unwrap().host,
+            "myns.servicebus.windows.net"
+        );
+    }
+
+    #[test]
+    fn edit_cannot_switch_auth_kind_or_target_a_missing_profile() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        let secrets = MemoryStore::new();
+        let p = store
+            .save_draft(&cs_draft("A", Some(DCS)), &secrets, None)
+            .unwrap();
+        let mut edit = cs_draft("A", None);
+        edit.id = Some(p.id.clone());
+        edit.auth = DraftAuth::Entra {
+            namespace: "myns".into(),
+            tenant: None,
+        };
+        let e = store
+            .save_draft(&edit, &secrets, Some(&draft_sign_in()))
+            .unwrap_err();
+        assert!(e.to_string().contains("can't be changed"), "{e}");
+        edit.id = Some("missing".into());
+        assert!(matches!(
+            store
+                .save_draft(&edit, &secrets, Some(&draft_sign_in()))
+                .unwrap_err(),
+            Error::NotFound(_)
+        ));
+    }
+
+    #[test]
+    fn entra_draft_needs_a_sign_in_and_expands_the_host() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        let secrets = MemoryStore::new();
+        let mut d = cs_draft("Ops", None);
+        d.auth = DraftAuth::Entra {
+            namespace: "MyNs".into(),
+            tenant: Some(" t-2 ".into()),
+        };
+        assert!(matches!(
+            store.save_draft(&d, &secrets, None).unwrap_err(),
+            Error::NotSignedIn(_)
+        ));
+        let p = store
+            .save_draft(&d, &secrets, Some(&draft_sign_in()))
+            .unwrap();
+        assert_eq!(p.host, "myns.servicebus.windows.net");
+        assert_eq!(
+            p.auth,
+            ProfileAuth::Entra {
+                sign_in_id: "oid-1".into(),
+                tenant: Some("t-2".into())
+            }
+        );
+        assert!(store.sign_in("oid-1").unwrap().is_some());
+    }
+
+    #[test]
+    fn emulator_draft_rejects_websockets_and_writes_nothing() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        let secrets = MemoryStore::new();
+        let mut d = cs_draft("Local", Some(EMU));
+        d.transport = Transport::WebSockets;
+        assert!(matches!(
+            store.save_draft(&d, &secrets, None).unwrap_err(),
+            Error::Unsupported { .. }
+        ));
+        assert!(store.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn pins_are_validated_and_merged_with_the_entity_path() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        let secrets = MemoryStore::new();
+        let mut d = cs_draft("Scoped", Some(&format!("{DCS};EntityPath=orders")));
+        d.pinned_entities = vec![
+            "ORDERS".into(),
+            " ".into(),
+            "events/subscriptions/audit".into(),
+        ];
+        let p = store.save_draft(&d, &secrets, None).unwrap();
+        assert_eq!(
+            p.pinned_entities,
+            vec!["orders", "events/subscriptions/audit"]
+        );
+        let mut bad = cs_draft("Bad", Some(DCS));
+        bad.pinned_entities = vec!["a/b/c/d/e".into()];
+        assert!(matches!(
+            store.save_draft(&bad, &secrets, None).unwrap_err(),
+            Error::Invalid(_)
+        ));
+    }
+
+    #[test]
+    fn draft_debug_redacts_the_connection_string() {
+        let d = cs_draft("x", Some(DCS));
+        assert!(!format!("{d:?}").contains("c2VjcmV0"));
+    }
+
+    #[test]
+    fn draft_deserializes_from_ui_json() {
+        let d: ProfileDraft = serde_json::from_str(
+            r#"{"name":"Ops","auth":{"kind":"entra","namespace":"myns"},"transport":"websockets"}"#,
+        )
+        .unwrap();
+        assert_eq!(d.transport, Transport::WebSockets);
+        assert!(d.id.is_none() && !d.production && d.pinned_entities.is_empty());
     }
 }

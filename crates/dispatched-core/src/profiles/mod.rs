@@ -98,6 +98,72 @@ impl Profile {
     }
 }
 
+/// What a UI submits to create (`id: None`) or edit a profile.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProfileDraft {
+    /// Existing profile id when editing.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Display name.
+    pub name: String,
+    /// How it authenticates.
+    pub auth: DraftAuth,
+    /// Production profile.
+    #[serde(default)]
+    pub production: bool,
+    /// Optional colour label.
+    #[serde(default)]
+    pub color: Option<String>,
+    /// AMQP transport.
+    #[serde(default)]
+    pub transport: Transport,
+    /// `http://host:port` proxy.
+    #[serde(default)]
+    pub proxy: Option<String>,
+    /// Entities to show when the identity cannot list the namespace.
+    #[serde(default)]
+    pub pinned_entities: Vec<String>,
+}
+
+/// The authentication part of a [`ProfileDraft`].
+#[derive(Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum DraftAuth {
+    /// A connection string; `None` on an edit keeps the stored one.
+    ConnectionString {
+        /// The connection string (a secret).
+        #[serde(default)]
+        connection_string: Option<String>,
+    },
+    /// The current Entra sign-in, for a namespace name or host.
+    Entra {
+        /// `myns` or `myns.servicebus.windows.net`.
+        namespace: String,
+        /// Tenant to request tokens in (home tenant if `None`).
+        #[serde(default)]
+        tenant: Option<String>,
+    },
+}
+
+impl std::fmt::Debug for DraftAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DraftAuth::ConnectionString { connection_string } => f
+                .debug_struct("ConnectionString")
+                .field(
+                    "connection_string",
+                    &connection_string.as_ref().map(|_| "<redacted>"),
+                )
+                .finish(),
+            DraftAuth::Entra { namespace, tenant } => f
+                .debug_struct("Entra")
+                .field("namespace", namespace)
+                .field("tenant", tenant)
+                .finish(),
+        }
+    }
+}
+
 /// Keychain key of a profile's connection string.
 pub fn secret_key(profile_id: &str) -> String {
     format!("dispatched:profile:{profile_id}:connection-string")
