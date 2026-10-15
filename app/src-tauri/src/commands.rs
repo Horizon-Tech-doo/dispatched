@@ -75,7 +75,40 @@ pub async fn profile_test(
     ops::profiles::test(&state, &TauriEvents(app), &id).await
 }
 
-use crate::ops::account::{AccountView, SignInView};
+#[tauri::command]
+pub async fn profile_test_draft(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    draft: ProfileDraft,
+) -> Result<ConnectionReport, CommandError> {
+    ops::profiles::test_draft(&state, &TauriEvents(app), draft).await
+}
+
+/// Writes the entity's connection string to the clipboard from Rust; it is never returned.
+#[tauri::command]
+pub async fn copy_entity_connection_string(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile_id: String,
+    entity: String,
+) -> Result<(), CommandError> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    let clip = app.clone();
+    ops::profiles::copy_entity_connection_string(
+        &state,
+        &TauriEvents(app),
+        &profile_id,
+        &entity,
+        move |text| {
+            clip.clipboard()
+                .write_text(text)
+                .map_err(|e| CommandError::new("io", format!("Couldn't write the clipboard: {e}")))
+        },
+    )
+    .await
+}
+
+use crate::ops::account::{AccountView, SignInView, StoredSignIn};
 use crate::ops::browse::{PeekPageView, PeekRequest};
 use crate::ops::connection::ConnectionView;
 use crate::ops::dashboard::DashboardView;
@@ -107,6 +140,25 @@ pub async fn sign_in(
 #[tauri::command]
 pub fn sign_in_cancel(state: State<'_, AppState>) {
     ops::account::cancel(&state);
+}
+
+#[tauri::command]
+pub async fn sign_ins_list(state: State<'_, AppState>) -> Result<Vec<StoredSignIn>, CommandError> {
+    ops::account::sign_ins(&state)
+}
+
+#[tauri::command]
+pub async fn sign_out(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), CommandError> {
+    ops::account::sign_out(&state, &TauriEvents(app), &id).await
+}
+
+#[tauri::command]
+pub fn open_sign_in_page(state: State<'_, AppState>) -> Result<(), CommandError> {
+    ops::account::open_sign_in_page(&state)
 }
 
 #[tauri::command]

@@ -93,6 +93,33 @@ impl ConnectionString {
     }
 }
 
+/// `cs` scoped to `entity` (`EntityPath=` replaced or added). Refuses a string that is
+/// already scoped to another entity, since its key works only there. The result is a secret.
+pub fn entity_connection_string(cs: &str, entity: &crate::EntityPath) -> Result<SecretString> {
+    let parsed = ConnectionString::parse(cs)?;
+    let base = entity.base();
+    if let Some(scoped) = &parsed.entity_path {
+        let same = crate::EntityPath::parse(scoped)
+            .map(|p| p.base().eq_ignore_ascii_case(&base))
+            .unwrap_or(false);
+        if !same {
+            return Err(Error::Invalid(format!(
+                "this connection string only works for `{scoped}`"
+            )));
+        }
+    }
+    let parts: Vec<&str> = cs
+        .trim()
+        .split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.to_ascii_lowercase().starts_with("entitypath="))
+        .collect();
+    Ok(SecretString::from(format!(
+        "{};EntityPath={base}",
+        parts.join(";")
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,6 +229,38 @@ mod tests {
             ConnectionString::parse("Endpoint=ftp://x;SharedAccessKeyName=k;SharedAccessKey=v")
                 .unwrap_err();
         assert!(err.to_string().contains("sb://"), "{err}");
+    }
+
+    #[test]
+    fn entity_connection_string_appends_or_keeps_the_entity() {
+        let cs =
+            "Endpoint=sb://ns.servicebus.windows.net/;SharedAccessKeyName=r;SharedAccessKey=k=";
+        let q = crate::EntityPath::queue("orders");
+        assert_eq!(
+            entity_connection_string(cs, &q).unwrap().expose_secret(),
+            format!("{cs};EntityPath=orders").replace(";;", ";")
+        );
+        let scoped = format!("{cs};EntityPath=orders");
+        assert!(
+            entity_connection_string(&scoped, &q)
+                .unwrap()
+                .expose_secret()
+                .ends_with(";EntityPath=orders")
+        );
+        let sub = crate::EntityPath::subscription("events", "audit");
+        let e = entity_connection_string(&scoped, &sub)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("only works for `orders`") && !e.contains("k="),
+            "{e}"
+        );
+        assert!(
+            entity_connection_string(cs, &sub)
+                .unwrap()
+                .expose_secret()
+                .ends_with(";EntityPath=events/Subscriptions/audit")
+        );
     }
 
     #[test]

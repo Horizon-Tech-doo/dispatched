@@ -21,6 +21,7 @@ async-trait = { workspace = true }
 dispatched-core = { workspace = true }
 horizon-azure-kit = { workspace = true }
 open = { workspace = true }
+secrecy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 time = { workspace = true }
@@ -32,13 +33,15 @@ tauri = { version = "~2.11", features = [] }
 # Rust side only (no npm package): the save dialog for exports is opened by Rust.
 # 2.8+ needs Rust 1.90.
 tauri-plugin-dialog = "~2.7"
+# Rust side only (no npm package, no capability): an entity connection string is written to the
+# clipboard by Rust and never crosses IPC. 2.3.3 builds on Rust 1.88.
+tauri-plugin-clipboard-manager = "~2.3"
 tauri-plugin-process = "~2.3"
 tauri-plugin-updater = "~2.12"
 tokio = { version = "1", features = ["sync", "macros", "time", "rt"] }
 uuid = { workspace = true }
 
 [dev-dependencies]
-secrecy = { workspace = true }
 tempfile = { workspace = true }
 time = { workspace = true, features = ["macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }

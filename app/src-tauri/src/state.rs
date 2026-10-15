@@ -40,8 +40,6 @@ pub struct AppState {
     /// Running and finished jobs (exports).
     pub jobs: Arc<crate::jobs::Jobs>,
     /// The URL of the sign-in prompt shown last, while a sign-in waits for it.
-    // Set and read by the sign-in commands once "Open sign-in page" lands (M1c Task 10).
-    #[allow(dead_code)]
     pub last_prompt_url: std::sync::Mutex<Option<String>>,
 }
 

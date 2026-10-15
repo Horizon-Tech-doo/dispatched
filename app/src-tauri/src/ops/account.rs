@@ -123,6 +123,8 @@ pub async fn sign_in(
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty());
     let tenant = requested.clone().unwrap_or_else(|| "organizations".into());
+    // The prompt's URL is kept for "Open sign-in page" only while this sign-in waits.
+    let _clear = ClearPromptUrl(state);
     tracked(
         ev,
         "Sign-in failed",
@@ -132,6 +134,7 @@ pub async fn sign_in(
                 let r = if device_code {
                     session
                         .login_device_code(&tenant, |dc| {
+                            remember_prompt_url(state, &dc.verification_uri);
                             ev.sign_in_prompt(SignInPrompt {
                                 kind: "device-code",
                                 url: dc.verification_uri.clone(),
@@ -143,6 +146,7 @@ pub async fn sign_in(
                 } else {
                     session
                         .login_browser(&tenant, |url| {
+                            remember_prompt_url(state, url);
                             ev.sign_in_prompt(SignInPrompt {
                                 kind: "browser",
                                 url: url.to_string(),
@@ -166,6 +170,108 @@ pub async fn sign_in(
 
 pub fn cancel(state: &AppState) {
     state.sign_in_cancel.notify_waiters();
+}
+
+fn remember_prompt_url(state: &AppState, url: &str) {
+    *state.last_prompt_url.lock().expect("prompt url poisoned") = Some(url.to_string());
+}
+
+/// Forgets the prompt URL when `sign_in` returns, whether it succeeded, failed or was cancelled.
+struct ClearPromptUrl<'a>(&'a AppState);
+
+impl Drop for ClearPromptUrl<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut url) = self.0.last_prompt_url.lock() {
+            *url = None;
+        }
+    }
+}
+
+/// Open the page of the sign-in that is waiting (device code), in the default browser.
+pub fn open_sign_in_page(state: &AppState) -> Result<(), CommandError> {
+    let url = state
+        .last_prompt_url
+        .lock()
+        .expect("prompt url poisoned")
+        .clone()
+        .ok_or_else(|| CommandError::new("not_found", "No sign-in is waiting."))?;
+    open::that(&url).map_err(|e| CommandError::new("io", format!("Couldn't open the browser: {e}")))
+}
+
+/// One remembered sign-in, for the Settings list.
+#[derive(Debug, Serialize)]
+pub struct StoredSignIn {
+    pub id: String,
+    pub user_principal: String,
+    pub display_name: Option<String>,
+    pub tenant_id: String,
+    /// It is the current account's sign-in.
+    pub current: bool,
+    /// Its refresh token exists.
+    pub signed_in: bool,
+    /// It is the current account's identity (same object id or user principal); another
+    /// account's kept tenant sign-in is not.
+    pub same_account: bool,
+    /// Names of the profiles that connect with this sign-in now (`bound_sign_in`), which may be
+    /// the same person's tenant sign-in rather than the one the profile was saved with.
+    pub profiles: Vec<String>,
+}
+
+/// Every remembered sign-in, with whose it is and which profiles connect with it.
+pub fn sign_ins(state: &AppState) -> Result<Vec<StoredSignIn>, CommandError> {
+    let current = state.current_sign_in()?;
+    let mut users: Vec<(String, String)> = Vec::new();
+    for p in state.store.list()? {
+        if let Some(b) = crate::ops::profiles::bound_sign_in(state, &p)? {
+            users.push((b.id, p.name));
+        }
+    }
+    state
+        .store
+        .sign_ins()?
+        .into_iter()
+        .map(|s| {
+            let profiles = users
+                .iter()
+                .filter(|(id, _)| *id == s.id)
+                .map(|(_, name)| name.clone())
+                .collect();
+            Ok(StoredSignIn {
+                signed_in: state.session.is_signed_in(&s)?,
+                current: current.as_ref().is_some_and(|c| c.id == s.id),
+                same_account: current.as_ref().is_some_and(|c| same_identity(c, &s)),
+                id: s.id,
+                user_principal: s.user_principal,
+                display_name: s.display_name,
+                tenant_id: s.tenant_id,
+                profiles,
+            })
+        })
+        .collect()
+}
+
+/// Forget a sign-in: its refresh token and its record. Signing out the current one leaves no
+/// current account.
+pub async fn sign_out(state: &AppState, ev: &dyn Events, id: &str) -> Result<(), CommandError> {
+    let s = state
+        .store
+        .sign_in(id)?
+        .ok_or_else(|| CommandError::new("not_found", "That sign-in is already gone."))?;
+    let who = s.user_principal.clone();
+    tracked(
+        ev,
+        "Signing out failed",
+        async {
+            state.session.logout(&s)?;
+            state.store.remove_sign_in(&s.id)?;
+            if state.store.current_sign_in()?.is_none_or(|c| c.id == s.id) {
+                state.store.set_current_sign_in(None)?;
+            }
+            Ok(())
+        },
+        |_| format!("Signed out {who}"),
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -256,6 +362,78 @@ mod tests {
             "Signed in to tenant tenant-guest as stranger@x.io"
         );
         assert_eq!(s.current_sign_in().unwrap().unwrap().id, "home-oid");
+    }
+
+    #[test]
+    fn sign_ins_list_marks_current_signed_in_and_using_profiles() {
+        let s = state();
+        let home = crate::ops::test_util::remember_sign_in(&s, "oid-1", "tenant-1", true);
+        crate::ops::test_util::remember_sign_in(&s, "oid-g", "tenant-guest", false);
+        s.store.set_current_sign_in(Some(&home.id)).unwrap();
+        let mut p = dispatched_core::profiles::Profile::entra(
+            "Guest NS",
+            "g.servicebus.windows.net",
+            "oid-g",
+            Some("tenant-guest"),
+        );
+        p.pinned_entities.clear();
+        s.store.insert(&p).unwrap();
+        let list = sign_ins(&s).unwrap();
+        assert_eq!(list.len(), 2);
+        let h = list.iter().find(|v| v.id == "oid-1").unwrap();
+        assert!(h.current && h.signed_in && h.same_account);
+        let g = list.iter().find(|v| v.id == "oid-g").unwrap();
+        assert!(!g.current && !g.signed_in);
+        assert!(
+            !g.same_account,
+            "another account's kept sign-in is not the user's own"
+        );
+        assert_eq!(g.profiles, ["Guest NS"]);
+    }
+
+    #[test]
+    fn a_profile_is_listed_under_the_sign_in_it_connects_with() {
+        use crate::ops::test_util::{remember_guest_sign_in, remember_sign_in};
+        let s = state();
+        let home = remember_sign_in(&s, "oid-1", "tenant-1", true);
+        s.store.set_current_sign_in(Some(&home.id)).unwrap();
+        remember_guest_sign_in(&s, &home, "oid-1g", "tenant-guest", true);
+        // Saved with the home sign-in, asking for the guest tenant: connects with the same person's
+        // own sign-in there (bound_sign_in), so it is listed under that row.
+        let p = dispatched_core::profiles::Profile::entra(
+            "Guest NS",
+            "g.servicebus.windows.net",
+            "oid-1",
+            Some("tenant-guest"),
+        );
+        s.store.insert(&p).unwrap();
+        let list = sign_ins(&s).unwrap();
+        let h = list.iter().find(|v| v.id == "oid-1").unwrap();
+        let g = list.iter().find(|v| v.id == "oid-1g").unwrap();
+        assert!(h.profiles.is_empty(), "{:?}", h.profiles);
+        assert_eq!(g.profiles, ["Guest NS"]);
+        assert!(g.same_account && !g.current);
+    }
+
+    #[tokio::test]
+    async fn sign_out_forgets_the_sign_in_and_clears_current() {
+        let s = state();
+        let ev = crate::events::Recorder::default();
+        let home = crate::ops::test_util::remember_sign_in(&s, "oid-1", "tenant-1", true);
+        s.store.set_current_sign_in(Some(&home.id)).unwrap();
+        sign_out(&s, &ev, "oid-1").await.unwrap();
+        assert!(s.store.sign_in("oid-1").unwrap().is_none());
+        assert!(s.current_sign_in().unwrap().is_none());
+        assert_eq!(
+            sign_out(&s, &ev, "oid-1").await.unwrap_err().kind,
+            "not_found"
+        );
+    }
+
+    #[test]
+    fn open_sign_in_page_needs_a_waiting_prompt() {
+        let s = state();
+        assert_eq!(open_sign_in_page(&s).unwrap_err().kind, "not_found");
     }
 
     #[test]

@@ -70,6 +70,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(state::AppState::open())
         .invoke_handler(tauri::generate_handler![
             commands::app_info,
@@ -79,9 +80,14 @@ pub fn run() {
             commands::profile_save,
             commands::profile_delete,
             commands::profile_test,
+            commands::profile_test_draft,
+            commands::copy_entity_connection_string,
             commands::account_current,
             commands::sign_in,
             commands::sign_in_cancel,
+            commands::sign_ins_list,
+            commands::sign_out,
+            commands::open_sign_in_page,
             commands::list_tenants,
             commands::discover_namespaces,
             commands::connect,
