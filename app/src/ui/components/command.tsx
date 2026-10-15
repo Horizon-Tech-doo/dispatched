@@ -56,7 +56,7 @@ export function CommandGroup({ className, ...props }: ComponentProps<typeof Cmdk
 export function CommandItem({ className, ...props }: ComponentProps<typeof Cmdk.Item>) {
   return (
     <Cmdk.Item
-      className={cn("flex h-7 cursor-default items-center gap-2 px-3 text-12 outline-none data-[selected=true]:bg-selection [&_svg]:size-3.5 [&_svg]:text-icon", className)}
+      className={cn("flex h-row cursor-default items-center gap-2 px-3 text-12 outline-none data-[selected=true]:bg-selection [&_svg]:size-3.5 [&_svg]:text-icon", className)}
       {...props}
     />
   );

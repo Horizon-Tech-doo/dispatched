@@ -9,7 +9,7 @@ export function Hotkeys() {
   const free = connected && !paletteOpen && sheet === null;
   const bindings: Binding[] = [
     { combo: "mod+k", run: () => setPaletteOpen(!paletteOpen), inInputs: true },
-    { combo: "mod+,", run: () => openSheet({ kind: "settings" }), inInputs: true },
+    { combo: "mod+,", run: () => { setPaletteOpen(false); openSheet({ kind: "settings" }); }, inInputs: true },
     { combo: "f5", run: () => free && refresh(), inInputs: true },
     { combo: "mod+f", run: () => free && document.getElementById("tree-filter")?.focus() },
     { combo: "mod+j", run: () => free && dispatch({ type: "layout", patch: { drawerOpen: !shell.layout.drawerOpen } }) },

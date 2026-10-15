@@ -146,15 +146,21 @@ export const shots: {
     )}`,
     ready: (p) => p.getByRole("heading", { name: "This entity wasn't found" }),
   },
-  ...(["palette", "palette-empty"] as const).map((name) => ({
+  ...(["palette", "palette-all", "palette-commands", "palette-empty"] as const).map((name) => ({
     name,
     path: "/?scenario=default&autoconnect=p-logistics",
     ready: (p: Page) => p.getByRole("tree", { name: "Namespace" }).getByRole("treeitem", { name: "invoice-generate" }),
     prepare: async (page: Page) => {
       await page.keyboard.press("Shift"); // keyboard modality so :focus-visible matches
       await page.keyboard.press("ControlOrMeta+k");
-      await page.getByPlaceholder("Go to an entity or run a command").fill(name === "palette" ? "ship" : "zzzz");
-      await page.getByRole("dialog", { name: "Command palette" }).getByText(name === "palette" ? "Go to" : "No matching entity or command.").first().waitFor();
+      const dialog = page.getByRole("dialog", { name: "Command palette" });
+      const query = { palette: "ship", "palette-all": "", "palette-commands": "", "palette-empty": "zzzz" }[name];
+      if (query) await page.getByPlaceholder("Go to entity or command").fill(query);
+      // Subscriptions load as the palette opens; wait for them so the shot never photographs a half-filled list.
+      if (name !== "palette-empty") await dialog.getByRole("option", { name: /tracking-sync/ }).first().waitFor();
+      // The commands sit below the entities: scroll the list to its end.
+      if (name === "palette-commands") await dialog.getByRole("listbox").evaluate((el) => { el.scrollTop = el.scrollHeight; });
+      await dialog.getByText(name === "palette-empty" ? 'No results for "zzzz"' : "Go to").first().waitFor();
     },
     holds: (p: Page) => p.getByRole("dialog", { name: "Command palette" }),
     viewportOnly: true,

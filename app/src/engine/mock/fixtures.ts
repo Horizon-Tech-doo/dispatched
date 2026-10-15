@@ -28,6 +28,10 @@ export const topics: TopicInfo[] = [
   { name: "stock-levels", status: "Active", size_in_bytes: 4_096, subscription_count: 1 },
 ];
 
+export const manyTopics: TopicInfo[] = Array.from({ length: 60 }, (_, i) => ({
+  name: `topic-${String(i).padStart(2, "0")}`, status: "Active", size_in_bytes: 0, subscription_count: 0,
+}));
+
 const s = (topic: string, name: string, c: EntityCounts | null): SubscriptionInfo => ({
   topic, name, status: "Active", counts: c, requires_session: false, max_delivery_count: 10, forward_to: null,
 });

@@ -2,7 +2,7 @@ import { EngineError, setTransport, type IpcTransport, type Unlisten } from "../
 import type { AccountView, ActivityEntry, ConnectionView, EntityListing, Profile, ProfileDraft } from "../types";
 import * as fx from "./fixtures";
 
-export type Scenario = "default" | "empty" | "forbidden" | "missing-secret" | "network" | "many";
+export type Scenario = "default" | "empty" | "forbidden" | "missing-secret" | "network" | "many" | "many-topics";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -128,8 +128,9 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
           } satisfies EntityListing;
         }
         const queues = scenario === "many" ? fx.manyQueues : fx.queues;
-        activity(`Listed ${queues.length} queues and ${fx.topics.length} topics`, started);
-        return { queues, topics: fx.topics, limited: null, known: [] } satisfies EntityListing;
+        const topics = scenario === "many-topics" ? fx.manyTopics : fx.topics;
+        activity(`Listed ${queues.length} queues and ${topics.length} topics`, started);
+        return { queues, topics, limited: null, known: [] } satisfies EntityListing;
       }
       case "list_subscriptions": {
         if (!active) throw new EngineError("not_connected", "Choose a connection first.");

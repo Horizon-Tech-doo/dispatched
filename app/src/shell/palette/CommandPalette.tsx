@@ -1,28 +1,37 @@
-import { useQueryClient } from "@tanstack/react-query";
-import { keys, useEntities, useProfiles, type SubscriptionInfo } from "@/engine";
+import { useState } from "react";
+import { useEntities, useProfiles, useSubscriptionsFor, type SubscriptionInfo } from "@/engine";
 import {
   CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandPaletteDialog, CommandShortcut, EntityGlyph, shortcutLabel,
 } from "@/ui";
 import { useShell } from "../context";
 import { treeRowOf } from "../tree/model";
-import { buildCommands, type PaletteCommand } from "./commands";
+import { buildCommands, paletteHint, type PaletteCommand } from "./commands";
+
+/** Up to this many topics the palette loads every topic's subscriptions so they can be searched. */
+const MAX_PREFETCH_TOPICS = 50;
+const GROUPS = ["Go to", "Connections", "App"] as const;
 
 export function CommandPalette() {
   const { paletteOpen, setPaletteOpen, conn, shell, dispatch, openSheet, refresh, setPrefs } = useShell();
-  const qc = useQueryClient();
+  const connected = conn.status === "connected";
   const profiles = useProfiles().data ?? [];
-  const listing = useEntities(conn.status === "connected" ? conn.profileId : null).data;
+  const listing = useEntities(connected ? conn.profileId : null).data;
+  const topics = listing?.topics ?? [];
+  const searchAll = topics.length <= MAX_PREFETCH_TOPICS;
+  // Same query keys as the tree, so topics the tree already expanded are not fetched twice; results arrive as they load.
+  const topicNames = paletteOpen && connected && searchAll ? topics.map((t) => t.name) : [];
+  const subQueries = useSubscriptionsFor(conn.profileId, topicNames);
 
   if (!paletteOpen) return null;
 
   const subs: Record<string, SubscriptionInfo[] | undefined> = {};
-  for (const t of listing?.topics ?? []) subs[t.name] = qc.getQueryData(keys.subscriptions(conn.profileId, t.name));
+  topicNames.forEach((t, i) => (subs[t] = subQueries[i]?.data));
 
   const cmds = buildCommands({
     listing,
     subs,
     profiles,
-    activeProfileId: conn.status === "connected" ? conn.profileId : null,
+    activeProfileId: connected ? conn.profileId : null,
     open: (tab) => {
       // Show the entity in the tree too: open the rows above it and select its row.
       const { rowId, ancestors } = treeRowOf(tab, listing?.limited != null);
@@ -36,7 +45,6 @@ export function CommandPalette() {
     toggleDrawer: () => dispatch({ type: "layout", patch: { drawerOpen: !shell.layout.drawerOpen } }),
     setPrefs,
   });
-  const groups = ["Go to", "Connections", "App"] as const;
   const run = (c: PaletteCommand) => {
     setPaletteOpen(false);
     c.run();
@@ -44,18 +52,35 @@ export function CommandPalette() {
 
   return (
     <CommandPaletteDialog open onOpenChange={setPaletteOpen}>
-      <CommandInput placeholder="Go to an entity or run a command" />
+      <PaletteBody cmds={cmds} connected={connected} partial={connected && !searchAll} run={run} />
+    </CommandPaletteDialog>
+  );
+}
+
+/** Mounted only while the palette is open, so the query starts empty every time. */
+function PaletteBody({ cmds, connected, partial, run }: { cmds: PaletteCommand[]; connected: boolean; partial: boolean; run: (c: PaletteCommand) => void }) {
+  const [query, setQuery] = useState("");
+  return (
+    <>
+      <CommandInput placeholder={paletteHint(connected)} value={query} onValueChange={setQuery} />
+      {partial && (
+        <p className="m-0 border-b border-line px-3 py-1.5 text-11 text-muted">
+          Subscriptions of collapsed topics aren't searched. Expand a topic to include them.
+        </p>
+      )}
       <CommandList>
-        <CommandEmpty>No matching entity or command.</CommandEmpty>
-        {groups.map((g) => {
+        <CommandEmpty>No results for "{query.trim()}"</CommandEmpty>
+        {GROUPS.map((g) => {
           const items = cmds.filter((c) => c.group === g);
           if (!items.length) return null;
           return (
             <CommandGroup key={g} heading={g}>
               {items.map((c) => (
-                <CommandItem key={c.id} value={`${c.label} ${c.keywords?.join(" ") ?? ""}`} onSelect={() => run(c)}>
-                  {c.glyph && <EntityGlyph kind={c.glyph} />}
+                <CommandItem key={c.id} value={[c.label, c.detail, ...(c.keywords ?? [])].filter(Boolean).join(" ")} onSelect={() => run(c)}>
+                  {c.glyph ? <EntityGlyph kind={c.glyph} /> : <span aria-hidden="true" className="size-3.5 shrink-0" />}
                   <span className="truncate">{c.label}</span>
+                  {c.detail && <span className="min-w-0 truncate text-muted">{c.detail}</span>}
+                  {c.production && <span className="ml-auto shrink-0 pl-2 text-11 font-semibold tracking-[0.04em] text-accent">PROD</span>}
                   {c.shortcut && <CommandShortcut>{shortcutLabel(c.shortcut)}</CommandShortcut>}
                 </CommandItem>
               ))}
@@ -63,6 +88,6 @@ export function CommandPalette() {
           );
         })}
       </CommandList>
-    </CommandPaletteDialog>
+    </>
   );
 }

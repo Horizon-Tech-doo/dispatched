@@ -14,7 +14,7 @@ const focus = (el: HTMLElement) => act(() => el.focus());
 const tab = (id: string) => ({ id, kind: "queue", subTab: "overview" });
 const seed = (ids: string[], activeTab = ids[0]) => ({ last_profile: "p-logistics", "shell:p-logistics": { tabs: ids.map(tab), activeTab } });
 const mod = (key: string) => `{Control>}${key}{/Control}`;
-const PLACEHOLDER = "Go to an entity or run a command";
+const PLACEHOLDER = "Go to entity or command";
 
 describe("hotkeys", () => {
   it("mod+1..9 activate the tab at that position", async () => {
@@ -48,6 +48,16 @@ describe("hotkeys", () => {
     renderShell("default", { last_profile: "p-logistics" }, <SheetProbe />);
     await focus(await screen.findByRole("searchbox", { name: "Filter entities" }));
     await userEvent.keyboard(mod(","));
+    expect(screen.getByLabelText("sheet")).toHaveTextContent("settings");
+  });
+
+  it("mod+, closes the palette before opening settings", async () => {
+    renderShell("default", { last_profile: "p-logistics" }, <SheetProbe />);
+    await screen.findByRole("tree", { name: "Namespace" });
+    await userEvent.keyboard(mod("k"));
+    await screen.findByPlaceholderText(PLACEHOLDER);
+    await userEvent.keyboard(mod(","));
+    await waitFor(() => expect(screen.queryByPlaceholderText(PLACEHOLDER)).not.toBeInTheDocument());
     expect(screen.getByLabelText("sheet")).toHaveTextContent("settings");
   });
 

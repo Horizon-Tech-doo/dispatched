@@ -3,6 +3,7 @@ import { inTauri } from "@/engine";
 import { Hint, IconButton, Kbd, isMac } from "@/ui";
 import { ConnectionSelector } from "./ConnectionSelector";
 import { useShell } from "./context";
+import { paletteHint } from "./palette/commands";
 
 export function TopBar() {
   const { conn, setPaletteOpen, refresh } = useShell();
@@ -24,7 +25,7 @@ export function TopBar() {
         className="flex h-6 w-[380px] max-w-[40vw] items-center gap-2 rounded-ctl border border-line bg-field px-2 text-12 text-faint hover:text-muted focus-visible:outline focus-visible:outline-1 focus-visible:-outline-offset-1 focus-visible:outline-fg"
       >
         <Search aria-hidden="true" className="size-3.5 text-icon" />
-        <span className="flex-1 text-left">Go to entity or command</span>
+        <span className="flex-1 text-left">{paletteHint(conn.status === "connected")}</span>
         <Kbd shortcut="mod+k" />
       </button>
       <div data-tauri-drag-region className="flex h-full items-center justify-end">
