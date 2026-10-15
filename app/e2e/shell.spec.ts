@@ -66,11 +66,11 @@ test("missing secret shows the fix", async ({ page }) => {
   await expect(page.getByRole("dialog", { name: "Edit Logistics", exact: true })).toBeVisible();
 });
 
-test("listing errors offer a retry and land in the activity log", async ({ page }) => {
+test("listing errors offer to try again and land in the activity log", async ({ page }) => {
   await go(page, "scenario=network&autoconnect=p-logistics");
   await expect(page.getByRole("heading", { name: "Can't list this namespace" })).toBeVisible();
   await expect(page.getByText(/The connection to .* was interrupted/)).toBeVisible();
-  await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Try again" })).toBeVisible();
   await expect(activity(page).getByText("Listing the namespace failed").first()).toBeVisible();
   await expect(activity(page).getByText(/connection reset by peer/).first()).toBeVisible();
 });

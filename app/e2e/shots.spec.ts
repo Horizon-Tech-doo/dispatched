@@ -130,13 +130,6 @@ export const shots: {
       await page.getByRole("tablist", { name: "Open entities" }).getByRole("tab", { name: /tracking-sync/ }).waitFor();
       await page.getByRole("tablist", { name: "Entity views" }).getByRole("tab", { name: /Dead-letter/ }).click();
       await page.getByRole("heading", { name: "Dead-letter isn't available yet" }).waitFor();
-      // WebKit can keep stale paint on the tab strip after the selection moves; force a repaint before capture.
-      await page.evaluate(async () => {
-        document.body.style.opacity = "0.999";
-        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-        document.body.style.opacity = "";
-        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-      });
     },
   },
   {
