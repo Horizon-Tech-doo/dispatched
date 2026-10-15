@@ -1129,12 +1129,15 @@ name = "dispatched-app"
 version = "0.0.1"
 dependencies = [
  "dispatched-core",
+ "horizon-azure-kit",
+ "open",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-process",
  "tauri-plugin-updater",
+ "time",
  "tokio",
 ]
 

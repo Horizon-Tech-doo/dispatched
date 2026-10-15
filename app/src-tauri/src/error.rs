@@ -1,20 +1,32 @@
 use dispatched_core::Error;
 use serde::Serialize;
 
-/// Error shape returned to the frontend.
-#[derive(Debug, Serialize)]
+/// Error shape returned to the frontend: a stable `kind` the UI branches on
+/// and a sentence for people. Never contains secrets (core errors don't).
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct CommandError {
     pub kind: &'static str,
     pub message: String,
 }
 
+impl CommandError {
+    pub fn new(kind: &'static str, message: impl Into<String>) -> Self {
+        Self { kind, message: message.into() }
+    }
+}
+
 impl From<Error> for CommandError {
     fn from(e: Error) -> Self {
-        let kind = dispatched_core::diagnostics::error_kind(&e);
         Self {
-            kind,
+            kind: dispatched_core::diagnostics::error_kind(&e),
             message: e.to_string(),
         }
+    }
+}
+
+impl From<horizon_azure_kit::KitError> for CommandError {
+    fn from(e: horizon_azure_kit::KitError) -> Self {
+        Error::from(e).into()
     }
 }
 
@@ -31,6 +43,12 @@ mod tests {
         .into();
         assert_eq!(e.kind, "forbidden");
         assert!(e.message.contains("needs Listen"));
+    }
+
+    #[test]
+    fn kit_errors_map_through_core() {
+        let e: CommandError = horizon_azure_kit::KitError::NotSignedIn("expired".into()).into();
+        assert_eq!(e.kind, "not_signed_in");
     }
 
     #[test]
