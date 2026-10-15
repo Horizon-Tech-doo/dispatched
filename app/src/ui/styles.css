@@ -84,6 +84,11 @@
   * { scrollbar-width: thin; scrollbar-color: var(--c-line) transparent; }
   .font-mono { font-variant-ligatures: none; }
   @media (prefers-reduced-motion: reduce) {
-    *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+    /* Animations keep a token duration so their end events still fire (Radix unmounts on animationend);
+       an element only animates if it names keyframes. Transitions must be 0s, not a token duration:
+       transition-property defaults to `all`, so any non-zero duration here would start a transition on
+       every style change of every element, and WebKit then paints the old state (a tab marker left on
+       the previous tab) until the next frame. */
+    *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0s !important; transition-delay: 0s !important; }
   }
 }

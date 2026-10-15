@@ -111,3 +111,57 @@ test("drawer and tabs follow the keyboard", async ({ page }) => {
   await page.keyboard.press("ControlOrMeta+w");
   await expect(tab).toHaveCount(0);
 });
+
+/** Which tab in `list` draws the marker, read in one go right after a click, with nothing waited for: the
+ *  marker must move in the same frame. Underline tabs draw it as the trigger's bottom border; the entity
+ *  strip draws it as the top border of the tab's wrapper (so the close button shares it). */
+const markerState = (page: Page, list: string) =>
+  page.getByRole("tablist", { name: list }).evaluate((el) => {
+    const fg = getComputedStyle(document.body).color;
+    const tabs = [...el.querySelectorAll<HTMLElement>('[role="tab"]')].map((t) => {
+      const strip = t.parentElement !== el;
+      const cs = getComputedStyle(strip ? t.parentElement! : t);
+      const marker = strip ? cs.borderTopColor : cs.borderBottomColor;
+      const box = t.getBoundingClientRect();
+      return { name: t.textContent?.trim() ?? "", selected: t.getAttribute("aria-selected") === "true", marked: marker === fg, left: box.left, right: box.right };
+    });
+    return { tabs, running: document.getAnimations().length };
+  });
+
+test("the tab marker moves with the click, also with reduced motion", async ({ page }) => {
+  // Reduced motion is where WebKit used to keep painting the old tab: a global 0.01ms transition
+  // started on every style change and the marker stayed behind until the next frame.
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await go(page, logistics);
+  await tree(page).getByRole("treeitem", { name: "label-print" }).dblclick();
+  await tree(page).getByRole("treeitem", { name: "invoice-generate" }).dblclick();
+  const expectMarkerOn = async (list: string, name: RegExp) => {
+    const { tabs, running } = await markerState(page, list);
+    expect(running, "nothing animates under reduced motion").toBe(0);
+    const marked = tabs.filter((t) => t.marked);
+    expect(marked.map((t) => t.name)).toEqual([expect.stringMatching(name)]);
+    expect(marked[0].selected).toBe(true);
+  };
+
+  const drawer = activity(page);
+  await expectMarkerOn("Drawer", /^Activity/);
+  await drawer.getByRole("tab", { name: /^Jobs/ }).click();
+  await expectMarkerOn("Drawer", /^Jobs/);
+  await expect(drawer.getByText("Exports and bulk operations show their progress here")).toBeVisible();
+  // The marker sits under the Jobs label, not under Activity.
+  const jobsBox = (await drawer.getByRole("tab", { name: /^Jobs/ }).boundingBox())!;
+  const { tabs } = await markerState(page, "Drawer");
+  const marked = tabs.find((t) => t.marked)!;
+  expect(marked.left).toBeCloseTo(jobsBox.x, 0);
+  expect(marked.right).toBeCloseTo(jobsBox.x + jobsBox.width, 0);
+  await drawer.getByRole("tab", { name: "Activity" }).click();
+  await expectMarkerOn("Drawer", /^Activity/);
+
+  await expectMarkerOn("Open entities", /^invoice-generate/);
+  await page.getByRole("tablist", { name: "Open entities" }).getByRole("tab", { name: /label-print/ }).click();
+  await expectMarkerOn("Open entities", /^label-print/);
+
+  await expectMarkerOn("Entity views", /^Overview/);
+  await page.getByRole("tablist", { name: "Entity views" }).getByRole("tab", { name: /^Dead-letter/ }).click();
+  await expectMarkerOn("Entity views", /^Dead-letter/);
+});
