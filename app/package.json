@@ -13,7 +13,8 @@
     "test": "vitest run",
     "e2e": "playwright test",
     "shots": "SHOTS=1 playwright test e2e/shots.spec.ts --project=webkit",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "tauri:dev": "sh scripts/tauri-dev.sh"
   },
   "dependencies": {
     "@fontsource/jetbrains-mono": "^5.3.0",
