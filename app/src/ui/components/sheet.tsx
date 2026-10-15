@@ -36,7 +36,7 @@ export function Sheet({
                 initial={reduce ? false : { x: 24, opacity: 0 }}
                 animate={{ x: 0, opacity: 1 }}
                 exit={reduce ? { opacity: 0 } : { x: 24, opacity: 0 }}
-                transition={{ duration: 0.15, ease: EASE }}
+                transition={{ duration: reduce ? 0 : 0.15, ease: EASE }}
                 style={{ width }}
                 className="fixed inset-y-0 right-0 z-50 flex max-w-full flex-col border-l border-line bg-side text-fg shadow-float outline-none"
               >

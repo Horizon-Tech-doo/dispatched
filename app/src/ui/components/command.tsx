@@ -29,7 +29,7 @@ export function CommandPaletteDialog({ open, onOpenChange, children, label = "Co
 
 export function CommandInput({ className, ...props }: ComponentProps<typeof Cmdk.Input>) {
   return (
-    <div className="flex h-9 items-center gap-2 border-b border-line px-3">
+    <div className="flex h-9 items-center gap-2 border-b border-line px-3 focus-within:outline focus-within:outline-1 focus-within:-outline-offset-1 focus-within:outline-fg">
       <Search aria-hidden="true" className="size-3.5 text-icon" />
       <Cmdk.Input className={cn("h-full flex-1 bg-transparent text-13 text-fg outline-none placeholder:text-faint", className)} {...props} />
     </div>

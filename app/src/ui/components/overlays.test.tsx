@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./tabs";
@@ -26,7 +26,50 @@ describe("Tabs", () => {
   });
 });
 
+describe("Tabs overflow", () => {
+  it("maps the vertical wheel to horizontal scrolling on a strip", () => {
+    render(
+      <Tabs defaultValue="a">
+        <TabsList variant="strip" aria-label="Open entities">
+          <TabsTrigger value="a">orders</TabsTrigger>
+          <TabsTrigger value="b">audit</TabsTrigger>
+        </TabsList>
+      </Tabs>,
+    );
+    const list = screen.getByRole("tablist");
+    fireEvent.wheel(list, { deltaY: 40 });
+    expect(list.scrollLeft).toBe(40);
+  });
+
+  it("reveals the active tab when the selection changes", async () => {
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    render(
+      <Tabs defaultValue="a">
+        <TabsList variant="strip" aria-label="Open entities">
+          <TabsTrigger value="a">orders</TabsTrigger>
+          <TabsTrigger value="b">audit</TabsTrigger>
+        </TabsList>
+      </Tabs>,
+    );
+    scrollIntoView.mockClear();
+    await userEvent.click(screen.getByRole("tab", { name: "audit" }));
+    await vi.waitFor(() => expect(scrollIntoView).toHaveBeenCalledWith({ inline: "nearest", block: "nearest" }));
+  });
+});
+
 describe("Sheet", () => {
+  it("opens without a description and without warnings", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    render(<Sheet open onOpenChange={() => {}} title="Filters"><span>Body</span></Sheet>);
+    expect(screen.getByRole("dialog", { name: "Filters" })).toBeInTheDocument();
+    expect(warn).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
+    warn.mockRestore();
+    error.mockRestore();
+  });
+
   it("is a labelled dialog that closes on Escape", async () => {
     const onOpenChange = vi.fn();
     render(
