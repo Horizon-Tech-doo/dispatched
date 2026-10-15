@@ -1,12 +1,14 @@
 import { QueryClientProvider } from "@tanstack/react-query";
 import { render } from "@testing-library/react";
+import type { ReactNode } from "react";
 import { createQueryClient, setTransport } from "@/engine";
 import { createMockTransport, type Scenario } from "@/engine/mock/transport";
 import { TooltipProvider } from "@/ui";
 import { ShellProvider } from "./context";
 import { Workbench } from "./Workbench";
 
-export function renderShell(scenario: Scenario = "default", seed: Record<string, unknown> = {}) {
+/** `extra` renders beside the workbench inside the providers (a probe for shell state). */
+export function renderShell(scenario: Scenario = "default", seed: Record<string, unknown> = {}, extra?: ReactNode) {
   const mock = createMockTransport(scenario, 0, seed);
   setTransport(mock);
   const client = createQueryClient();
@@ -15,6 +17,7 @@ export function renderShell(scenario: Scenario = "default", seed: Record<string,
       <TooltipProvider>
         <ShellProvider>
           <Workbench />
+          {extra}
         </ShellProvider>
       </TooltipProvider>
     </QueryClientProvider>,

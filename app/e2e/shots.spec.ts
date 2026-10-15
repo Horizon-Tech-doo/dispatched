@@ -83,6 +83,8 @@ export const shots: {
       await tree.getByRole("treeitem", { name: "No subscriptions" }).waitFor();
       await tree.getByRole("treeitem", { name: "tracking-sync" }).click();
       await expect(tree.getByRole("treeitem", { name: "tracking-sync" })).toHaveAttribute("aria-selected", "true");
+      await page.keyboard.press("ArrowDown"); // keyboard focus, so the selected row carries the focus outline
+      await page.keyboard.press("ArrowUp");
       // WebKit can photograph the row highlight one frame late; let it paint.
       await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
     },

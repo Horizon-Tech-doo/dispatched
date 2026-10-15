@@ -7,7 +7,10 @@ import {
 } from "@/ui";
 import { shortHost } from "../ConnectionSelector";
 import { useShell } from "../context";
+import { describeListError } from "./listError";
 import { buildNodes, type NsNode, type SubsState } from "./model";
+
+const errorKind = (e: Error) => (e as { kind?: string }).kind ?? "";
 
 const glyphOf = { namespace: "namespace", queue: "queue", topic: "topic", subscription: "subscription" } as const;
 
@@ -17,7 +20,7 @@ const FLOOR = { width: 280, height: 640 };
 function Counts({ n }: { n: NsNode }) {
   const c = n.counts;
   return (
-    <span className="ml-auto flex shrink-0 items-baseline gap-2 pl-1">
+    <span className="ml-auto flex shrink-0 items-baseline gap-1.5">
       <CountBadge value={c?.active} quality={c ?? undefined} className="text-12" />
       {c && c.dead_letter > 0 && <CountBadge value={c.dead_letter} quality={c} attention className="text-12" />}
     </span>
@@ -44,7 +47,7 @@ function Row({ n, production, onRetry }: { n: NsNode; production: boolean; onRet
       return (
         <>
           <span className="truncate font-semibold text-muted">{n.label}</span>
-          {n.count != null && <CountBadge value={n.count} className="ml-auto shrink-0 pl-1 text-12" />}
+          {n.count != null && <CountBadge value={n.count} className="ml-auto shrink-0 text-12" />}
         </>
       );
     case "namespace":
@@ -59,7 +62,15 @@ function Row({ n, production, onRetry }: { n: NsNode; production: boolean; onRet
       return (
         <>
           <EntityGlyph kind={n.entity?.kind ?? glyphOf[n.kind as keyof typeof glyphOf]} className="shrink-0 text-icon" />
-          <span className="truncate" title={n.label}>{n.label}</span>
+          {n.kind === "known" && n.topic ? (
+            // Name first, topic after it as secondary text: only the topic gives way when the row is narrow.
+            <>
+              <span className="shrink-0" title={`${n.topic}/${n.label}`}>{n.label}</span>
+              <span className="min-w-0 truncate text-muted">{n.topic}</span>
+            </>
+          ) : (
+            <span className="truncate" title={n.label}>{n.label}</span>
+          )}
           {n.kind !== "topic" && <Counts n={n} />}
         </>
       );
@@ -67,7 +78,7 @@ function Row({ n, production, onRetry }: { n: NsNode; production: boolean; onRet
 }
 
 export function NamespaceTree() {
-  const { conn, shell, dispatch, prefs } = useShell();
+  const { conn, shell, dispatch, prefs, openSheet } = useShell();
   const profileId = conn.profileId;
   const refetchMs = prefs.autoRefresh * 1000;
   const profile = useProfiles().data?.find((p) => p.id === profileId);
@@ -114,13 +125,19 @@ export function NamespaceTree() {
   const menuNode = menuId ? byId.get(menuId) : undefined;
 
   const summary = listing && !listing.limited ? `${formatNumber(listing.queues.length)} queues, ${formatNumber(listing.topics.length)} topics` : "";
-  const notice = (text: string, retry?: boolean) => (
-    <p className="m-0 flex shrink-0 items-start gap-1.5 border-y border-line px-3 py-2 text-12 text-fg">
+  const editConnection = profileId ? () => openSheet({ kind: "profile", profileId }) : undefined;
+  const notice = (text: string, detail?: string, action?: { label: string; run: () => void }) => (
+    <div className="flex shrink-0 items-start gap-1.5 border-y border-line px-3 py-2 text-12 text-fg">
       <CircleAlert aria-hidden="true" className="mt-px size-3.5 shrink-0 text-accent" />
-      <span className="min-w-0 flex-1">{text}</span>
-      {retry && <Button size="sm" variant="quiet" className="shrink-0" onClick={() => void entities.refetch()}>Retry</Button>}
-    </p>
+      <div className="min-w-0 flex-1">
+        <p className="m-0">{text}</p>
+        {detail && <p className="m-0 mt-0.5 break-words text-11 text-muted">{detail}</p>}
+        {action && <Button size="sm" variant="quiet" className="-ml-1.5 mt-1" onClick={action.run}>{action.label}</Button>}
+      </div>
+    </div>
   );
+  const retry = { label: "Retry", run: () => void entities.refetch() };
+  const limitedText = `This identity can't list entities in ${host}, so only pinned entities are shown. Grant it Manage rights to see everything, or edit this connection to pin more.`;
 
   return (
     <nav aria-label="Namespace" className="flex h-full min-h-0 flex-col">
@@ -140,8 +157,9 @@ export function NamespaceTree() {
           className="[&::-webkit-search-cancel-button]:appearance-none"
         />
       </div>
-      {entities.error && listing && notice(`Showing the last loaded data. ${entities.error.message}`, true)}
-      {listing?.limited && notice(listing.limited)}
+      {entities.error && listing &&
+        notice(`${describeListError(errorKind(entities.error), host)} Showing the last loaded data.`, entities.error.message, retry)}
+      {listing?.limited && notice(limitedText, undefined, editConnection && { label: "Edit connection", run: editConnection })}
       <div className="min-h-0 flex-1">
         {entities.isPending ? (
           <SkeletonRows rows={12} columns={2} />
@@ -149,11 +167,20 @@ export function NamespaceTree() {
           <EmptyState
             tone="error"
             title="Can't list this namespace"
-            body={entities.error.message}
+            body={
+              <>
+                <span className="block text-fg">{describeListError(errorKind(entities.error), host)}</span>
+                <span className="mt-1 block break-words text-11 text-muted">{entities.error.message}</span>
+              </>
+            }
             action={<Button onClick={() => void entities.refetch()}>Retry</Button>}
           />
         ) : listing?.limited && listing.known.length === 0 ? (
-          <EmptyState title="No pinned entities" body="Edit this connection and add the queues or subscriptions you use, one per line, under Pinned entities." />
+          <EmptyState
+            title="No pinned entities"
+            body={`This identity can't list entities in ${host} and none are pinned. Edit this connection to pin the queues or subscriptions you use, or grant it Manage rights.`}
+            action={editConnection && <Button onClick={editConnection}>Edit connection</Button>}
+          />
         ) : nodes.length === 1 && filter.trim() ? (
           <EmptyState title="No matches" body={`Nothing loaded matches "${filter.trim()}". Expand topics to search their subscriptions.`} />
         ) : (
@@ -162,9 +189,11 @@ export function NamespaceTree() {
               <div
                 className="h-full"
                 onContextMenuCapture={(e) => {
-                  const id = (e.target as HTMLElement).closest<HTMLElement>("[data-node-id]")?.dataset.nodeId ?? null;
+                  const under = (e.target as HTMLElement).closest<HTMLElement>("[data-node-id]")?.dataset.nodeId ?? null;
+                  // The Menu key / Shift+F10 reports a primary button over the tree itself: act on the selected row.
+                  const id = under ?? (e.button === 0 ? shell.selected : null);
                   setMenuId(id);
-                  if (id) dispatch({ type: "select", nodeId: id });
+                  if (under) dispatch({ type: "select", nodeId: under });
                 }}
               >
                 <Tree

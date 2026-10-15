@@ -1,6 +1,7 @@
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
+import { useShell } from "../context";
 import { renderShell } from "../test-utils";
 
 const tree = () => screen.findByRole("tree", { name: "Namespace" });
@@ -101,15 +102,73 @@ describe("NamespaceTree", () => {
 
   it("explains a limited listing and shows pinned entities", async () => {
     renderShell("forbidden", { last_profile: "p-logistics" });
-    expect(await screen.findByText(/can't list the namespace/)).toBeInTheDocument();
+    expect(await screen.findByText(/This identity can't list entities in sb-logistics-prod, so only pinned entities are shown\./)).toBeInTheDocument();
+    expect(screen.getByText(/Grant it Manage rights to see everything, or edit this connection to pin more\./)).toBeInTheDocument();
+    expect(screen.queryByText(/needs Manage,EntityRead/)).not.toBeInTheDocument(); // the engine's wording is not echoed
     expect(within(await tree()).getByRole("treeitem", { name: "orders" })).toBeInTheDocument();
+  });
+
+  it("shows pinned subscriptions by name with their topic beside it", async () => {
+    renderShell("forbidden", { last_profile: "p-logistics" });
+    const row = await within(await tree()).findByRole("treeitem", { name: "tracking-sync" });
+    expect(within(row).getByText("shipment-events").className).toContain("text-muted");
+  });
+
+  it("offers to edit the connection from the limited-listing notice", async () => {
+    const user = userEvent.setup();
+    function SheetProbe() {
+      const { sheet } = useShell();
+      return <output aria-label="Open sheet">{sheet ? JSON.stringify(sheet) : "none"}</output>;
+    }
+    renderShell("forbidden", { last_profile: "p-logistics" }, <SheetProbe />);
+    await user.click(await screen.findByRole("button", { name: "Edit connection" }));
+    expect(screen.getByLabelText("Open sheet")).toHaveTextContent('{"kind":"profile","profileId":"p-logistics"}');
   });
 
   it("shows a retryable error when listing fails", async () => {
     renderShell("network", { last_profile: "p-logistics" });
     // One automatic retry for network errors, after the query client's default delay.
     expect(await screen.findByRole("heading", { name: "Can't list this namespace" }, { timeout: 4000 })).toBeInTheDocument();
+    expect(screen.getByText("The connection to sb-logistics-prod was interrupted. Check your network or VPN, then retry.")).toBeInTheDocument();
+    const raw = screen.getByText("network error: connection reset by peer");
+    expect(raw.className).toContain("text-11");
+    expect(raw.className).toContain("text-muted");
     expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+  });
+
+  it("opens the context menu from the keyboard on the selected row", async () => {
+    const user = userEvent.setup();
+    renderShell("default", { last_profile: "p-logistics" });
+    const t = await tree();
+    await user.click(await within(t).findByRole("treeitem", { name: "label-print" }));
+    fireEvent.contextMenu(t, { button: 0 });
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getByRole("menuitem", { name: "Copy entity path" })).not.toHaveAttribute("aria-disabled", "true");
+    await user.click(within(menu).getByRole("menuitem", { name: "Copy entity path" }));
+    expect(await navigator.clipboard.readText()).toBe("label-print");
+  });
+
+  it("lets a right-click on empty space act on nothing", async () => {
+    const user = userEvent.setup();
+    renderShell("default", { last_profile: "p-logistics" });
+    const t = await tree();
+    await user.click(await within(t).findByRole("treeitem", { name: "label-print" }));
+    fireEvent.contextMenu(t, { button: 2 });
+    expect(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Open" })).toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("keeps loaded subscriptions in the tree when a topic is filtered by its name", async () => {
+    const user = userEvent.setup();
+    renderShell("default", { last_profile: "p-logistics" });
+    const t = await tree();
+    await user.click(await within(t).findByRole("treeitem", { name: "shipment-events" }));
+    await focus(t);
+    await user.keyboard("{ArrowRight}");
+    await within(t).findByRole("treeitem", { name: "tracking-sync" });
+    await focus(screen.getByRole("searchbox", { name: "Filter entities" }));
+    await user.keyboard("shipment");
+    expect(within(t).getByRole("treeitem", { name: "billing" })).toBeInTheDocument();
+    expect(within(t).getByRole("treeitem", { name: "warehouse-notify" })).toBeInTheDocument();
   });
 
   it("offers open, copy and refresh in the context menu", async () => {

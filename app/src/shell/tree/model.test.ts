@@ -56,6 +56,34 @@ describe("buildNodes", () => {
     expect(n[3]).toMatchObject({ entity: { id: "shipment-events/subscriptions/tracking-sync", kind: "subscription" } });
   });
 
+  it("pinned_subscriptions_are_labelled_by_name_with_the_topic_alongside", () => {
+    const limited: EntityListing = { queues: [], topics: [], limited: "x", known: [{ entity: "shipment-events", subscription: "tracking-sync" }] };
+    const n = buildNodes({ host: "h", listing: limited, subs: {}, expanded: new Set(), filter: "" });
+    expect(n[2]).toMatchObject({ label: "tracking-sync", topic: "shipment-events" });
+  });
+
+  it("keeps loaded subscriptions when a refresh fails and adds the error as a secondary row", () => {
+    const n = buildNodes({
+      host: "h", listing,
+      subs: { "shipment-events": { data: fx.subscriptions["shipment-events"], error: { message: "timeout" }, pending: false } },
+      expanded: new Set(["group:topics", "t:shipment-events"]), filter: "",
+    });
+    expect(ids(n.filter((x) => x.parentId === "t:shipment-events"))).toEqual([
+      "s:shipment-events/billing", "s:shipment-events/tracking-sync", "s:shipment-events/warehouse-notify", "error:shipment-events",
+    ]);
+    expect(n.find((x) => x.id === "error:shipment-events")).toMatchObject({ message: "timeout", label: "Couldn't refresh subscriptions" });
+  });
+
+  it("filter_shows_every_subscription_of_an_expanded_topic_whose_name_matches", () => {
+    const n = buildNodes({
+      host: "h", listing, subs: { "shipment-events": loaded("shipment-events") },
+      expanded: new Set(["group:topics", "t:shipment-events"]), filter: "shipment",
+    });
+    expect(ids(n.filter((x) => x.parentId === "t:shipment-events"))).toEqual([
+      "s:shipment-events/billing", "s:shipment-events/tracking-sync", "s:shipment-events/warehouse-notify",
+    ]);
+  });
+
   it("pinned_entities_sit_under_their_group_like_queues_do", () => {
     const limited: EntityListing = { queues: [], topics: [], limited: "x", known: [{ entity: "orders", subscription: null }] };
     const n = buildNodes({ host: "h", listing: limited, subs: {}, expanded: new Set(), filter: "" });

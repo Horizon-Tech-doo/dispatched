@@ -1,6 +1,6 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ChevronRight } from "lucide-react";
-import { useCallback, useEffect, useId, useRef, type KeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { cn } from "../lib/cn";
 import { observeRectWithFloor } from "../lib/virtual";
 
@@ -38,6 +38,8 @@ export function Tree<N extends TreeNode>(props: TreeProps<N>) {
   const domId = useId();
   const scrollRef = useRef<HTMLDivElement>(null);
   const typeahead = useRef({ text: "", at: 0 });
+  // The focus mark sits on the active row, not around the whole panel.
+  const [focused, setFocused] = useState(false);
 
   const virtualizer = useVirtualizer({
     count: nodes.length,
@@ -64,6 +66,7 @@ export function Tree<N extends TreeNode>(props: TreeProps<N>) {
 
   function onKeyDown(e: KeyboardEvent<HTMLDivElement>) {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
+    setFocused(true); // keys pressed in the tree make its focus keyboard focus, even after a pointer focus
     const cur = nodes[index];
     // Mid-word, j/k are letters: only a first key navigates.
     const typing = typeahead.current.text !== "" && Date.now() - typeahead.current.at < TYPEAHEAD_MS;
@@ -134,7 +137,18 @@ export function Tree<N extends TreeNode>(props: TreeProps<N>) {
       tabIndex={0}
       aria-activedescendant={selectedId && index >= 0 ? rowId(selectedId) : undefined}
       onKeyDown={onKeyDown}
-      className={cn("relative h-full overflow-y-auto focus-visible:outline focus-visible:outline-1 focus-visible:-outline-offset-1 focus-visible:outline-fg", className)}
+      onFocus={(e) => {
+        if (e.target !== e.currentTarget) return;
+        let visible = true; // keyboard focus shows the mark; a pointer focus does not
+        try {
+          visible = e.currentTarget.matches(":focus-visible");
+        } catch {
+          /* no :focus-visible support: show it */
+        }
+        setFocused(visible);
+      }}
+      onBlur={(e) => e.target === e.currentTarget && setFocused(false)}
+      className={cn("relative h-full overflow-y-auto outline-none", className)}
     >
       <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
         {virtualizer.getVirtualItems().map((v) => {
@@ -152,7 +166,11 @@ export function Tree<N extends TreeNode>(props: TreeProps<N>) {
               aria-label={n.label}
               onClick={() => onSelect(n.id)}
               onDoubleClick={() => onActivate(n.id)}
-              className={cn("absolute inset-x-0 flex items-center pr-2.5", selected ? "bg-selection" : "hover:bg-hover")}
+              className={cn(
+                "absolute inset-x-0 flex items-center pr-2.5",
+                selected ? "bg-selection" : "hover:bg-hover",
+                selected && focused && "outline outline-1 -outline-offset-1 outline-fg",
+              )}
               style={{ height: rowHeight, transform: `translateY(${v.start}px)`, paddingLeft: 6 + n.depth * INDENT }}
             >
               <span

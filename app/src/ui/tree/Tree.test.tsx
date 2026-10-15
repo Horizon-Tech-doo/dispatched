@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -54,6 +54,27 @@ describe("Tree", () => {
     expect(topics).toHaveAttribute("aria-expanded", "true");
     expect(within(tree).getByRole("treeitem", { name: "tracking-sync" })).toHaveAttribute("aria-level", "2");
     expect(within(tree).getByRole("treeitem", { name: "tracking-sync" })).not.toHaveAttribute("aria-expanded");
+  });
+
+  it("marks the active row with the focus outline only while the tree is focused", () => {
+    render(<Harness />);
+    const tree = screen.getByRole("tree");
+    expect(tree.className).toContain("outline-none");
+    expect(selected()?.className).not.toContain("outline-fg");
+    act(() => tree.focus());
+    expect(selected()?.className).toContain("outline-fg");
+    expect(screen.getAllByRole("treeitem").filter((r) => r.className.includes("outline-fg"))).toHaveLength(1);
+    act(() => tree.blur());
+    expect(selected()?.className).not.toContain("outline-fg");
+  });
+
+  it("shows the focus outline once a key is pressed, even when the tree was focused by the pointer", async () => {
+    render(<Harness />);
+    const tree = screen.getByRole("tree");
+    await userEvent.keyboard("{Tab}");
+    expect(tree).toHaveFocus();
+    await userEvent.keyboard("{ArrowDown}");
+    expect(selected()?.className).toContain("outline-fg");
   });
 
   it("moves with arrows and j/k, Home and End", async () => {
