@@ -195,8 +195,14 @@ pub struct FileExport {
 
 impl FileExport {
     /// Start an export to `path`. Fails at once when a regular file is there and
-    /// `overwrite` is off.
+    /// `overwrite` is off, or when `path` is a directory.
     pub fn create(path: &Path, format: ExportFormat, overwrite: bool) -> Result<Self> {
+        if path.is_dir() {
+            return Err(Error::Invalid(format!(
+                "{} is a directory; choose a file name inside it",
+                path.display()
+            )));
+        }
         if is_special(path) {
             let file = std::fs::OpenOptions::new()
                 .write(true)
@@ -298,8 +304,23 @@ impl FileExport {
     }
 }
 
+impl std::fmt::Debug for FileExport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileExport")
+            .field("target", &self.target)
+            .field("format", &self.format)
+            .field("written", &self.written)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Drop for FileExport {
     fn drop(&mut self) {
+        // An unfinished export: close the file without flushing the buffered tail (it would be
+        // written to an abandoned FIFO or device), then remove the temp file.
+        if let Some(w) = self.out.take() {
+            drop(w.into_parts());
+        }
         if let Some(tmp) = self.tmp.take() {
             let _ = std::fs::remove_file(tmp);
         }
@@ -773,9 +794,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("x.json");
         std::fs::write(&path, "old").unwrap();
-        let e = FileExport::create(&path, ExportFormat::Json, false)
-            .err()
-            .unwrap();
+        let e = FileExport::create(&path, ExportFormat::Json, false).unwrap_err();
         assert!(e.to_string().contains("already exists"), "{e}");
         let mut f = FileExport::create(&path, ExportFormat::Json, true).unwrap();
         f.write(&two()).unwrap();
@@ -865,10 +884,146 @@ mod tests {
             ExportFormat::Json,
             false,
         )
-        .err()
-        .unwrap();
+        .unwrap_err();
         let text = e.to_string();
         assert!(text.contains("check the output path"), "{text}");
         assert!(!text.contains('\u{2014}'));
+    }
+
+    #[test]
+    fn text_bodies_are_escaped_by_serde_not_sanitised() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut m = test_message(1);
+        m.body = MessageBody::Text("a\x1b[31m\u{202e}b".into());
+        for (format, name) in [
+            (ExportFormat::Ndjson, "t.ndjson"),
+            (ExportFormat::Json, "t.json"),
+        ] {
+            let path = dir.path().join(name);
+            let mut f = FileExport::create(&path, format, false).unwrap();
+            f.write(std::slice::from_ref(&m)).unwrap();
+            f.finish().unwrap();
+            let text = std::fs::read_to_string(&path).unwrap();
+            assert!(text.contains("\\u001b"), "{name}: {text}");
+            // Control characters are escaped; bidi marks are written as they are, not stripped.
+            assert!(!text.contains('\x1b'), "{name}");
+            let v: serde_json::Value = if format == ExportFormat::Json {
+                serde_json::from_str::<serde_json::Value>(&text).unwrap()[0].clone()
+            } else {
+                serde_json::from_str(text.lines().next().unwrap()).unwrap()
+            };
+            assert_eq!(v["body"]["value"], "a\x1b[31m\u{202e}b", "{name}");
+        }
+    }
+
+    #[test]
+    fn an_unfinished_export_to_a_new_path_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new.json");
+        {
+            let mut f = FileExport::create(&path, ExportFormat::Json, false).unwrap();
+            f.write(&two()).unwrap();
+        }
+        assert!(names(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn a_finished_export_leaves_only_the_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.json");
+        for overwrite in [false, true] {
+            let mut f = FileExport::create(&path, ExportFormat::Json, overwrite).unwrap();
+            f.write(&two()).unwrap();
+            f.finish().unwrap();
+            assert_eq!(names(dir.path()), ["out.json"], "overwrite={overwrite}");
+            if !overwrite {
+                std::fs::remove_file(&path).unwrap();
+            }
+        }
+    }
+
+    /// An export whose temp file cannot be written: a read-only handle makes every write fail.
+    fn failing_export(path: &Path, overwrite: bool) -> FileExport {
+        let tmp = temp_path(path);
+        File::create_new(&tmp).unwrap();
+        let file = File::open(&tmp).unwrap();
+        FileExport {
+            target: path.into(),
+            tmp: Some(tmp),
+            out: Some(BufWriter::new(file)),
+            format: ExportFormat::Json,
+            overwrite,
+            written: 0,
+        }
+    }
+
+    #[test]
+    fn a_failed_write_leaves_the_original_and_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.json");
+        std::fs::write(&path, "original").unwrap();
+        for overwrite in [false, true] {
+            // Fails when the buffer fills during `write`...
+            let mut f = failing_export(&path, overwrite);
+            let mut big = test_message(1);
+            big.body = MessageBody::Text("x".repeat(100_000));
+            let e = f.write(&[big]).unwrap_err();
+            assert!(e.to_string().contains("check the output path"), "{e}");
+            drop(f);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
+            assert_eq!(names(dir.path()), ["out.json"]);
+            // ...or when `finish` flushes the tail.
+            let mut f = failing_export(&path, overwrite);
+            f.write(&two()).unwrap();
+            let e = f.finish().unwrap_err();
+            assert!(e.to_string().contains("check the output path"), "{e}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
+            assert_eq!(names(dir.path()), ["out.json"]);
+        }
+    }
+
+    #[test]
+    fn a_directory_target_fails_at_create_with_or_without_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        for overwrite in [false, true] {
+            let e = FileExport::create(dir.path(), ExportFormat::Json, overwrite).unwrap_err();
+            assert!(e.to_string().contains("is a directory"), "{e}");
+        }
+        assert!(names(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn debug_shows_the_path_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = FileExport::create(&dir.path().join("d.json"), ExportFormat::Json, false).unwrap();
+        let text = format!("{f:?}");
+        assert!(
+            text.contains("d.json") && text.contains("FileExport"),
+            "{text}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_abandoned_fifo_export_does_not_flush_its_buffered_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe");
+        match std::process::Command::new("mkfifo").arg(&fifo).status() {
+            Ok(s) if s.success() => {}
+            _ => {
+                eprintln!("skipping: mkfifo is not available");
+                return;
+            }
+        }
+        let reader = {
+            let fifo = fifo.clone();
+            std::thread::spawn(move || std::fs::read_to_string(fifo).unwrap())
+        };
+        {
+            let mut f = FileExport::create(&fifo, ExportFormat::Ndjson, false).unwrap();
+            f.write(&two()).unwrap();
+            // dropped unfinished: the buffered lines must not reach the pipe
+        }
+        assert_eq!(reader.join().unwrap(), "");
     }
 }

@@ -10,8 +10,10 @@ pub use dispatched_core::namespace::known_entities;
 use dispatched_core::{
     Continuation, EntityCounts, EntityPath, Explorer, ExportFormat, ExportedMessage, FileExport,
     MessageBody, MessageFilter, Namespace, PeekOptions, PeekPage, PeekView, PeekedMessage,
-    QueueInfo, SubscriptionInfo, TopicInfo, continuation, stream_pages, write_messages,
+    QueueInfo, Streamed, SubscriptionInfo, TopicInfo, continuation, stream_pages, write_messages,
 };
+use horizon_azure_kit::safety::CancellationToken;
+use std::future::Future;
 use time::format_description::well_known::Rfc3339;
 
 /// The namespace the user selected. The sign-in (a keychain read) is only
@@ -640,6 +642,74 @@ pub fn check_complete(end: Continuation, written: usize) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A token that Ctrl-C cancels. A second Ctrl-C, while a page is still loading, ends the
+/// process at once.
+fn cancel_on_ctrl_c() -> CancellationToken {
+    let token = CancellationToken::new();
+    let t = token.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            t.cancel();
+            if tokio::signal::ctrl_c().await.is_ok() {
+                std::process::exit(130);
+            }
+        }
+    });
+    token
+}
+
+/// Core refuses to replace a file that appeared while the export ran; say how to allow it.
+fn finish_error(e: dispatched_core::Error, force: bool, out: &str) -> anyhow::Error {
+    match e {
+        dispatched_core::Error::Invalid(_) if !force => anyhow::anyhow!(exists_message(out)),
+        e => e.into(),
+    }
+}
+
+/// Stream the pages to `out` (`-` is stdout). A cancelled or failed export leaves no file and
+/// an existing `out` untouched.
+async fn export_stream<F, Fut>(
+    top: u32,
+    from_seq: i64,
+    out: &str,
+    format: ExportFormat,
+    force: bool,
+    cancel: &CancellationToken,
+    fetch: F,
+) -> anyhow::Result<Streamed>
+where
+    F: FnMut(i64, u32) -> Fut,
+    Fut: Future<Output = dispatched_core::Result<PeekPage>>,
+{
+    let top = Some(u64::from(top));
+    let streamed = if out == "-" {
+        let mut all = Vec::new();
+        let s = stream_pages(top, from_seq, Some(cancel), fetch, |m, _| {
+            all.extend(m);
+            Ok(())
+        })
+        .await;
+        s.and_then(|s| write_messages(std::io::stdout().lock(), &all, format).map(|_| s))
+            .map_err(anyhow::Error::from)
+    } else {
+        let mut file = FileExport::create(std::path::Path::new(out), format, force)?;
+        let s = stream_pages(top, from_seq, Some(cancel), fetch, |m, _| file.write(&m)).await;
+        match s {
+            Ok(s) => file
+                .finish()
+                .map(|_| s)
+                .map_err(|e| finish_error(e, force, out)),
+            Err(e) => Err(e.into()),
+        }
+    };
+    streamed.map_err(|e| match e.downcast_ref::<dispatched_core::Error>() {
+        Some(dispatched_core::Error::Cancelled) => {
+            anyhow::anyhow!("Export cancelled; nothing was written.")
+        }
+        _ => e,
+    })
+}
+
 pub async fn export(
     ctx: &Ctx,
     sel: &Selection<'_>,
@@ -652,26 +722,12 @@ pub async fn export(
     check_output(out, force)?;
     let q = Query::open(ctx, sel, args)?;
     let qr = &q;
-    let fetch = |from, max| {
+    let cancel = cancel_on_ctrl_c();
+    let result = export_stream(top, q.from_seq, out, format, force, &cancel, |from, max| {
         let opts = qr.options(max, from);
         async move { qr.explorer.peek(&qr.entity, qr.view, &opts).await }
-    };
-    let result = if out == "-" {
-        let mut all = Vec::new();
-        let s = stream_pages(Some(u64::from(top)), q.from_seq, None, fetch, |m, _| {
-            all.extend(m);
-            Ok(())
-        })
-        .await;
-        s.and_then(|s| write_messages(std::io::stdout().lock(), &all, format).map(|_| s))
-    } else {
-        let mut file = FileExport::create(std::path::Path::new(out), format, force)?;
-        let s = stream_pages(Some(u64::from(top)), q.from_seq, None, fetch, |m, _| {
-            file.write(&m)
-        })
-        .await;
-        s.and_then(|s| file.finish().map(|_| s))
-    };
+    })
+    .await;
     q.explorer.close().await;
     let s = result?;
     let n = s.written as usize;
@@ -999,6 +1055,119 @@ mod tests {
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(v.as_array().unwrap().len(), 2);
+    }
+
+    // --- export streaming ---
+
+    fn one_page(seqs: &[i64], next: Option<i64>, exhausted: bool) -> PeekPage {
+        PeekPage {
+            messages: seqs.iter().map(|s| msg(*s)).collect(),
+            scanned: seqs.len() as u32,
+            next_sequence: next,
+            exhausted,
+        }
+    }
+
+    fn dir_names(dir: &std::path::Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_export_says_so_and_leaves_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.json");
+        let cancel = CancellationToken::new();
+        let c = cancel.clone();
+        let mut calls = 0;
+        // The first page arrives, then Ctrl-C: the temp file must be gone, the target never made.
+        let e = export_stream(
+            10,
+            0,
+            path.to_str().unwrap(),
+            ExportFormat::Json,
+            false,
+            &cancel,
+            |_, _| {
+                calls += 1;
+                c.cancel();
+                async { Ok(one_page(&[1, 2], Some(3), false)) }
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.to_string(), "Export cancelled; nothing was written.");
+        assert_eq!(calls, 1);
+        assert!(dir_names(dir.path()).is_empty());
+        // An existing target stays as it was, with --force too.
+        std::fs::write(&path, "keep").unwrap();
+        let cancel = CancellationToken::new();
+        let c = cancel.clone();
+        let e = export_stream(
+            10,
+            0,
+            path.to_str().unwrap(),
+            ExportFormat::Json,
+            true,
+            &cancel,
+            |_, _| {
+                c.cancel();
+                async { Ok(one_page(&[1], Some(2), false)) }
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(e.to_string().contains("cancelled"), "{e}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep");
+        assert_eq!(dir_names(dir.path()), ["out.json"]);
+    }
+
+    #[tokio::test]
+    async fn a_file_that_appears_during_the_export_is_kept_and_the_error_names_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("race.json");
+        let p = path.clone();
+        let e = export_stream(
+            10,
+            0,
+            path.to_str().unwrap(),
+            ExportFormat::Json,
+            false,
+            &CancellationToken::new(),
+            |_, _| {
+                std::fs::write(&p, "theirs").unwrap();
+                async { Ok(one_page(&[1], None, true)) }
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(e.to_string().contains("--force"), "{e}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs");
+        assert_eq!(dir_names(dir.path()), ["race.json"]);
+    }
+
+    #[tokio::test]
+    async fn a_good_export_writes_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ok.ndjson");
+        let s = export_stream(
+            10,
+            0,
+            path.to_str().unwrap(),
+            ExportFormat::Ndjson,
+            false,
+            &CancellationToken::new(),
+            |_, _| async { Ok(one_page(&[1, 2], None, true)) },
+        )
+        .await
+        .unwrap();
+        assert_eq!((s.written, s.end), (2, Continuation::End));
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 2);
+        assert_eq!(dir_names(dir.path()), ["ok.ndjson"]);
     }
 
     // --- ls ---
