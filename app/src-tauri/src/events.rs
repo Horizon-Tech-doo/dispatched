@@ -112,7 +112,8 @@ fn now_rfc3339() -> String {
 }
 
 /// Run `work` and record one activity entry: `describe(&value)` on success,
-/// `failed` plus the error on failure.
+/// `failed` plus the error on failure. A cancelled operation is the user's choice,
+/// not a failure: it is recorded as its message ("Sign-in cancelled") with no error.
 pub async fn tracked<T>(
     ev: &dyn Events,
     failed: &str,
@@ -124,6 +125,7 @@ pub async fn tracked<T>(
     let duration_ms = started.elapsed().as_millis() as u64;
     let (action, error) = match &result {
         Ok(v) => (describe(v), None),
+        Err(e) if e.kind == "cancelled" => (e.message.trim_end_matches('.').to_string(), None),
         Err(e) => (
             failed.to_string(),
             Some(ActivityError {
@@ -176,6 +178,22 @@ mod tests {
             time::OffsetDateTime::parse(&log[0].at, &time::format_description::well_known::Rfc3339)
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_operation_is_recorded_without_an_error() {
+        let ev = Recorder::default();
+        let r: Result<(), CommandError> = tracked(
+            &ev,
+            "Sign-in failed",
+            async { Err(CommandError::new("cancelled", "Sign-in cancelled.")) },
+            |_| String::new(),
+        )
+        .await;
+        assert_eq!(r.unwrap_err().kind, "cancelled");
+        let log = ev.activity.lock().unwrap();
+        assert_eq!(log[0].action, "Sign-in cancelled");
+        assert!(log[0].error.is_none());
     }
 
     #[test]

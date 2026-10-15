@@ -1327,7 +1327,7 @@ mod tests {
             vec!["orders", "events/subscriptions/audit"]
         );
         let mut bad = cs_draft("Bad", Some(DCS));
-        bad.pinned_entities = vec!["a/b/c/d/e".into()];
+        bad.pinned_entities = vec!["a//b".into()];
         assert!(matches!(
             store.save_draft(&bad, &secrets, None).unwrap_err(),
             Error::Invalid(_)

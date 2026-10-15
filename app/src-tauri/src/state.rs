@@ -6,7 +6,7 @@ use horizon_azure_kit::AzureCloud;
 use horizon_azure_kit::auth::{EntraSession, SignIn};
 use horizon_azure_kit::secrets::{CredentialStore, OsKeychain};
 use std::sync::Arc;
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::{Mutex, Notify, RwLock};
 
 /// The connected profile and its explorer.
 #[derive(Clone)]
@@ -30,6 +30,9 @@ pub struct AppState {
     pub secrets: Arc<dyn CredentialStore>,
     pub session: Arc<EntraSession>,
     pub active: RwLock<Option<Active>>,
+    /// Serialises connect, disconnect and delete, so two quick connects can't interleave their
+    /// swap and close: the one that starts last finishes last and stays active.
+    pub connect_lock: Mutex<()>,
     /// Wakes a running `sign_in` so it returns `cancelled`.
     pub sign_in_cancel: Notify,
     /// Why the real database could not be opened, if it couldn't.
@@ -48,6 +51,7 @@ impl AppState {
             secrets,
             session,
             active: RwLock::new(None),
+            connect_lock: Mutex::new(()),
             sign_in_cancel: Notify::new(),
             startup_error: None,
         }
@@ -79,6 +83,20 @@ impl AppState {
             .await
             .clone()
             .ok_or_else(|| CommandError::new("not_connected", "Choose a connection first."))
+    }
+
+    /// The active connection, but only if it belongs to `profile_id`: a request made for a profile
+    /// the user has since switched away from must not list the new one under the old one's name.
+    pub async fn active_for(&self, profile_id: &str) -> Result<Active, CommandError> {
+        let active = self.active().await?;
+        if active.profile_id == profile_id {
+            Ok(active)
+        } else {
+            Err(CommandError::new(
+                "not_connected",
+                "Choose a connection first.",
+            ))
+        }
     }
 
     /// The current sign-in, cleared if its refresh token is gone.

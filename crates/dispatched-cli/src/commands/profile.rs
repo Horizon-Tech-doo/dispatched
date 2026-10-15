@@ -598,11 +598,7 @@ mod tests {
                 .pinned_entities,
             ["orders"]
         );
-        assert!(
-            run(&ctx, pin("a/b/c/d"), Format::Table, None)
-                .await
-                .is_err()
-        );
+        assert!(run(&ctx, pin("a//b"), Format::Table, None).await.is_err());
         run(
             &ctx,
             ProfileCmd::Unpin {

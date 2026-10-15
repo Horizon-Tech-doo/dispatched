@@ -32,6 +32,8 @@ pub async fn connect(
         ev,
         &format!("Connecting to {name} failed"),
         async {
+            // Held across the swap and the close of the previous explorer.
+            let _serial = state.connect_lock.lock().await;
             let ns = namespace_for_profile(state, &p)?;
             let view = ConnectionView {
                 profile_id: p.id.clone(),
@@ -62,6 +64,7 @@ pub async fn disconnect(state: &AppState, ev: &dyn Events) -> Result<(), Command
         ev,
         "Disconnecting failed",
         async {
+            let _serial = state.connect_lock.lock().await;
             // Take it out first so the write lock is not held while closing.
             let old = state.active.write().await.take();
             if let Some(old) = old {
@@ -120,6 +123,27 @@ mod tests {
         assert_eq!(e.kind, "not_signed_in");
         assert!(e.message.contains("sign in again"), "{}", e.message);
         assert!(s.active().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn concurrent_connects_leave_the_last_one_active() {
+        let s = state();
+        let ev = Recorder::default();
+        let a = s
+            .store
+            .add_connection_string("A", CS, s.secrets.as_ref(), false)
+            .unwrap();
+        let b = s
+            .store
+            .add_connection_string("B", &CS.replace("myns", "other"), s.secrets.as_ref(), false)
+            .unwrap();
+        let (ra, rb) = tokio::join!(connect(&s, &ev, &a.id), connect(&s, &ev, &b.id));
+        assert_eq!(ra.unwrap().profile_id, a.id);
+        assert_eq!(rb.unwrap().profile_id, b.id);
+        assert_eq!(s.active().await.unwrap().profile_id, b.id);
+        // Listing for the profile that is no longer active is refused.
+        assert_eq!(s.active_for(&a.id).await.unwrap_err().kind, "not_connected");
+        assert_eq!(s.active_for(&b.id).await.unwrap().profile_id, b.id);
     }
 
     #[tokio::test]

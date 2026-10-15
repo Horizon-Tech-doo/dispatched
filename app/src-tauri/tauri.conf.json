@@ -22,7 +22,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost"
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data:; connect-src ipc: http://ipc.localhost"
     }
   },
   "bundle": {
@@ -40,6 +40,9 @@
     "shortDescription": "Azure Service Bus explorer, agent-ready.",
     "longDescription": "Dispatched — a fast, cross-platform explorer for Azure Service Bus.",
     "publisher": "Horizon Tech d.o.o.",
+    "macOS": {
+      "minimumSystemVersion": "13.3"
+    },
     "windows": {
       "nsis": {
         "installMode": "currentUser"

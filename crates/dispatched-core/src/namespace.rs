@@ -110,18 +110,32 @@ impl EntityPath {
     }
 
     /// Parse `orders` or `events/subscriptions/all` (`Subscriptions` in any case).
+    ///
+    /// Queue and topic names may contain `/` (`orders/eu`); subscription names may not. So the
+    /// path splits on its last `/subscriptions/`: `orders/eu/subscriptions/audit` is subscription
+    /// `audit` of topic `orders/eu`, and a path without that segment is a queue.
     pub fn parse(input: &str) -> Result<Self> {
-        let parts: Vec<&str> = input.trim().trim_matches('/').split('/').collect();
-        match parts.as_slice() {
-            [q] if !q.is_empty() => Ok(Self::queue(q)),
-            [t, s, sub]
-                if s.eq_ignore_ascii_case("subscriptions") && !t.is_empty() && !sub.is_empty() =>
-            {
-                Ok(Self::subscription(t, sub))
-            }
-            _ => Err(Error::Invalid(format!(
+        let path = input.trim().trim_matches('/');
+        let invalid = || {
+            Error::Invalid(format!(
                 "`{input}` is not an entity; use `queue` or `topic/subscriptions/subscription`"
-            ))),
+            ))
+        };
+        let valid_name =
+            |name: &str| !name.is_empty() && name.split('/').all(|seg| !seg.is_empty());
+        const SEP: &str = "/subscriptions/";
+        // ASCII lowercasing keeps byte offsets, so the index applies to `path` as well.
+        match path.to_ascii_lowercase().rfind(SEP) {
+            Some(at) => {
+                let (topic, sub) = (&path[..at], &path[at + SEP.len()..]);
+                if valid_name(topic) && !sub.is_empty() && !sub.contains('/') {
+                    Ok(Self::subscription(topic, sub))
+                } else {
+                    Err(invalid())
+                }
+            }
+            None if valid_name(path) => Ok(Self::queue(path)),
+            None => Err(invalid()),
         }
     }
 
@@ -541,8 +555,22 @@ mod tests {
             s.address(SubQueue::TransferDeadLetter),
             "events/Subscriptions/all/$Transfer/$DeadLetterQueue"
         );
-        assert!(EntityPath::parse("a/b").is_err());
         assert!(EntityPath::parse("").is_err());
+        assert!(EntityPath::parse("a//b").is_err());
+        assert!(EntityPath::parse("t/subscriptions/a/b").is_err());
+    }
+
+    #[test]
+    fn entity_path_names_may_contain_slashes() {
+        let s = EntityPath::parse("orders/eu/subscriptions/audit").unwrap();
+        assert_eq!(s.entity, "orders/eu");
+        assert_eq!(s.subscription.as_deref(), Some("audit"));
+        let s = EntityPath::parse("a/Subscriptions/b/SUBSCRIPTIONS/c").unwrap();
+        assert_eq!(s.entity, "a/Subscriptions/b");
+        assert_eq!(s.subscription.as_deref(), Some("c"));
+        let q = EntityPath::parse("orders/eu").unwrap();
+        assert_eq!(q.entity, "orders/eu");
+        assert_eq!(q.subscription, None);
     }
 
     #[test]
@@ -636,7 +664,7 @@ mod tests {
         let pins = vec![
             "Orders".to_string(),
             "events/Subscriptions/all".to_string(),
-            "a/b/c/d".to_string(),
+            "a//b".to_string(),
         ];
         let k = known_entities(Some("orders"), &pins);
         let bases: Vec<String> = k.iter().map(EntityPath::base).collect();

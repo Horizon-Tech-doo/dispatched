@@ -106,6 +106,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_cancelled_sign_in_is_logged_as_cancelled_not_failed() {
+        let s = state();
+        let ev = crate::events::Recorder::default();
+        let pending = tracked(
+            &ev,
+            "Sign-in failed",
+            wait_or_cancel(&s, std::future::pending::<Result<SignIn, CommandError>>()),
+            |a| format!("Signed in as {}", a.user_principal),
+        );
+        let (r, ()) = tokio::join!(pending, async {
+            tokio::task::yield_now().await;
+            cancel(&s);
+        });
+        assert_eq!(r.unwrap_err().kind, "cancelled");
+        let log = ev.activity.lock().unwrap();
+        assert_eq!(log[0].action, "Sign-in cancelled");
+        assert!(log[0].error.is_none());
+    }
+
+    #[tokio::test]
     async fn cancel_ends_a_pending_sign_in() {
         let s = state();
         let ev = crate::events::Recorder::default();

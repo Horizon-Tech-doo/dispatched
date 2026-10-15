@@ -280,6 +280,19 @@ mod tests {
     }
 
     #[test]
+    fn missing_secret_error_names_the_phrase_the_ui_matches() {
+        // The app recognises this case by the words "no stored connection string": keep them.
+        let cs = ConnectionString::parse(
+            "Endpoint=sb://ns.servicebus.windows.net/;SharedAccessKeyName=k;SharedAccessKey=v",
+        )
+        .unwrap();
+        let p = Profile::connection_string("Orphan", &cs);
+        let e = namespace_for(&p, &MemoryStore::new(), &session(), None).unwrap_err();
+        assert!(matches!(e, Error::Invalid(_)));
+        assert!(e.to_string().contains("no stored connection string"), "{e}");
+    }
+
+    #[test]
     fn entra_profile_without_its_sign_in_says_so() {
         let p = Profile::entra("cloud", "ns.servicebus.windows.net", "oid-1", None);
         let e = namespace_for(&p, &MemoryStore::new(), &session(), None).unwrap_err();

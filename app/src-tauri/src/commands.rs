@@ -24,8 +24,9 @@ pub fn app_info(app: AppHandle, state: State<'_, AppState>) -> AppInfo {
     }
 }
 
+// Keychain and SQLite calls: async commands run off the main thread.
 #[tauri::command]
-pub fn settings_get(
+pub async fn settings_get(
     state: State<'_, AppState>,
     key: String,
 ) -> Result<Option<Value>, CommandError> {
@@ -33,7 +34,7 @@ pub fn settings_get(
 }
 
 #[tauri::command]
-pub fn settings_set(
+pub async fn settings_set(
     state: State<'_, AppState>,
     key: String,
     value: Option<Value>,
@@ -42,7 +43,7 @@ pub fn settings_set(
 }
 
 #[tauri::command]
-pub fn profiles_list(state: State<'_, AppState>) -> Result<Vec<Profile>, CommandError> {
+pub async fn profiles_list(state: State<'_, AppState>) -> Result<Vec<Profile>, CommandError> {
     ops::profiles::list(&state)
 }
 
@@ -81,7 +82,9 @@ use dispatched_core::{
 };
 
 #[tauri::command]
-pub fn account_current(state: State<'_, AppState>) -> Result<Option<AccountView>, CommandError> {
+pub async fn account_current(
+    state: State<'_, AppState>,
+) -> Result<Option<AccountView>, CommandError> {
     ops::account::current(&state)
 }
 
@@ -118,17 +121,19 @@ pub async fn disconnect(app: AppHandle, state: State<'_, AppState>) -> Result<()
 pub async fn list_entities(
     app: AppHandle,
     state: State<'_, AppState>,
+    profile_id: String,
 ) -> Result<EntityListing, CommandError> {
-    ops::tree::list_entities(&state, &TauriEvents(app)).await
+    ops::tree::list_entities(&state, &TauriEvents(app), &profile_id).await
 }
 
 #[tauri::command]
 pub async fn list_subscriptions(
     app: AppHandle,
     state: State<'_, AppState>,
+    profile_id: String,
     topic: String,
 ) -> Result<Vec<SubscriptionInfo>, CommandError> {
-    ops::tree::list_subscriptions(&state, &TauriEvents(app), &topic).await
+    ops::tree::list_subscriptions(&state, &TauriEvents(app), &profile_id, &topic).await
 }
 
 /// Kept from M0 for M1c's message views.

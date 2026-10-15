@@ -16,7 +16,7 @@ pub async fn save(
 ) -> Result<Profile, CommandError> {
     tracked(
         ev,
-        "Saving the profile failed",
+        "Saving the connection failed",
         async {
             let sign_in = match draft.auth {
                 dispatched_core::profiles::DraftAuth::Entra { .. } => state.current_sign_in()?,
@@ -26,7 +26,7 @@ pub async fn save(
                 .store
                 .save_draft(&draft, state.secrets.as_ref(), sign_in.as_ref())?)
         },
-        |p| format!("Saved profile {}", p.name),
+        |p| format!("Saved connection {}", p.name),
     )
     .await
 }
@@ -39,15 +39,20 @@ pub async fn delete(state: &AppState, ev: &dyn Events, id: &str) -> Result<(), C
     let name = profile.name.clone();
     tracked(
         ev,
-        "Removing the profile failed",
+        "Removing the connection failed",
         async {
-            let was_active = state
-                .active
-                .read()
-                .await
-                .as_ref()
-                .is_some_and(|a| a.profile_id == id);
-            if was_active && let Some(old) = state.active.write().await.take() {
+            // No connect may start or finish while the profile goes away.
+            let _serial = state.connect_lock.lock().await;
+            // Check and take under one write lock, so only this profile's connection is closed.
+            let old = {
+                let mut active = state.active.write().await;
+                if active.as_ref().is_some_and(|a| a.profile_id == id) {
+                    active.take()
+                } else {
+                    None
+                }
+            };
+            if let Some(old) = old {
                 old.explorer.close().await;
             }
             state.store.delete(&profile.name, state.secrets.as_ref())?;
@@ -56,7 +61,7 @@ pub async fn delete(state: &AppState, ev: &dyn Events, id: &str) -> Result<(), C
                 .clear_app_settings_with_prefix(&format!("shell:{id}"))?;
             Ok(())
         },
-        |_| format!("Removed profile {name}"),
+        |_| format!("Removed connection {name}"),
     )
     .await
 }
@@ -160,7 +165,7 @@ mod tests {
                 .contains(SECRET_PART)
         );
         let log = serde_json::to_string(&*ev.activity.lock().unwrap()).unwrap();
-        assert!(log.contains("Saved profile Logistics"), "{log}");
+        assert!(log.contains("Saved connection Logistics"), "{log}");
         assert!(!log.contains(SECRET_PART), "{log}");
     }
 
@@ -172,7 +177,7 @@ mod tests {
         let e = save(&s, &ev, draft("x", Some(bad))).await.unwrap_err();
         assert!(!e.message.contains("TOPSECRET"));
         let log = serde_json::to_string(&*ev.activity.lock().unwrap()).unwrap();
-        assert!(log.contains("Saving the profile failed"), "{log}");
+        assert!(log.contains("Saving the connection failed"), "{log}");
         assert!(!log.contains("TOPSECRET"), "{log}");
     }
 
@@ -200,6 +205,23 @@ mod tests {
                 .is_none()
         );
         assert!(s.store.app_setting("ui").unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn delete_closes_only_its_own_connection() {
+        let s = state();
+        let ev = Recorder::default();
+        let a = save(&s, &ev, draft("A", Some(CS))).await.unwrap();
+        let b = save(&s, &ev, draft("B", Some(CS))).await.unwrap();
+        crate::ops::connection::connect(&s, &ev, &b.id)
+            .await
+            .unwrap();
+        delete(&s, &ev, &a.id).await.unwrap();
+        assert_eq!(s.active().await.unwrap().profile_id, b.id);
+        delete(&s, &ev, &b.id).await.unwrap();
+        assert_eq!(s.active().await.unwrap_err().kind, "not_connected");
+        let log = serde_json::to_string(&*ev.activity.lock().unwrap()).unwrap();
+        assert!(log.contains("Removed connection A"), "{log}");
     }
 
     #[tokio::test]

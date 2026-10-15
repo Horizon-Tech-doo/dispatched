@@ -51,11 +51,33 @@ pub fn listing_from(
     }
 }
 
+/// `1 queue`, `4 queues`.
+pub(crate) fn count(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// The activity line for a listing.
+fn listed(l: &EntityListing) -> String {
+    match &l.limited {
+        None => format!(
+            "Listed {} and {}",
+            count(l.queues.len(), "queue", "queues"),
+            count(l.topics.len(), "topic", "topics")
+        ),
+        Some(_) => format!(
+            "Listing not allowed; showing {}",
+            count(l.known.len(), "pinned entity", "pinned entities")
+        ),
+    }
+}
+
+/// Lists the namespace of `profile_id`, which must be the connected profile.
 pub async fn list_entities(
     state: &AppState,
     ev: &dyn Events,
+    profile_id: &str,
 ) -> Result<EntityListing, CommandError> {
-    let active = state.active().await?;
+    let active = state.active_for(profile_id).await?;
     let pins = state
         .store
         .get_by_id(&active.profile_id)?
@@ -69,32 +91,29 @@ pub async fn list_entities(
             let result = tokio::try_join!(ex.list_queues(), ex.list_topics());
             listing_from(result, ex.namespace().entity_path(), &pins)
         },
-        |l| match &l.limited {
-            None => format!(
-                "Listed {} queues and {} topics",
-                l.queues.len(),
-                l.topics.len()
-            ),
-            Some(_) => format!(
-                "Listing not allowed; showing {} pinned entities",
-                l.known.len()
-            ),
-        },
+        listed,
     )
     .await
 }
 
+/// Lists a topic's subscriptions in `profile_id`, which must be the connected profile.
 pub async fn list_subscriptions(
     state: &AppState,
     ev: &dyn Events,
+    profile_id: &str,
     topic: &str,
 ) -> Result<Vec<SubscriptionInfo>, CommandError> {
-    let active = state.active().await?;
+    let active = state.active_for(profile_id).await?;
     tracked(
         ev,
         &format!("Listing subscriptions of {topic} failed"),
         async { Ok(active.explorer.list_subscriptions(topic).await?) },
-        |subs| format!("Listed {} subscriptions of {topic}", subs.len()),
+        |subs| {
+            format!(
+                "Listed {} of {topic}",
+                count(subs.len(), "subscription", "subscriptions")
+            )
+        },
     )
     .await
 }
@@ -150,6 +169,54 @@ mod tests {
         let l = listing_from(forbidden, None, &[]).unwrap();
         assert!(l.known.is_empty());
         assert!(l.limited.unwrap().contains("pin"));
+    }
+
+    #[test]
+    fn activity_lines_use_real_plurals() {
+        let mut l = listing_from(Ok((vec![queue("orders")], vec![])), None, &[]).unwrap();
+        assert_eq!(listed(&l), "Listed 1 queue and 0 topics");
+        l.queues.push(queue("returns"));
+        assert_eq!(listed(&l), "Listed 2 queues and 0 topics");
+        let one_pin = listing_from(
+            Err(Error::Forbidden {
+                needed: None,
+                detail: "no".into(),
+            }),
+            Some("orders"),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            listed(&one_pin),
+            "Listing not allowed; showing 1 pinned entity"
+        );
+        assert_eq!(count(1, "subscription", "subscriptions"), "1 subscription");
+        assert_eq!(count(3, "subscription", "subscriptions"), "3 subscriptions");
+    }
+
+    #[tokio::test]
+    async fn listing_another_profile_than_the_connected_one_is_not_connected() {
+        use crate::events::Recorder;
+        use crate::ops::connection::connect;
+        use crate::ops::test_util::{CS, state};
+        let s = state();
+        let ev = Recorder::default();
+        let p = s
+            .store
+            .add_connection_string("A", CS, s.secrets.as_ref(), false)
+            .unwrap();
+        // Nothing connected yet.
+        let e = list_entities(&s, &ev, &p.id).await.unwrap_err();
+        assert_eq!(e.kind, "not_connected");
+        assert_eq!(e.message, "Choose a connection first.");
+        connect(&s, &ev, &p.id).await.unwrap();
+        // Connected, but the request names a different profile.
+        let e = list_entities(&s, &ev, "someone-else").await.unwrap_err();
+        assert_eq!(e.kind, "not_connected");
+        let e = list_subscriptions(&s, &ev, "someone-else", "events")
+            .await
+            .unwrap_err();
+        assert_eq!(e.kind, "not_connected");
     }
 
     #[test]
