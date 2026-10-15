@@ -15,6 +15,7 @@ pub mod filter;
 pub mod messaging;
 pub mod mgmt;
 pub mod namespace;
+pub mod paths;
 pub mod profiles;
 pub mod tokens;
 

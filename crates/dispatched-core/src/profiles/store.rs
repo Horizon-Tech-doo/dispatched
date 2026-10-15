@@ -1,8 +1,8 @@
 //! SQLite storage for profiles, sign-ins and settings. Secrets never go here.
 
-use super::{Profile, ProfileAuth, secret_key};
+use super::{DraftAuth, Profile, ProfileAuth, ProfileDraft, namespace_host, secret_key};
 use crate::connstr::ConnectionString;
-use crate::namespace::{ProxyConfig, Transport};
+use crate::namespace::{EntityPath, ProxyConfig, Transport};
 use crate::{Error, Result};
 use horizon_azure_kit::auth::SignIn;
 use horizon_azure_kit::secrets::CredentialStore;
@@ -134,6 +134,18 @@ impl ProfileStore {
         .map_err(|e| self.row_err(e))
     }
 
+    /// The profile with this id.
+    pub fn get_by_id(&self, id: &str) -> Result<Option<Profile>> {
+        let conn = self.conn.lock().expect("profile db poisoned");
+        conn.query_row(
+            &format!("{SELECT_PROFILE} WHERE id = ?1"),
+            params![id],
+            row_to_profile,
+        )
+        .optional()
+        .map_err(|e| self.row_err(e))
+    }
+
     /// Insert a new profile; the name must be unused (case-insensitive).
     pub fn insert(&self, p: &Profile) -> Result<()> {
         let name = clean_name(&p.name)?;
@@ -212,6 +224,137 @@ impl ProfileStore {
         Ok(profile)
     }
 
+    /// Create or edit a profile from a UI draft (see [`ProfileDraft`]).
+    /// `sign_in` is the sign-in an Entra profile binds to: required to create one; when editing, `Some`
+    /// rebinds the profile to it and `None` keeps the sign-in it has. The caller decides which sign-in
+    /// that is (the app never hands over another account's).
+    pub fn save_draft(
+        &self,
+        draft: &ProfileDraft,
+        secrets: &dyn CredentialStore,
+        sign_in: Option<&SignIn>,
+    ) -> Result<Profile> {
+        let pins = clean_pins(&draft.pinned_entities)?;
+        match &draft.id {
+            None => self.create_from_draft(draft, pins, secrets, sign_in),
+            Some(id) => self.edit_from_draft(id, draft, pins, secrets, sign_in),
+        }
+    }
+
+    fn create_from_draft(
+        &self,
+        draft: &ProfileDraft,
+        pins: Vec<String>,
+        secrets: &dyn CredentialStore,
+        current_sign_in: Option<&SignIn>,
+    ) -> Result<Profile> {
+        match &draft.auth {
+            DraftAuth::ConnectionString { connection_string } => {
+                let text = non_blank(connection_string.as_deref()).ok_or_else(|| {
+                    Error::Invalid("paste the namespace's connection string".into())
+                })?;
+                let cs = ConnectionString::parse(text)?;
+                let mut p = Profile::connection_string(&draft.name, &cs);
+                let from_cs = std::mem::take(&mut p.pinned_entities);
+                apply_draft_options(&mut p, draft, merge_pins(from_cs, pins));
+                check_emulator_options(&p)?;
+                self.insert(&p)?;
+                if let Err(e) =
+                    secrets.put(&secret_key(&p.id), &SecretString::from(text.to_string()))
+                {
+                    self.delete_row(&p.id);
+                    return Err(e.into());
+                }
+                Ok(p)
+            }
+            DraftAuth::Entra { namespace, tenant } => {
+                let sign_in = current_sign_in.ok_or_else(|| {
+                    Error::NotSignedIn("sign in with Entra ID first, then add the profile".into())
+                })?;
+                let host = namespace_host(namespace)?;
+                let tenant = normalize_tenant(tenant.as_deref(), Some(&sign_in.tenant_id));
+                let mut p = Profile::entra(&draft.name, &host, &sign_in.id, tenant.as_deref());
+                apply_draft_options(&mut p, draft, pins);
+                self.save_sign_in(sign_in)?;
+                self.insert(&p)?;
+                Ok(p)
+            }
+        }
+    }
+
+    fn edit_from_draft(
+        &self,
+        id: &str,
+        draft: &ProfileDraft,
+        pins: Vec<String>,
+        secrets: &dyn CredentialStore,
+        sign_in: Option<&SignIn>,
+    ) -> Result<Profile> {
+        let mut p = self
+            .get_by_id(id)?
+            .ok_or_else(|| Error::NotFound(format!("profile {id}")))?;
+        match (&draft.auth, &p.auth) {
+            (DraftAuth::ConnectionString { connection_string }, ProfileAuth::ConnectionString) => {
+                if let Some(text) = non_blank(connection_string.as_deref()) {
+                    let cs = ConnectionString::parse(text)?;
+                    p.host = cs.host.clone();
+                    p.emulator = cs.use_development_emulator;
+                    apply_draft_options(
+                        &mut p,
+                        draft,
+                        merge_pins(cs.entity_path.into_iter().collect(), pins),
+                    );
+                    check_emulator_options(&p)?;
+                    let key = secret_key(&p.id);
+                    let previous = secrets.get(&key)?;
+                    secrets.put(&key, &SecretString::from(text.to_string()))?;
+                    if let Err(e) = self.update(&p) {
+                        let _ = match previous {
+                            Some(old) => secrets.put(&key, &old),
+                            None => secrets.delete(&key),
+                        };
+                        return Err(e);
+                    }
+                    return Ok(p);
+                }
+            }
+            (DraftAuth::Entra { namespace, tenant }, ProfileAuth::Entra { sign_in_id, .. }) => {
+                p.host = namespace_host(namespace)?;
+                let bound = match sign_in {
+                    Some(s) => {
+                        self.save_sign_in(s)?;
+                        Some(s.clone())
+                    }
+                    None => self.sign_in(sign_in_id)?,
+                };
+                p.auth = ProfileAuth::Entra {
+                    sign_in_id: bound
+                        .as_ref()
+                        .map_or_else(|| sign_in_id.clone(), |s| s.id.clone()),
+                    tenant: normalize_tenant(
+                        tenant.as_deref(),
+                        bound.as_ref().map(|s| s.tenant_id.as_str()),
+                    ),
+                };
+            }
+            _ => {
+                return Err(Error::Invalid(
+                    "a profile's sign-in method can't be changed; add a new profile instead".into(),
+                ));
+            }
+        }
+        apply_draft_options(&mut p, draft, pins);
+        check_emulator_options(&p)?;
+        self.update(&p)?;
+        Ok(p)
+    }
+
+    /// Remove a profile row only (rollback helper; the secret is handled by the caller).
+    fn delete_row(&self, id: &str) {
+        let conn = self.conn.lock().expect("profile db poisoned");
+        let _ = conn.execute("DELETE FROM profiles WHERE id = ?1", params![id]);
+    }
+
     /// Delete a profile and its secret. Returns whether it existed.
     pub fn delete(&self, name: &str, secrets: &dyn CredentialStore) -> Result<bool> {
         let name = name.trim();
@@ -260,6 +403,29 @@ impl ProfileStore {
             |r| r.get(0),
         )
         .optional()
+        .map_err(|e| self.err(e))
+    }
+
+    /// An app setting (desktop UI state). App keys live under `app.` so they
+    /// can never read or overwrite the store's own keys.
+    pub fn app_setting(&self, key: &str) -> Result<Option<String>> {
+        self.setting(&app_key(key)?)
+    }
+
+    /// Set or clear (`None`) an app setting.
+    pub fn set_app_setting(&self, key: &str, value: Option<&str>) -> Result<()> {
+        self.set_setting(&app_key(key)?, value)
+    }
+
+    /// Remove every app setting whose key starts with `prefix`. Returns how many.
+    pub fn clear_app_settings_with_prefix(&self, prefix: &str) -> Result<usize> {
+        let full = app_key(prefix)?;
+        let conn = self.conn.lock().expect("profile db poisoned");
+        // substr instead of LIKE: `_` and `%` in keys must match literally.
+        conn.execute(
+            "DELETE FROM settings WHERE substr(key, 1, ?2) = ?1",
+            params![full, full.chars().count() as i64],
+        )
         .map_err(|e| self.err(e))
     }
 
@@ -316,6 +482,27 @@ impl ProfileStore {
         record
             .map(|r| serde_json::from_str(&r).map_err(|e| self.err(e)))
             .transpose()
+    }
+
+    /// Every remembered sign-in whose own tenant is `tenant_id` (ids compare without regard to case),
+    /// ordered by sign-in id. A guest-tenant sign-in is its own record, separate from the home one.
+    /// The caller picks the one whose refresh token still exists. A record that can't be read is
+    /// skipped, so one damaged row does not break every lookup.
+    pub fn sign_ins_for_tenant(&self, tenant_id: &str) -> Result<Vec<SignIn>> {
+        let conn = self.conn.lock().expect("profile db poisoned");
+        let mut stmt = conn
+            .prepare("SELECT record FROM sign_ins ORDER BY id")
+            .map_err(|e| self.err(e))?;
+        let records = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| self.err(e))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| self.err(e))?;
+        Ok(records
+            .iter()
+            .filter_map(|r| serde_json::from_str::<SignIn>(r).ok())
+            .filter(|s| s.tenant_id.eq_ignore_ascii_case(tenant_id))
+            .collect())
     }
 
     /// Forget a sign-in record.
@@ -398,6 +585,60 @@ impl std::fmt::Display for CorruptProfile {
 }
 
 impl std::error::Error for CorruptProfile {}
+
+/// The tenant a profile stores: trimmed, a GUID in lowercase, and `None` when blank or when it is the
+/// bound sign-in's own (home) tenant, compared without regard to case.
+pub fn normalize_tenant(tenant: Option<&str>, home_tenant: Option<&str>) -> Option<String> {
+    let t = non_blank(tenant)?;
+    if home_tenant.is_some_and(|h| h.eq_ignore_ascii_case(t)) {
+        return None;
+    }
+    Some(if uuid::Uuid::parse_str(t).is_ok() {
+        t.to_ascii_lowercase()
+    } else {
+        t.to_string()
+    })
+}
+
+fn non_blank(s: Option<&str>) -> Option<&str> {
+    s.map(str::trim).filter(|s| !s.is_empty())
+}
+
+fn clean_pins(raw: &[String]) -> Result<Vec<String>> {
+    raw.iter()
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .map(|p| EntityPath::parse(p).map(|_| p.to_string()))
+        .collect()
+}
+
+fn merge_pins(first: Vec<String>, rest: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for p in first.into_iter().chain(rest) {
+        if !out.iter().any(|o| o.eq_ignore_ascii_case(&p)) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+fn apply_draft_options(p: &mut Profile, d: &ProfileDraft, pins: Vec<String>) {
+    p.name = d.name.trim().to_string();
+    p.production = d.production;
+    p.color = non_blank(d.color.as_deref()).map(str::to_string);
+    p.transport = d.transport;
+    p.proxy = non_blank(d.proxy.as_deref()).map(str::to_string);
+    p.pinned_entities = pins;
+}
+
+fn check_emulator_options(p: &Profile) -> Result<()> {
+    if p.emulator && (p.transport == Transport::WebSockets || p.proxy.is_some()) {
+        return Err(Error::Unsupported {
+            capability: "WebSockets and proxies on the Service Bus Emulator".into(),
+        });
+    }
+    Ok(())
+}
 
 fn row_to_profile(r: &rusqlite::Row<'_>) -> rusqlite::Result<Profile> {
     let id: String = r.get(0)?;
@@ -482,6 +723,23 @@ fn transport_text(t: Transport) -> &'static str {
         Transport::Amqp => "amqp",
         Transport::WebSockets => "websockets",
     }
+}
+
+const APP_KEY_PREFIX: &str = "app.";
+const APP_KEY_MAX: usize = 200;
+
+fn app_key(key: &str) -> Result<String> {
+    let ok = !key.is_empty()
+        && key.len() <= APP_KEY_MAX
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'));
+    if !ok {
+        return Err(Error::Invalid(format!(
+            "invalid setting key (use 1-{APP_KEY_MAX} letters, digits, `.`, `_`, `:` or `-`)"
+        )));
+    }
+    Ok(format!("{APP_KEY_PREFIX}{key}"))
 }
 
 fn db_err(path: &Path, e: impl std::fmt::Display) -> Error {
@@ -706,6 +964,138 @@ mod tests {
     }
 
     #[test]
+    fn sign_ins_are_found_by_their_own_tenant() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        let mut home = sign_in("home-oid");
+        home.tenant_id = "tenant-home".into();
+        let mut guest = sign_in("guest-oid");
+        guest.tenant_id = "TENANT-GUEST".into();
+        let mut guest2 = sign_in("a-guest-oid");
+        guest2.tenant_id = "tenant-guest".into();
+        for s in [&home, &guest, &guest2] {
+            store.save_sign_in(s).unwrap();
+        }
+        let ids_in = |t: &str| -> Vec<String> {
+            store
+                .sign_ins_for_tenant(t)
+                .unwrap()
+                .into_iter()
+                .map(|s| s.id)
+                .collect()
+        };
+        assert_eq!(ids_in("tenant-home"), ["home-oid"]);
+        // Case-insensitive, and every match comes back in id order.
+        let ids: Vec<_> = store
+            .sign_ins_for_tenant("Tenant-Guest")
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(ids, ["a-guest-oid", "guest-oid"]);
+        assert!(ids_in("nobody").is_empty());
+        assert!(store.sign_ins_for_tenant("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_unreadable_sign_in_row_is_skipped_not_fatal() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        let mut good = sign_in("good-oid");
+        good.tenant_id = "tenant-x".into();
+        store.save_sign_in(&good).unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO sign_ins (id, record) VALUES ('bad', 'not json')",
+                [],
+            )
+            .unwrap();
+        let found = store.sign_ins_for_tenant("tenant-x").unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, "good-oid");
+    }
+
+    #[test]
+    fn tenants_are_stored_lowercase_and_the_home_tenant_as_none() {
+        const GUID: &str = "6F1B2C3D-4E5F-4A6B-8C7D-9E0F1A2B3C4D";
+        assert_eq!(
+            normalize_tenant(Some(&format!(" {GUID} ")), Some("tenant-home")).as_deref(),
+            Some(GUID.to_ascii_lowercase().as_str())
+        );
+        // Domains keep what was typed; the home tenant in any case is no tenant.
+        assert_eq!(
+            normalize_tenant(Some("contoso.onmicrosoft.com"), None).as_deref(),
+            Some("contoso.onmicrosoft.com")
+        );
+        assert_eq!(
+            normalize_tenant(Some(GUID), Some(&GUID.to_ascii_lowercase())),
+            None
+        );
+        assert_eq!(normalize_tenant(Some("  "), None), None);
+        // Saving goes through it, for a new profile and an edit.
+        let store = ProfileStore::open_in_memory().unwrap();
+        let secrets = MemoryStore::new();
+        let mut home = draft_sign_in();
+        home.tenant_id = GUID.to_ascii_lowercase();
+        let mut d = cs_draft("E", None);
+        d.auth = DraftAuth::Entra {
+            namespace: "myns".into(),
+            tenant: Some(GUID.into()),
+        };
+        let p = store.save_draft(&d, &secrets, Some(&home)).unwrap();
+        assert!(
+            matches!(&p.auth, ProfileAuth::Entra { tenant: None, .. }),
+            "{:?}",
+            p.auth
+        );
+        let mut edit = d.clone();
+        edit.id = Some(p.id.clone());
+        edit.auth = DraftAuth::Entra {
+            namespace: "myns".into(),
+            tenant: Some("0A1B2C3D-4E5F-4A6B-8C7D-9E0F1A2B3C4D".into()),
+        };
+        let p = store.save_draft(&edit, &secrets, None).unwrap();
+        assert!(
+            matches!(&p.auth, ProfileAuth::Entra { tenant: Some(t), .. } if t == "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"),
+            "{:?}",
+            p.auth
+        );
+    }
+
+    #[test]
+    fn editing_an_entra_profile_rebinds_only_when_given_a_sign_in() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        let secrets = MemoryStore::new();
+        let mut d = cs_draft("E", None);
+        d.auth = DraftAuth::Entra {
+            namespace: "myns".into(),
+            tenant: Some("tenant-guest".into()),
+        };
+        let first = draft_sign_in();
+        let p = store.save_draft(&d, &secrets, Some(&first)).unwrap();
+        let mut edit = d.clone();
+        edit.id = Some(p.id.clone());
+        let kept = store.save_draft(&edit, &secrets, None).unwrap();
+        assert!(
+            matches!(&kept.auth, ProfileAuth::Entra { sign_in_id, .. } if *sign_in_id == first.id)
+        );
+        let mut guest = draft_sign_in();
+        guest.id = "guest-oid".into();
+        guest.tenant_id = "tenant-guest".into();
+        let rebound = store.save_draft(&edit, &secrets, Some(&guest)).unwrap();
+        // Bound to the tenant's own sign-in, whose home is that tenant: no tenant to ask for.
+        assert_eq!(
+            rebound.auth,
+            ProfileAuth::Entra {
+                sign_in_id: "guest-oid".into(),
+                tenant: None
+            }
+        );
+        assert!(store.sign_in("guest-oid").unwrap().is_some());
+    }
+
+    #[test]
     fn stale_state_file_does_not_override_current_sign_in() {
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().join("cli-state.json");
@@ -836,5 +1226,306 @@ mod tests {
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].name, "other");
         assert!(store.default_profile().unwrap().is_none());
+    }
+
+    fn entra_profile(store: &ProfileStore, name: &str) -> Profile {
+        let p = Profile::entra(name, "myns.servicebus.windows.net", "sign-in-1", None);
+        store.insert(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn get_by_id_finds_and_misses() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        let p = entra_profile(&store, "Logistics");
+        assert_eq!(store.get_by_id(&p.id).unwrap().unwrap().name, "Logistics");
+        assert!(store.get_by_id("nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn app_settings_round_trip_and_clear() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        assert!(store.app_setting("ui").unwrap().is_none());
+        store
+            .set_app_setting("ui", Some(r#"{"theme":"dark"}"#))
+            .unwrap();
+        assert_eq!(
+            store.app_setting("ui").unwrap().as_deref(),
+            Some(r#"{"theme":"dark"}"#)
+        );
+        store.set_app_setting("ui", None).unwrap();
+        assert!(store.app_setting("ui").unwrap().is_none());
+    }
+
+    #[test]
+    fn app_keys_cannot_reach_internal_keys() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        let p = entra_profile(&store, "Logistics");
+        store.set_default(Some("Logistics")).unwrap();
+        // The internal key is invisible through the app API...
+        assert!(store.app_setting("default_profile").unwrap().is_none());
+        // ...and writing the same name through it does not touch the internal one.
+        store.set_app_setting("default_profile", Some("x")).unwrap();
+        assert_eq!(store.default_profile().unwrap().unwrap().id, p.id);
+    }
+
+    #[test]
+    fn invalid_app_keys_are_rejected() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        for bad in ["", "has space", "semi;colon", &"k".repeat(201)] {
+            let e = store.set_app_setting(bad, Some("1")).unwrap_err();
+            assert!(e.to_string().contains("setting key"), "{bad}: {e}");
+        }
+    }
+
+    #[test]
+    fn clear_app_settings_with_prefix_only_removes_matching() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        store.set_app_setting("shell:a_1", Some("1")).unwrap();
+        store.set_app_setting("shell:a_1.extra", Some("2")).unwrap();
+        store.set_app_setting("shell:ab1", Some("3")).unwrap();
+        store.set_app_setting("ui", Some("4")).unwrap();
+        // `_` must not act as a wildcard.
+        assert_eq!(
+            store.clear_app_settings_with_prefix("shell:a_1").unwrap(),
+            2
+        );
+        assert!(store.app_setting("shell:a_1").unwrap().is_none());
+        assert_eq!(
+            store.app_setting("shell:ab1").unwrap().as_deref(),
+            Some("3")
+        );
+        assert_eq!(store.app_setting("ui").unwrap().as_deref(), Some("4"));
+    }
+
+    use crate::profiles::{DraftAuth, ProfileDraft};
+    use horizon_azure_kit::AzureCloud;
+    use horizon_azure_kit::secrets::CredentialStore;
+
+    const DCS: &str = "Endpoint=sb://myns.servicebus.windows.net/;SharedAccessKeyName=reader;SharedAccessKey=c2VjcmV0LWtleQ==";
+    const DCS2: &str = "Endpoint=sb://other.servicebus.windows.net/;SharedAccessKeyName=reader;SharedAccessKey=bmV3LWtleQ==";
+    const EMU: &str = "Endpoint=sb://localhost;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;";
+
+    fn cs_draft(name: &str, cs: Option<&str>) -> ProfileDraft {
+        ProfileDraft {
+            id: None,
+            name: name.into(),
+            auth: DraftAuth::ConnectionString {
+                connection_string: cs.map(str::to_string),
+            },
+            production: false,
+            color: None,
+            transport: Transport::Amqp,
+            proxy: None,
+            pinned_entities: vec![],
+        }
+    }
+
+    fn draft_sign_in() -> SignIn {
+        SignIn {
+            id: "oid-1".into(),
+            user_principal: "ops@contoso.example".into(),
+            tenant_id: "tenant-1".into(),
+            display_name: None,
+            cloud: AzureCloud::Public,
+        }
+    }
+
+    fn stored(secrets: &MemoryStore, p: &Profile) -> Option<String> {
+        secrets
+            .get(&secret_key(&p.id))
+            .unwrap()
+            .map(|s| s.expose_secret().to_string())
+    }
+
+    #[test]
+    fn draft_secret_never_reaches_the_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dispatched.db");
+        let store = ProfileStore::open(&path).unwrap();
+        let secrets = MemoryStore::new();
+        let mut d = cs_draft("Logistics", Some(DCS));
+        d.production = true;
+        d.color = Some("  amber ".into());
+        let p = store.save_draft(&d, &secrets, None).unwrap();
+        assert_eq!(p.host, "myns.servicebus.windows.net");
+        assert!(p.production);
+        assert_eq!(p.color.as_deref(), Some("amber"));
+        assert_eq!(stored(&secrets, &p).as_deref(), Some(DCS));
+        drop(store);
+        let bytes = std::fs::read(&path).unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(!text.contains("c2VjcmV0LWtleQ"), "secret written to the DB");
+    }
+
+    #[test]
+    fn create_needs_a_connection_string() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        let e = store
+            .save_draft(&cs_draft("x", Some("  ")), &MemoryStore::new(), None)
+            .unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("paste the namespace's connection string"),
+            "{e}"
+        );
+        assert!(store.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn bad_connection_string_error_does_not_echo_it() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        let bad = "Endpoint=sb://x/;SharedAccessKey=TOPSECRET;SharedAccessKeyName";
+        let e = store
+            .save_draft(&cs_draft("x", Some(bad)), &MemoryStore::new(), None)
+            .unwrap_err();
+        assert!(!e.to_string().contains("TOPSECRET"), "{e}");
+    }
+
+    #[test]
+    fn edit_without_secret_keeps_it_and_with_secret_replaces_it() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        let secrets = MemoryStore::new();
+        let p = store
+            .save_draft(&cs_draft("Logistics", Some(DCS)), &secrets, None)
+            .unwrap();
+
+        let mut edit = cs_draft("Logistics prod", None);
+        edit.id = Some(p.id.clone());
+        let p2 = store.save_draft(&edit, &secrets, None).unwrap();
+        assert_eq!(p2.name, "Logistics prod");
+        assert_eq!(stored(&secrets, &p2).as_deref(), Some(DCS));
+
+        let mut edit = cs_draft("Logistics prod", Some(DCS2));
+        edit.id = Some(p.id.clone());
+        let p3 = store.save_draft(&edit, &secrets, None).unwrap();
+        assert_eq!(p3.host, "other.servicebus.windows.net");
+        assert_eq!(stored(&secrets, &p3).as_deref(), Some(DCS2));
+    }
+
+    #[test]
+    fn rename_conflict_restores_the_previous_secret() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        let secrets = MemoryStore::new();
+        store
+            .save_draft(&cs_draft("A", Some(DCS)), &secrets, None)
+            .unwrap();
+        let b = store
+            .save_draft(&cs_draft("B", Some(DCS)), &secrets, None)
+            .unwrap();
+        let mut edit = cs_draft("a", Some(DCS2));
+        edit.id = Some(b.id.clone());
+        let e = store.save_draft(&edit, &secrets, None).unwrap_err();
+        assert!(e.to_string().contains("already exists"), "{e}");
+        assert_eq!(stored(&secrets, &b).as_deref(), Some(DCS));
+        assert_eq!(
+            store.get_by_id(&b.id).unwrap().unwrap().host,
+            "myns.servicebus.windows.net"
+        );
+    }
+
+    #[test]
+    fn edit_cannot_switch_auth_kind_or_target_a_missing_profile() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        let secrets = MemoryStore::new();
+        let p = store
+            .save_draft(&cs_draft("A", Some(DCS)), &secrets, None)
+            .unwrap();
+        let mut edit = cs_draft("A", None);
+        edit.id = Some(p.id.clone());
+        edit.auth = DraftAuth::Entra {
+            namespace: "myns".into(),
+            tenant: None,
+        };
+        let e = store
+            .save_draft(&edit, &secrets, Some(&draft_sign_in()))
+            .unwrap_err();
+        assert!(e.to_string().contains("can't be changed"), "{e}");
+        edit.id = Some("missing".into());
+        assert!(matches!(
+            store
+                .save_draft(&edit, &secrets, Some(&draft_sign_in()))
+                .unwrap_err(),
+            Error::NotFound(_)
+        ));
+    }
+
+    #[test]
+    fn entra_draft_needs_a_sign_in_and_expands_the_host() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        let secrets = MemoryStore::new();
+        let mut d = cs_draft("Ops", None);
+        d.auth = DraftAuth::Entra {
+            namespace: "MyNs".into(),
+            tenant: Some(" t-2 ".into()),
+        };
+        assert!(matches!(
+            store.save_draft(&d, &secrets, None).unwrap_err(),
+            Error::NotSignedIn(_)
+        ));
+        let p = store
+            .save_draft(&d, &secrets, Some(&draft_sign_in()))
+            .unwrap();
+        assert_eq!(p.host, "myns.servicebus.windows.net");
+        assert_eq!(
+            p.auth,
+            ProfileAuth::Entra {
+                sign_in_id: "oid-1".into(),
+                tenant: Some("t-2".into())
+            }
+        );
+        assert!(store.sign_in("oid-1").unwrap().is_some());
+    }
+
+    #[test]
+    fn emulator_draft_rejects_websockets_and_writes_nothing() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        let secrets = MemoryStore::new();
+        let mut d = cs_draft("Local", Some(EMU));
+        d.transport = Transport::WebSockets;
+        assert!(matches!(
+            store.save_draft(&d, &secrets, None).unwrap_err(),
+            Error::Unsupported { .. }
+        ));
+        assert!(store.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn pins_are_validated_and_merged_with_the_entity_path() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        let secrets = MemoryStore::new();
+        let mut d = cs_draft("Scoped", Some(&format!("{DCS};EntityPath=orders")));
+        d.pinned_entities = vec![
+            "ORDERS".into(),
+            " ".into(),
+            "events/subscriptions/audit".into(),
+        ];
+        let p = store.save_draft(&d, &secrets, None).unwrap();
+        assert_eq!(
+            p.pinned_entities,
+            vec!["orders", "events/subscriptions/audit"]
+        );
+        let mut bad = cs_draft("Bad", Some(DCS));
+        bad.pinned_entities = vec!["a//b".into()];
+        assert!(matches!(
+            store.save_draft(&bad, &secrets, None).unwrap_err(),
+            Error::Invalid(_)
+        ));
+    }
+
+    #[test]
+    fn draft_debug_redacts_the_connection_string() {
+        let d = cs_draft("x", Some(DCS));
+        assert!(!format!("{d:?}").contains("c2VjcmV0"));
+    }
+
+    #[test]
+    fn draft_deserializes_from_ui_json() {
+        let d: ProfileDraft = serde_json::from_str(
+            r#"{"name":"Ops","auth":{"kind":"entra","namespace":"myns"},"transport":"websockets"}"#,
+        )
+        .unwrap();
+        assert_eq!(d.transport, Transport::WebSockets);
+        assert!(d.id.is_none() && !d.production && d.pinned_entities.is_empty());
     }
 }

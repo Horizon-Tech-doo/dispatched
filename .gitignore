@@ -7,3 +7,7 @@ node_modules/
 .idea/
 .vscode/
 /.claude/
+
+/app/dist-mock/
+/app/playwright-report/
+/app/test-results/

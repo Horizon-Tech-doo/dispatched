@@ -190,6 +190,10 @@ fn add(
             .current_sign_in()?
             .context("not signed in: run `dispatched login` first")?;
         ctx.store()?.save_sign_in(&sign_in)?;
+        let tenant = dispatched_core::profiles::store::normalize_tenant(
+            tenant.as_deref(),
+            Some(&sign_in.tenant_id),
+        );
         let mut profile =
             Profile::entra(name, &namespace_host(&ns)?, &sign_in.id, tenant.as_deref());
         profile.production = production;
@@ -598,11 +602,7 @@ mod tests {
                 .pinned_entities,
             ["orders"]
         );
-        assert!(
-            run(&ctx, pin("a/b/c/d"), Format::Table, None)
-                .await
-                .is_err()
-        );
+        assert!(run(&ctx, pin("a//b"), Format::Table, None).await.is_err());
         run(
             &ctx,
             ProfileCmd::Unpin {

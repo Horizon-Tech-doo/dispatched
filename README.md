@@ -55,7 +55,7 @@ dispatched peek orders
 - `cargo test --workspace` runs the core and CLI tests.
 - Emulator gate: `testing/emulator/emulator.sh up && DISPATCHED_EMULATOR=1 cargo test -p dispatched-core --features test-support --test emulator_m0 --test emulator_m1`.
   On Apple Silicon, `emulator.sh` automatically adds `docker-compose.arm64.yml` (Azure SQL Edge instead of the amd64-only SQL Server image).
-- Desktop: `cd app && npm install && npm run tauri dev`.
+- Desktop: `cd app && npm install && npm run tauri:dev`. On macOS this signs the dev build with your Developer ID or Apple Development certificate, if one is installed, so the Keychain's "Always Allow" survives rebuilds.
 
 Design: [`docs/superpowers/specs/2026-10-13-dispatched-v1-design.md`](docs/superpowers/specs/2026-10-13-dispatched-v1-design.md).
 

@@ -1,0 +1,54 @@
+import { QueryClientProvider } from "@tanstack/react-query";
+import { act, renderHook, waitFor } from "@testing-library/react";
+import type { ReactNode } from "react";
+import { describe, expect, it } from "vitest";
+import { createQueryClient, setTransport } from "@/engine";
+import { createMockTransport } from "@/engine/mock/transport";
+import { useConnectionController } from "./connection";
+
+/** The mock, with `connect` for one profile held until the test releases it. */
+function slowConnect(profileId: string) {
+  const mock = createMockTransport("default");
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  setTransport({
+    listen: mock.listen,
+    invoke: async <T,>(cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "connect" && args?.profileId === profileId) await gate;
+      return mock.invoke<T>(cmd, args);
+    },
+  });
+  return release;
+}
+
+function wrapper() {
+  const client = createQueryClient();
+  return ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+}
+
+describe("connection controller", () => {
+  it("keeps the latest connect when an earlier one finishes after it", async () => {
+    const release = slowConnect("p-logistics");
+    const { result } = renderHook(() => useConnectionController(), { wrapper: wrapper() });
+    let first!: Promise<void>;
+    act(() => void (first = result.current.connect("p-logistics")));
+    await act(() => result.current.connect("p-partner"));
+    expect(result.current.status).toBe("connected");
+    expect(result.current.view?.profile_id).toBe("p-partner");
+    release();
+    await act(() => first);
+    expect(result.current.profileId).toBe("p-partner");
+    expect(result.current.view?.profile_id).toBe("p-partner");
+  });
+
+  it("drops a connect that finishes after a disconnect", async () => {
+    const release = slowConnect("p-logistics");
+    const { result } = renderHook(() => useConnectionController(), { wrapper: wrapper() });
+    let first!: Promise<void>;
+    act(() => void (first = result.current.connect("p-logistics")));
+    await act(() => result.current.disconnect());
+    release();
+    await act(() => first);
+    await waitFor(() => expect(result.current.status).toBe("idle"));
+  });
+});

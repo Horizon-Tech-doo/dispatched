@@ -5,31 +5,9 @@ use dispatched_core::profiles::ProfileStore;
 use horizon_azure_kit::AzureCloud;
 use horizon_azure_kit::auth::{EntraSession, SignIn};
 use horizon_azure_kit::secrets::{CredentialStore, OsKeychain};
-use std::ffi::OsString;
-use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
-pub const KEYCHAIN_SERVICE: &str = "io.horizon-tech.dispatched";
-pub const KEY_PREFIX: &str = "dispatched";
-
-/// The directory holding `dispatched.db`: `DISPATCHED_CONFIG_DIR`, else the
-/// platform config directory. Never falls back to the working directory.
-pub fn config_dir() -> anyhow::Result<PathBuf> {
-    config_dir_from(
-        std::env::var_os("DISPATCHED_CONFIG_DIR"),
-        dirs::config_dir(),
-    )
-}
-
-fn config_dir_from(env: Option<OsString>, platform: Option<PathBuf>) -> anyhow::Result<PathBuf> {
-    if let Some(dir) = env.filter(|d| !d.is_empty()) {
-        return Ok(PathBuf::from(dir));
-    }
-    platform.map(|d| d.join("dispatched")).context(
-        "cannot determine the config directory (no home directory); \
-         set DISPATCHED_CONFIG_DIR to a writable directory",
-    )
-}
+pub use dispatched_core::paths::{KEY_PREFIX, KEYCHAIN_SERVICE};
 
 type Opener = Box<dyn Fn() -> anyhow::Result<ProfileStore> + Send + Sync>;
 
@@ -71,12 +49,7 @@ impl Ctx {
     /// use never touches the config directory or the keychain.
     pub fn open() -> Self {
         Self::lazy(
-            Box::new(|| {
-                let dir = config_dir()?;
-                let store = ProfileStore::open(&dir.join("dispatched.db"))?;
-                store.migrate_cli_state(&dir.join("cli-state.json"))?;
-                Ok(store)
-            }),
+            Box::new(|| Ok(dispatched_core::paths::open_store()?)),
             Arc::new(OsKeychain::new(KEYCHAIN_SERVICE)),
         )
     }
@@ -189,25 +162,5 @@ mod tests {
         ctx.store().unwrap();
         ctx.store().unwrap();
         assert_eq!(opens.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn config_dir_prefers_the_override_and_never_uses_the_cwd() {
-        let env = Some(OsString::from("/custom"));
-        assert_eq!(
-            config_dir_from(env, Some("/home/u/.config".into())).unwrap(),
-            PathBuf::from("/custom")
-        );
-        assert_eq!(
-            config_dir_from(None, Some("/home/u/.config".into())).unwrap(),
-            PathBuf::from("/home/u/.config/dispatched")
-        );
-        // An empty override counts as unset.
-        assert_eq!(
-            config_dir_from(Some(OsString::new()), Some("/c".into())).unwrap(),
-            PathBuf::from("/c/dispatched")
-        );
-        let e = config_dir_from(None, None).unwrap_err().to_string();
-        assert!(e.contains("DISPATCHED_CONFIG_DIR"), "{e}");
     }
 }

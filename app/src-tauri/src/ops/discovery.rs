@@ -1,0 +1,440 @@
+//! Find the signed-in user's tenants and Service Bus namespaces, so the Entra
+//! profile form can offer a pick list instead of asking for typed names.
+
+use crate::error::CommandError;
+use crate::events::{Events, tracked};
+use crate::ops::tree::count;
+use crate::state::AppState;
+use dispatched_core::discovery::{DiscoveredNamespace, SkippedSubscription, discover_namespaces};
+use horizon_azure_kit::arm::{ArmClient, Tenant};
+use horizon_azure_kit::auth::SignIn;
+use horizon_azure_kit::{AzureCloud, KitError};
+use serde::Serialize;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TenantView {
+    pub tenant_id: String,
+    pub display_name: Option<String>,
+    pub default_domain: Option<String>,
+    /// The tenant the account signed in to.
+    pub home: bool,
+    /// The user principal of the tenant's own sign-in when the tenant is listed with one (made by the
+    /// current account in that tenant), so the UI can say which identity is used. `None`: the current
+    /// sign-in is used.
+    pub sign_in_upn: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DiscoveryView {
+    pub namespaces: Vec<DiscoveredNamespace>,
+    pub skipped: Vec<SkippedSubscription>,
+}
+
+/// What the list shows: the home tenant first, then by display name (falling back to the domain,
+/// then the id), ignoring case.
+pub fn tenant_views(tenants: Vec<Tenant>, home_tenant_id: &str) -> Vec<TenantView> {
+    let mut views: Vec<TenantView> = tenants
+        .into_iter()
+        .map(|t| TenantView {
+            home: t.tenant_id.eq_ignore_ascii_case(home_tenant_id),
+            tenant_id: t.tenant_id,
+            display_name: t.display_name.filter(|n| !n.trim().is_empty()),
+            default_domain: t.default_domain.filter(|d| !d.trim().is_empty()),
+            sign_in_upn: None,
+        })
+        .collect();
+    views.sort_by_cached_key(|t| {
+        let label = t
+            .display_name
+            .as_deref()
+            .or(t.default_domain.as_deref())
+            .unwrap_or(&t.tenant_id)
+            .to_lowercase();
+        (!t.home, label)
+    });
+    views
+}
+
+/// Whether a token failure means the tenant wants an interactive sign-in (MFA, Conditional Access).
+fn wants_interaction(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    m.contains("aadsts53003") || m.contains("aadsts700082") || asks_for_mfa(message)
+}
+
+/// Whether the failure is a multi-factor request in particular.
+fn asks_for_mfa(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    [
+        "aadsts50076",
+        "aadsts50079",
+        "aadsts50158",
+        "interaction_required",
+        "multi-factor",
+    ]
+    .iter()
+    .any(|marker| m.contains(marker))
+}
+
+/// Map a token failure for `guest` (not the home tenant) to a command error. The kit reports
+/// "this tenant needs an interactive sign-in" as `NotSignedIn`; for the home tenant that really
+/// means signing in again, but for a guest tenant it means MFA or Conditional Access, which this
+/// needs its own interactive sign-in (`sign_in` with that tenant).
+pub fn token_error(e: KitError, guest: bool) -> CommandError {
+    let interactive = guest
+        && match &e {
+            // The token endpoint's interactive-sign-in answers carry "sign in again (code: ...)";
+            // "signed out" and "different client" are about the account, not the tenant.
+            KitError::NotSignedIn(m) => m.contains("sign in again (") || wants_interaction(m),
+            KitError::AuthFailed(m) => wants_interaction(m),
+            _ => false,
+        };
+    if interactive {
+        // The kind says "sign in to this tenant"; the text only says MFA when the tenant asked for it.
+        let mfa = match &e {
+            KitError::NotSignedIn(m) | KitError::AuthFailed(m) => asks_for_mfa(m),
+            _ => false,
+        };
+        CommandError::new(
+            "mfa_required",
+            if mfa {
+                "This tenant requires multi-factor sign-in. Sign in to it to list its namespaces."
+            } else {
+                "This tenant needs its own sign-in. Sign in to it to list its namespaces."
+            },
+        )
+    } else {
+        e.into()
+    }
+}
+
+fn signed_in(state: &AppState) -> Result<SignIn, CommandError> {
+    state.current_sign_in()?.ok_or_else(|| {
+        CommandError::new(
+            "not_signed_in",
+            "Sign in with Entra ID to list your namespaces.",
+        )
+    })
+}
+
+pub async fn list_tenants(
+    state: &AppState,
+    ev: &dyn Events,
+) -> Result<Vec<TenantView>, CommandError> {
+    let sign_in = signed_in(state)?;
+    tracked(
+        ev,
+        "Listing tenants failed",
+        async {
+            let token = state
+                .session
+                .token_for(&sign_in, None, &AzureCloud::Public.arm_scope())
+                .await?;
+            let tenants = ArmClient::new(AzureCloud::Public, token.token)
+                .list_tenants()
+                .await?;
+            let mut views = tenant_views(tenants, &sign_in.tenant_id);
+            for v in views.iter_mut().filter(|v| !v.home) {
+                v.sign_in_upn = state
+                    .sign_in_for_tenant(&v.tenant_id)?
+                    .map(|s| s.user_principal);
+            }
+            Ok(views)
+        },
+        |t| format!("Listed {}", count(t.len(), "tenant", "tenants")),
+    )
+    .await
+}
+
+/// The sign-in to list `tenant` with, and the tenant to ask its token for: the tenant's own sign-in when
+/// one exists and still has its refresh token (no tenant to name, it is that sign-in's home), else the
+/// current sign-in asking for the tenant (which may need multi-factor sign-in).
+pub fn token_source(
+    state: &AppState,
+    current: &SignIn,
+    tenant: Option<&str>,
+) -> Result<(SignIn, Option<String>), CommandError> {
+    if let Some(t) = tenant
+        && let Some(own) = state.sign_in_for_tenant(t)?
+    {
+        return Ok((own, None));
+    }
+    Ok((current.clone(), tenant.map(str::to_string)))
+}
+
+/// Namespaces in one tenant (`None` is the home tenant).
+pub async fn discover(
+    state: &AppState,
+    ev: &dyn Events,
+    tenant: Option<String>,
+) -> Result<DiscoveryView, CommandError> {
+    let sign_in = signed_in(state)?;
+    let tenant = tenant
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty() && !t.eq_ignore_ascii_case(&sign_in.tenant_id));
+    let label = tenant_label(tenant.as_deref());
+    tracked(
+        ev,
+        &format!("Finding namespaces in {label} failed"),
+        async {
+            let (who, ask_for) = token_source(state, &sign_in, tenant.as_deref())?;
+            let token = state
+                .session
+                .token_for(&who, ask_for.as_deref(), &AzureCloud::Public.arm_scope())
+                .await
+                .map_err(|e| token_error(e, tenant.is_some()))?;
+            let found =
+                discover_namespaces(&ArmClient::new(AzureCloud::Public, token.token)).await?;
+            Ok(DiscoveryView {
+                namespaces: found.namespaces,
+                skipped: found.skipped,
+            })
+        },
+        |d| {
+            format!(
+                "Found {} in {label}",
+                count(d.namespaces.len(), "namespace", "namespaces")
+            )
+        },
+    )
+    .await
+}
+
+/// How the activity log names a tenant: the id, since a name needs a second lookup.
+fn tenant_label(tenant: Option<&str>) -> String {
+    match tenant {
+        None => "the home tenant".into(),
+        Some(id) => format!("tenant {id}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::events::Recorder;
+    use crate::ops::test_util::state;
+
+    fn tenant(id: &str, name: Option<&str>, domain: Option<&str>) -> Tenant {
+        Tenant {
+            tenant_id: id.into(),
+            display_name: name.map(Into::into),
+            default_domain: domain.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn the_home_tenant_comes_first_then_names_without_regard_to_case() {
+        let views = tenant_views(
+            vec![
+                tenant("t-zeta", Some("Zeta"), None),
+                tenant(
+                    "t-home",
+                    Some("Horizon Tech"),
+                    Some("horizon.onmicrosoft.com"),
+                ),
+                tenant("t-alpha", Some("alpha labs"), None),
+                tenant("t-bare", None, Some("bare.example")),
+            ],
+            "T-HOME",
+        );
+        let ids: Vec<_> = views.iter().map(|t| t.tenant_id.as_str()).collect();
+        assert_eq!(ids, ["t-home", "t-alpha", "t-bare", "t-zeta"]);
+        assert!(views[0].home);
+        assert!(views[1..].iter().all(|t| !t.home));
+    }
+
+    #[test]
+    fn a_tenant_without_a_name_sorts_by_domain_then_id_and_blank_names_are_dropped() {
+        let views = tenant_views(
+            vec![
+                tenant("b-id", Some("  "), None),
+                tenant("a-id", None, None),
+                tenant("x", Some("Mid"), None),
+            ],
+            "nobody",
+        );
+        let ids: Vec<_> = views.iter().map(|t| t.tenant_id.as_str()).collect();
+        assert_eq!(ids, ["a-id", "b-id", "x"]);
+        assert_eq!(views[1].display_name, None);
+    }
+
+    #[test]
+    fn a_guest_tenant_that_needs_interaction_is_mfa_required() {
+        let e = token_error(
+            KitError::NotSignedIn(
+                "a@x.io: sign in again (interaction_required: AADSTS50076)".into(),
+            ),
+            true,
+        );
+        assert_eq!(e.kind, "mfa_required");
+        assert!(e.message.contains("multi-factor"));
+        let e = token_error(
+            KitError::AuthFailed("invalid_request: AADSTS53003 blocked".into()),
+            true,
+        );
+        assert_eq!(e.kind, "mfa_required");
+    }
+
+    #[test]
+    fn the_same_failure_for_the_home_tenant_stays_a_sign_in_problem() {
+        let e = token_error(
+            KitError::NotSignedIn("a@x.io: sign in again (invalid_grant: AADSTS50173)".into()),
+            false,
+        );
+        assert_eq!(e.kind, "not_signed_in");
+        let e = token_error(KitError::NotSignedIn("a@x.io signed out".into()), true);
+        assert_eq!(e.kind, "not_signed_in");
+    }
+
+    #[test]
+    fn other_guest_failures_keep_their_own_kind() {
+        let e = token_error(KitError::AuthFailed("invalid_client: bad".into()), true);
+        assert_eq!(e.kind, "auth");
+        let e = token_error(KitError::Network("dns".into()), true);
+        assert_eq!(e.kind, "network");
+        // The raw token error is not echoed for the interactive case.
+        let e = token_error(KitError::NotSignedIn("AADSTS50076 trace abc".into()), true);
+        assert!(!e.message.contains("abc"));
+    }
+
+    /// The text the kit produces, copied from `horizon-azure-kit`: `auth::oauth::auth_error` builds
+    /// `NotSignedIn("sign in again ({error}: {first line of error_description})")` for interaction-required
+    /// answers (invalid_grant, interaction_required, AADSTS50076/50079/53003/700082), and
+    /// `EntraSession::token_for` prefixes it with `{user}: `. The app recognises guest-tenant MFA by it.
+    #[test]
+    fn the_kit_s_interaction_required_errors_are_recognised() {
+        let described = [
+            "interaction_required",
+            "invalid_grant",
+        ]
+        .map(|code| {
+            let first_line = "AADSTS50076: Due to a configuration change made by your administrator, you must use multi-factor authentication";
+            // as in auth_error ...
+            let from_oauth = format!("sign in again ({code}: {first_line})");
+            // ... and as wrapped by token_for.
+            format!("ops@contoso.example: {from_oauth}")
+        });
+        for text in described {
+            let e = token_error(KitError::NotSignedIn(text), true);
+            assert_eq!(e.kind, "mfa_required");
+        }
+        // The kit's other NotSignedIn texts are about the account, not the tenant.
+        for text in [
+            "ops@contoso.example signed out",
+            "ops@contoso.example was signed in with a different client; sign in again",
+        ] {
+            assert_eq!(
+                token_error(KitError::NotSignedIn(text.into()), true).kind,
+                "not_signed_in"
+            );
+        }
+        // AuthFailed carries the code in its text when it is not mapped to NotSignedIn.
+        assert_eq!(
+            token_error(
+                KitError::AuthFailed("invalid_request: AADSTS53003: blocked by policy".into()),
+                true
+            )
+            .kind,
+            "mfa_required"
+        );
+        // The wording the app matches stays in the kit's text.
+        assert!(wants_interaction("AADSTS50076"));
+    }
+
+    #[test]
+    fn a_guest_invalid_grant_without_an_mfa_code_gets_neutral_copy() {
+        let e = token_error(
+            KitError::NotSignedIn("a@x.io: sign in again (invalid_grant: AADSTS50173)".into()),
+            true,
+        );
+        assert_eq!(e.kind, "mfa_required");
+        assert_eq!(
+            e.message,
+            "This tenant needs its own sign-in. Sign in to it to list its namespaces."
+        );
+        for code in ["AADSTS50076", "AADSTS50079", "AADSTS50158"] {
+            let e = token_error(
+                KitError::NotSignedIn(format!("a@x.io: sign in again (invalid_grant: {code})")),
+                true,
+            );
+            assert!(e.message.contains("multi-factor"), "{code}: {}", e.message);
+        }
+        // Conditional Access is interactive but not MFA.
+        let e = token_error(KitError::AuthFailed("AADSTS53003 blocked".into()), true);
+        assert_eq!(e.kind, "mfa_required");
+        assert!(!e.message.contains("multi-factor"));
+    }
+
+    #[test]
+    fn another_account_s_tenant_sign_in_is_never_used() {
+        use crate::ops::test_util::remember_sign_in;
+        let s = state();
+        let home = remember_sign_in(&s, "home-oid", "tenant-home", true);
+        s.store.set_current_sign_in(Some(&home.id)).unwrap();
+        // Someone else signed in to the guest tenant on this computer.
+        remember_sign_in(&s, "stranger-oid", "tenant-guest", true);
+        let (who, ask) = token_source(&s, &home, Some("tenant-guest")).unwrap();
+        assert_eq!(
+            (who.id.as_str(), ask.as_deref()),
+            ("home-oid", Some("tenant-guest"))
+        );
+        assert!(s.sign_in_for_tenant("tenant-guest").unwrap().is_none());
+        // The current account's own guest sign-in (same user principal, another object id) is used.
+        let mine = SignIn {
+            user_principal: "Home-Oid@X.io".into(),
+            ..remember_sign_in(&s, "z-guest-oid", "tenant-guest", true)
+        };
+        s.store.save_sign_in(&mine).unwrap();
+        let (who, ask) = token_source(&s, &home, Some("TENANT-GUEST")).unwrap();
+        assert_eq!((who.id.as_str(), ask), ("z-guest-oid", None));
+    }
+
+    #[test]
+    fn a_tenant_with_its_own_sign_in_is_listed_with_it() {
+        use crate::ops::test_util::remember_sign_in;
+        let s = state();
+        let home = remember_sign_in(&s, "home-oid", "tenant-home", true);
+        s.store.set_current_sign_in(Some(&home.id)).unwrap();
+        let guest = SignIn {
+            user_principal: home.user_principal.clone(),
+            ..remember_sign_in(&s, "guest-oid", "tenant-guest", true)
+        };
+        s.store.save_sign_in(&guest).unwrap();
+        remember_sign_in(&s, "gone-oid", "tenant-gone", false);
+        // Home: the current sign-in, no tenant named.
+        let (who, ask) = token_source(&s, &home, None).unwrap();
+        assert_eq!((who.id.as_str(), ask), ("home-oid", None));
+        // A tenant with its own sign-in: that sign-in, at its own home tenant.
+        let (who, ask) = token_source(&s, &home, Some("tenant-guest")).unwrap();
+        assert_eq!((who.id.as_str(), ask), ("guest-oid", None));
+        // Its token is gone, or there is none: the current sign-in asks for the tenant.
+        for t in ["tenant-gone", "tenant-never"] {
+            let (who, ask) = token_source(&s, &home, Some(t)).unwrap();
+            assert_eq!((who.id.as_str(), ask.as_deref()), ("home-oid", Some(t)));
+        }
+    }
+
+    #[tokio::test]
+    async fn listing_needs_a_sign_in_and_logs_the_failure() {
+        let s = state();
+        let ev = Recorder::default();
+        assert_eq!(
+            list_tenants(&s, &ev).await.unwrap_err().kind,
+            "not_signed_in"
+        );
+        assert_eq!(
+            discover(&s, &ev, None).await.unwrap_err().kind,
+            "not_signed_in"
+        );
+        // Nothing was attempted, so nothing is logged.
+        assert!(ev.activity.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn tenants_and_namespaces_get_real_plurals() {
+        assert_eq!(count(1, "tenant", "tenants"), "1 tenant");
+        assert_eq!(count(2, "tenant", "tenants"), "2 tenants");
+        assert_eq!(count(0, "namespace", "namespaces"), "0 namespaces");
+        assert_eq!(tenant_label(None), "the home tenant");
+        assert_eq!(tenant_label(Some("abc")), "tenant abc");
+    }
+}

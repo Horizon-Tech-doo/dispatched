@@ -98,9 +98,101 @@ impl Profile {
     }
 }
 
+/// What a UI submits to create (`id: None`) or edit a profile.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProfileDraft {
+    /// Existing profile id when editing.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Display name.
+    pub name: String,
+    /// How it authenticates.
+    pub auth: DraftAuth,
+    /// Production profile.
+    #[serde(default)]
+    pub production: bool,
+    /// Optional colour label.
+    #[serde(default)]
+    pub color: Option<String>,
+    /// AMQP transport.
+    #[serde(default)]
+    pub transport: Transport,
+    /// `http://host:port` proxy.
+    #[serde(default)]
+    pub proxy: Option<String>,
+    /// Entities to show when the identity cannot list the namespace.
+    #[serde(default)]
+    pub pinned_entities: Vec<String>,
+}
+
+/// The authentication part of a [`ProfileDraft`].
+#[derive(Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum DraftAuth {
+    /// A connection string; `None` on an edit keeps the stored one.
+    ConnectionString {
+        /// The connection string (a secret).
+        #[serde(default)]
+        connection_string: Option<String>,
+    },
+    /// The current Entra sign-in, for a namespace name or host.
+    Entra {
+        /// `myns` or `myns.servicebus.windows.net`.
+        namespace: String,
+        /// Tenant to request tokens in (home tenant if `None`).
+        #[serde(default)]
+        tenant: Option<String>,
+    },
+}
+
+impl std::fmt::Debug for DraftAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DraftAuth::ConnectionString { connection_string } => f
+                .debug_struct("ConnectionString")
+                .field(
+                    "connection_string",
+                    &connection_string.as_ref().map(|_| "<redacted>"),
+                )
+                .finish(),
+            DraftAuth::Entra { namespace, tenant } => f
+                .debug_struct("Entra")
+                .field("namespace", namespace)
+                .field("tenant", tenant)
+                .finish(),
+        }
+    }
+}
+
 /// Keychain key of a profile's connection string.
 pub fn secret_key(profile_id: &str) -> String {
     format!("dispatched:profile:{profile_id}:connection-string")
+}
+
+/// A bare namespace name expands to the public-cloud host; a dotted input is
+/// taken as the full host. Only hostname characters (letters, digits, `.`,
+/// `-`) are accepted, so a URL, port or path is rejected rather than guessed at.
+pub fn namespace_host(input: &str) -> Result<String> {
+    let input = input.trim().to_ascii_lowercase();
+    let valid = !input.is_empty()
+        && !input.starts_with(['.', '-'])
+        && !input.ends_with(['.', '-'])
+        && !input.contains("..")
+        && input
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
+    if !valid {
+        return Err(Error::Invalid(
+            "invalid namespace: expected a name like `myns` or a host like \
+             `myns.servicebus.windows.net` (letters, digits, `.` and `-` only)"
+                .into(),
+        ));
+    }
+    Ok(if input.contains('.') {
+        input
+    } else {
+        format!("{input}.servicebus.windows.net")
+    })
 }
 
 /// Apply `HTTPS_PROXY` unless the namespace is the emulator or already proxied.
@@ -127,7 +219,7 @@ pub fn namespace_for(
         ProfileAuth::ConnectionString => {
             let secret = secrets.get(&secret_key(&profile.id))?.ok_or_else(|| {
                 Error::Invalid(format!(
-                    "profile `{}` has no stored connection string; remove and add it again",
+                    "profile `{}` has no stored connection string; edit the connection and paste it again",
                     profile.name
                 ))
             })?;
@@ -185,6 +277,25 @@ mod tests {
         let ns = namespace_for(&p, &secrets, &session(), None).unwrap();
         assert!(ns.is_emulator());
         assert_eq!(ns.host(), "localhost");
+    }
+
+    #[test]
+    fn missing_secret_error_names_the_phrase_the_ui_matches() {
+        // The app recognises this case by the words "no stored connection string": keep them.
+        let cs = ConnectionString::parse(
+            "Endpoint=sb://ns.servicebus.windows.net/;SharedAccessKeyName=k;SharedAccessKey=v",
+        )
+        .unwrap();
+        let p = Profile::connection_string("Orphan", &cs);
+        let e = namespace_for(&p, &MemoryStore::new(), &session(), None).unwrap_err();
+        assert!(matches!(e, Error::Invalid(_)));
+        assert!(e.to_string().contains("no stored connection string"), "{e}");
+        // ... and says how to fix it.
+        assert!(
+            e.to_string()
+                .contains("edit the connection and paste it again"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -248,5 +359,28 @@ mod tests {
             .unwrap();
         let ns = apply_proxy(ns, ProxyConfig::parse("http://second:2").ok()).unwrap();
         assert_eq!(ns.proxy().unwrap().host(), "first");
+    }
+
+    #[test]
+    fn namespace_host_expands_names_and_rejects_urls() {
+        assert_eq!(
+            namespace_host("MyNs").unwrap(),
+            "myns.servicebus.windows.net"
+        );
+        assert_eq!(
+            namespace_host(" x.servicebus.chinacloudapi.cn ").unwrap(),
+            "x.servicebus.chinacloudapi.cn"
+        );
+        for bad in [
+            "",
+            "https://x.servicebus.windows.net",
+            "x:5671",
+            ".x",
+            "x..y",
+            "a/b",
+        ] {
+            let e = namespace_host(bad).unwrap_err().to_string();
+            assert!(e.contains("invalid namespace"), "{bad}: {e}");
+        }
     }
 }

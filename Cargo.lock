@@ -1129,12 +1129,16 @@ name = "dispatched-app"
 version = "0.0.1"
 dependencies = [
  "dispatched-core",
+ "horizon-azure-kit",
+ "open",
+ "secrecy",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-process",
  "tauri-plugin-updater",
+ "time",
  "tokio",
 ]
 
@@ -1144,6 +1148,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "dirs",
  "fe2o3-amqp",
  "fe2o3-amqp-cbs",
  "fe2o3-amqp-management",
@@ -2082,7 +2087,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-azure-kit"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",

@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Dispatched, direction A: Workbench</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{color:inherit}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;margin:0;cursor:default;text-align:left}
+input{font:inherit}
+.mono{font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-ligatures:none}
+.num{font-variant-numeric:tabular-nums}
+</style>
+</helmet>
+<div style="min-height: 900px; display: flex; flex-direction: column; background: {{t.content}}; color: {{t.fg}}; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif; font-size: 12px; line-height: 16px; -webkit-font-smoothing: antialiased">
+
+  <!-- Top bar -->
+  <div style="height: 38px; display: flex; align-items: center; gap: 12px; padding: 0 12px 0 84px; background: {{t.chrome}}; border-bottom: 1px solid {{t.line}}; flex-wrap: wrap">
+    <button aria-label="Switch connection" style="display: flex; align-items: center; gap: 8px; height: 26px; padding: 0 8px; border: 1px solid {{t.line}}; border-radius: 3px; background: {{t.field}}">
+      <span style="font-weight: 600">Logistics</span>
+      <span style="color: {{t.muted}}">sb-logistics-prod</span>
+      <span style="padding: 0 5px; height: 16px; line-height: 16px; border-radius: 2px; font-size: 10px; font-weight: 700; letter-spacing: .04em; color: {{t.accentInk}}; background: {{t.accent}}">PROD</span>
+      <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="{{t.muted}}" stroke-width="1.5" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg>
+    </button>
+    <span style="color: {{t.faint}}">Entra ID</span>
+    <div style="flex: 1 1 200px"></div>
+    <label style="display: flex; align-items: center; gap: 8px; width: 380px; max-width: 100%; height: 26px; padding: 0 8px; border: 1px solid {{t.line}}; border-radius: 3px; background: {{t.field}}; color: {{t.faint}}">
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="{{t.muted}}" stroke-width="1.5" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg>
+      <input aria-label="Search entities, messages and commands" placeholder="Go to entity, message or command" style="flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: {{t.fg}}; font-size: 12px">
+      <span class="mono" style="font-size: 10.5px; color: {{t.muted}}">⌘K</span>
+    </label>
+    <div style="flex: 1 1 200px"></div>
+    <button aria-label="Refresh all" style="width: 26px; height: 26px; display: grid; place-items: center; border-radius: 3px">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="{{t.muted}}" stroke-width="1.5" aria-hidden="true"><path d="M13 8a5 5 0 1 1-1.5-3.6M13 2.5v3h-3"/></svg>
+    </button>
+  </div>
+
+  <div style="flex: 1; display: flex; flex-wrap: wrap; min-height: 0">
+
+    <!-- Namespace tree -->
+    <nav aria-label="Namespaces" style="flex: 1 1 248px; max-width: 100%; background: {{t.side}}; border-right: 1px solid {{t.line}}; display: flex; flex-direction: column">
+      <div style="height: 30px; display: flex; align-items: center; justify-content: space-between; padding: 0 10px 0 12px; border-bottom: 1px solid {{t.line}}">
+        <span style="font-weight: 600; color: {{t.muted}}">Explorer</span>
+        <span class="num" style="color: {{t.faint}}">3 namespaces</span>
+      </div>
+      <div style="padding: 6px 8px">
+        <input aria-label="Filter entities" placeholder="Filter" style="width: 100%; box-sizing: border-box; height: 22px; padding: 0 6px; border: 1px solid {{t.line}}; border-radius: 3px; background: {{t.field}}; color: {{t.fg}}; outline: 0; font-size: 12px">
+      </div>
+      <div style="display: flex; flex-direction: column; padding-bottom: 8px">
+        <sc-for list="{{tree}}" as="n" hint-placeholder-count="18">
+          <button style="height: {{rowH}}; display: flex; align-items: center; gap: 6px; padding-left: {{n.pad}}; padding-right: 10px; background: {{n.bg}}; color: {{n.fg}}">
+            <span style="width: 12px; display: grid; place-items: center; flex: none">
+              <sc-if value="{{n.open}}" hint-placeholder-val="{{false}}"><svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="{{t.faint}}" stroke-width="1.8" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></sc-if>
+              <sc-if value="{{n.closed}}" hint-placeholder-val="{{false}}"><svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="{{t.faint}}" stroke-width="1.8" aria-hidden="true"><path d="M6 4l4 4-4 4"/></svg></sc-if>
+            </span>
+            <sc-if value="{{n.isNs}}" hint-placeholder-val="{{false}}"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="{{t.icon}}" stroke-width="1.3" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M2 6.2h12"/></svg></sc-if>
+            <sc-if value="{{n.isQueue}}" hint-placeholder-val="{{false}}"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="{{t.icon}}" stroke-width="1.3" aria-hidden="true"><rect x="1.5" y="4.5" width="13" height="7" rx="1"/><path d="M5.8 4.5v7M10.2 4.5v7"/></svg></sc-if>
+            <sc-if value="{{n.isTopic}}" hint-placeholder-val="{{false}}"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="{{t.icon}}" stroke-width="1.3" aria-hidden="true"><circle cx="3.8" cy="8" r="1.8"/><path d="M5.6 8h3.2M8.8 8l4.4-4M8.8 8h4.4M8.8 8l4.4 4"/></svg></sc-if>
+            <sc-if value="{{n.isSub}}" hint-placeholder-val="{{false}}"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="{{t.icon}}" stroke-width="1.3" aria-hidden="true"><path d="M2 9.5 3.8 4h8.4L14 9.5V12H2z"/><path d="M2 9.5h3.2l.9 1.4h3.8l.9-1.4H14"/></svg></sc-if>
+            <span style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: {{n.weight}}">{{n.label}}</span>
+            <sc-if value="{{n.prod}}" hint-placeholder-val="{{false}}"><span style="font-size: 9.5px; font-weight: 700; letter-spacing: .04em; color: {{t.accent}}">PROD</span></sc-if>
+            <span class="num" style="color: {{t.faint}}">{{n.active}}</span>
+            <sc-if value="{{n.hasDlq}}" hint-placeholder-val="{{false}}"><span class="num" style="min-width: 34px; text-align: right; color: {{t.accent}}">{{n.dlq}}</span></sc-if>
+          </button>
+        </sc-for>
+      </div>
+    </nav>
+
+    <!-- Centre -->
+    <main style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column">
+
+      <!-- Open entity tabs -->
+      <div role="tablist" aria-label="Open entities" style="height: 30px; display: flex; align-items: stretch; background: {{t.chrome}}; border-bottom: 1px solid {{t.line}}; overflow-x: auto">
+        <sc-for list="{{docs}}" as="d" hint-placeholder-count="3">
+          <button role="tab" aria-selected="{{d.on}}" style="display: flex; align-items: center; gap: 8px; padding: 0 12px; border-right: 1px solid {{t.line}}; background: {{d.bg}}; color: {{d.fg}}; box-shadow: {{d.mark}}; white-space: nowrap">
+            <span>{{d.label}}</span>
+            <span style="color: {{t.faint}}">{{d.path}}</span>
+          </button>
+        </sc-for>
+      </div>
+
+      <!-- Entity header + sub-tabs -->
+      <div style="display: flex; align-items: center; gap: 16px; padding: 10px 14px 0; flex-wrap: wrap">
+        <h1 style="margin: 0; font-size: 14px; line-height: 20px; font-weight: 600">tracking-sync</h1>
+        <span style="color: {{t.muted}}">Subscription on shipment-events</span>
+        <span style="color: {{t.faint}}">Max delivery 10, lock 30 s, TTL 14 d</span>
+      </div>
+      <div role="tablist" aria-label="Entity views" style="display: flex; gap: 2px; padding: 6px 10px 0; border-bottom: 1px solid {{t.line}}; overflow-x: auto">
+        <sc-for list="{{subtabs}}" as="s" hint-placeholder-count="9">
+          <button role="tab" aria-selected="{{s.on}}" style="height: 28px; display: flex; align-items: center; gap: 6px; padding: 0 8px; color: {{s.fg}}; box-shadow: {{s.mark}}; white-space: nowrap">
+            <span>{{s.label}}</span>
+            <span class="num" style="color: {{s.countFg}}">{{s.count}}</span>
+          </button>
+        </sc-for>
+      </div>
+
+      <!-- Toolbar -->
+      <div style="height: 34px; display: flex; align-items: center; gap: 6px; padding: 0 10px; border-bottom: 1px solid {{t.line}}; flex-wrap: wrap">
+        <button style="height: 24px; padding: 0 8px; border: 1px solid {{t.line}}; border-radius: 3px; background: {{t.field}}">Peek 100</button>
+        <label style="flex: 0 1 320px; display: flex; align-items: center; gap: 6px; height: 24px; padding: 0 6px; border: 1px solid {{t.line}}; border-radius: 3px; background: {{t.field}}">
+          <span style="color: {{t.faint}}">Filter</span>
+          <input aria-label="Message filter" class="mono" value="reason = 'Schema validation failed'" style="flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: {{t.fg}}; font-size: 11px">
+        </label>
+        <div style="flex: 1"></div>
+        <span class="num" style="color: {{t.muted}}">1 selected of 3,417</span>
+        <span style="width: 1px; height: 16px; background: {{t.line}}"></span>
+        <button style="height: 24px; padding: 0 8px; border-radius: 3px">Resubmit</button>
+        <button style="height: 24px; padding: 0 8px; border-radius: 3px">Move to</button>
+        <button style="height: 24px; padding: 0 8px; border-radius: 3px">Export</button>
+        <button style="height: 24px; padding: 0 8px; border-radius: 3px; color: {{t.muted}}">Delete</button>
+      </div>
+
+      <div style="flex: 1; display: flex; flex-wrap: wrap; min-height: 0">
+        <!-- Grid -->
+        <div style="flex: 999 1 480px; min-width: 0; overflow-x: auto">
+          <div role="grid" aria-label="Dead-lettered messages" style="min-width: 860px">
+            <div role="row" style="display: grid; grid-template-columns: 64px 118px 140px 120px minmax(190px, 1fr) 44px 60px; height: 24px; align-items: center; padding: 0 10px; border-bottom: 1px solid {{t.line}}; color: {{t.muted}}; background: {{t.content}}">
+              <span role="columnheader">Seq</span><span role="columnheader">Enqueued</span><span role="columnheader">Subject</span><span role="columnheader">Message ID</span><span role="columnheader">Dead-letter reason</span><span role="columnheader" style="text-align: right">Del.</span><span role="columnheader" style="text-align: right">Size</span>
+            </div>
+            <sc-for list="{{msgs}}" as="m" hint-placeholder-count="14">
+              <div role="row" aria-selected="{{m.on}}" onClick="{{m.pick}}" style="display: grid; grid-template-columns: 64px 118px 140px 120px minmax(190px, 1fr) 44px 60px; height: {{rowH}}; align-items: center; padding: 0 10px; background: {{m.bg}}; color: {{m.fg}}">
+                <span role="gridcell" class="mono num" style="font-size: 11px">{{m.seq}}</span>
+                <span role="gridcell" class="mono num" style="font-size: 11px; color: {{m.dim}}">{{m.time}}</span>
+                <span role="gridcell" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{{m.subject}}</span>
+                <span role="gridcell" class="mono" style="font-size: 11px; color: {{m.dim}}">{{m.id}}</span>
+                <span role="gridcell" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{{m.reason}}</span>
+                <span role="gridcell" class="mono num" style="font-size: 11px; text-align: right">{{m.deliveries}}</span>
+                <span role="gridcell" class="mono num" style="font-size: 11px; text-align: right; color: {{m.dim}}">{{m.size}}</span>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+
+        <!-- Detail pane -->
+        <aside aria-label="Message detail" style="flex: 1 1 340px; max-width: 100%; border-left: 1px solid {{t.line}}; background: {{t.side}}; display: flex; flex-direction: column">
+          <div style="height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-bottom: 1px solid {{t.line}}">
+            <span style="font-weight: 600">Message</span>
+            <span class="mono num" style="color: {{t.muted}}">#{{cur.seq}}</span>
+            <div style="flex: 1"></div>
+            <button style="color: {{t.muted}}">Copy JSON</button>
+          </div>
+          <div style="padding: 8px 12px 4px; font-weight: 600; color: {{t.muted}}">Dead-letter</div>
+          <div style="padding: 0 12px 8px; display: grid; grid-template-columns: 112px 1fr; row-gap: 3px">
+            <span style="color: {{t.muted}}">Reason</span><span style="color: {{t.accent}}">{{cur.reason}}</span>
+            <span style="color: {{t.muted}}">Description</span><span>{{cur.desc}}</span>
+          </div>
+          <div style="padding: 8px 12px 4px; font-weight: 600; color: {{t.muted}}; border-top: 1px solid {{t.line}}">System properties</div>
+          <div style="padding: 0 12px 8px; display: grid; grid-template-columns: 112px 1fr; row-gap: 3px">
+            <sc-for list="{{props}}" as="p" hint-placeholder-count="7">
+              <span style="color: {{t.muted}}">{{p.k}}</span><span class="mono num" style="font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{{p.v}}</span>
+            </sc-for>
+          </div>
+          <div style="padding: 8px 12px 4px; font-weight: 600; color: {{t.muted}}; border-top: 1px solid {{t.line}}">Application properties</div>
+          <div style="padding: 0 12px 8px; display: grid; grid-template-columns: 112px 1fr; row-gap: 3px">
+            <sc-for list="{{app}}" as="p" hint-placeholder-count="3">
+              <span class="mono" style="font-size: 11px; color: {{t.muted}}">{{p.k}}</span><span class="mono" style="font-size: 11px">{{p.v}}</span>
+            </sc-for>
+          </div>
+          <div style="padding: 8px 12px 4px; display: flex; justify-content: space-between; border-top: 1px solid {{t.line}}">
+            <span style="font-weight: 600; color: {{t.muted}}">Body</span>
+            <span style="color: {{t.faint}}">application/json, {{cur.size}}</span>
+          </div>
+          <pre class="mono" style="margin: 0 12px 12px; padding: 8px 10px; background: {{t.content}}; border: 1px solid {{t.line}}; border-radius: 3px; font-size: 11px; line-height: 16px; white-space: pre; overflow-x: auto">{{cur.body}}</pre>
+        </aside>
+      </div>
+
+      <!-- Bottom drawer -->
+      <section aria-label="Jobs and activity" style="height: 132px; border-top: 1px solid {{t.line}}; background: {{t.side}}; display: flex; flex-direction: column">
+        <div style="height: 26px; display: flex; align-items: stretch; gap: 2px; padding: 0 8px; border-bottom: 1px solid {{t.line}}">
+          <button style="padding: 0 8px; box-shadow: inset 0 -2px 0 {{t.fg}}">Jobs <span class="num" style="color: {{t.muted}}">1</span></button>
+          <button style="padding: 0 8px; color: {{t.muted}}">Activity</button>
+        </div>
+        <div style="display: grid; grid-template-columns: minmax(260px, 1fr) 220px 110px 70px; align-items: center; column-gap: 16px; padding: 8px 14px">
+          <span>Export dead letters to tracking-sync-dlq.jsonl</span>
+          <span style="height: 3px; background: {{t.line}}; display: block"><span style="display: block; width: 56%; height: 3px; background: {{t.fg}}"></span></span>
+          <span class="mono num" style="font-size: 11px; color: {{t.muted}}">1,920 / 3,417</span>
+          <button style="color: {{t.muted}}">Cancel</button>
+        </div>
+        <div class="mono num" style="padding: 0 14px; font-size: 11px; line-height: 18px; color: {{t.muted}}">
+          <div>09:41:12  Peeked 100 from shipment-events/tracking-sync/$deadletterqueue  312 ms</div>
+          <div>09:40:58  Resubmitted 24 to shipment-events, removed from dead-letter  1.4 s</div>
+          <div>09:38:20  Signed in to tenant horizon-logistics via Entra ID</div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Status bar -->
+  <footer style="height: 22px; display: flex; align-items: center; gap: 16px; padding: 0 12px; background: {{t.chrome}}; border-top: 1px solid {{t.line}}; color: {{t.muted}}; font-size: 11px">
+    <span>AMQP over WebSockets</span>
+    <span>Peek only, nothing locked</span>
+    <div style="flex: 1"></div>
+    <span class="num">Refreshed 09:41:12</span>
+  </footer>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark"},"density":{"editor":"enum","options":["compact","comfortable"],"default":"compact"},"$preview":{"width":1440,"height":900}}'>
+var PAL = {
+  dark: { chrome: '#1d1f23', side: '#191b1e', content: '#141518', field: '#121316', line: '#2a2d32', fg: '#d9dce1', muted: '#8d929b', faint: '#5f646c', icon: '#9aa0a9', sel: '#262c36', hover: '#1c1e22', accent: '#f0a537', accentInk: '#1d1406' },
+  light: { chrome: '#eef0f3', side: '#f6f7f9', content: '#ffffff', field: '#ffffff', line: '#dde0e5', fg: '#1d2127', muted: '#59606b', faint: '#8a919b', icon: '#59606b', sel: '#e2e8f1', hover: '#f3f5f8', accent: '#9e5800', accentInk: '#ffffff' }
+};
+var TREE = [
+  { k: 'ns', label: 'sb-logistics-prod', d: 0, prod: true, open: true },
+  { k: 'group', label: 'Queues', d: 1, open: true, active: '4' },
+  { k: 'queue', label: 'customs-docs', d: 2, active: '112', dlq: '0' },
+  { k: 'queue', label: 'invoice-generate', d: 2, active: '1,284', dlq: '37' },
+  { k: 'queue', label: 'label-print', d: 2, active: '6', dlq: '0' },
+  { k: 'queue', label: 'returns-intake', d: 2, active: '0', dlq: '211' },
+  { k: 'group', label: 'Topics', d: 1, open: true, active: '3' },
+  { k: 'topic', label: 'carrier-updates', d: 2, open: true },
+  { k: 'sub', label: 'audit-log', d: 3, active: '0', dlq: '0' },
+  { k: 'sub', label: 'eta-recalc', d: 3, active: '58', dlq: '9' },
+  { k: 'topic', label: 'shipment-events', d: 2, open: true },
+  { k: 'sub', label: 'billing', d: 3, active: '0', dlq: '0' },
+  { k: 'sub', label: 'tracking-sync', d: 3, active: '2,906', dlq: '3,417', sel: true },
+  { k: 'sub', label: 'warehouse-notify', d: 3, active: '14', dlq: '1' },
+  { k: 'topic', label: 'stock-levels', d: 2, closed: true },
+  { k: 'ns', label: 'sb-logistics-dev', d: 0, closed: true },
+  { k: 'ns', label: 'sb-partner-gateway', d: 0, closed: true }
+];
+var MSGS = [
+  ['48213', '15 Oct 09:41:07', 'ShipmentDelivered', '7f3c9e21-4a0b', 'MaxDeliveryCountExceeded', '10', '1.8 KB'],
+  ['48207', '15 Oct 09:40:52', 'ShipmentInTransit', 'c1d84f0e-99a2', 'MaxDeliveryCountExceeded', '10', '2.1 KB'],
+  ['48199', '15 Oct 09:40:31', 'EtaChanged', '0b6e2a77-1fc4', 'Schema validation failed', '1', '0.9 KB'],
+  ['48188', '15 Oct 09:39:58', 'ShipmentDelivered', '5e02bd13-7c61', 'MaxDeliveryCountExceeded', '10', '1.7 KB'],
+  ['48176', '15 Oct 09:39:14', 'ShipmentException', 'a93f0c58-2e7d', 'Carrier API returned 503', '4', '3.4 KB'],
+  ['48164', '15 Oct 09:38:40', 'EtaChanged', '2d7b91c4-ab08', 'Schema validation failed', '1', '0.9 KB'],
+  ['48151', '15 Oct 09:37:22', 'ShipmentInTransit', 'e8c13a6f-5d90', 'MaxDeliveryCountExceeded', '10', '2.0 KB'],
+  ['48140', '15 Oct 09:36:05', 'ShipmentDelivered', '61af4e2b-0c37', 'TTLExpiredException', '0', '1.8 KB'],
+  ['48133', '15 Oct 09:35:47', 'ShipmentCreated', '9c5d27e0-8b14', 'MaxDeliveryCountExceeded', '10', '4.6 KB'],
+  ['48121', '15 Oct 09:34:19', 'EtaChanged', '4f80a3d9-62ce', 'Schema validation failed', '1', '1.0 KB'],
+  ['48117', '15 Oct 09:33:58', 'ShipmentException', 'b7e6150c-d3a1', 'Carrier API returned 503', '4', '3.1 KB'],
+  ['48102', '15 Oct 09:32:40', 'ShipmentDelivered', '3a2c8f71-e946', 'MaxDeliveryCountExceeded', '10', '1.8 KB'],
+  ['48096', '15 Oct 09:31:27', 'ShipmentInTransit', 'd05b6e9a-17f3', 'TTLExpiredException', '0', '2.2 KB'],
+  ['48085', '15 Oct 09:30:02', 'ShipmentCreated', '86e4d1b2-a05c', 'MaxDeliveryCountExceeded', '10', '4.4 KB']
+];
+var DESC = {
+  'MaxDeliveryCountExceeded': 'Message could not be consumed after 10 delivery attempts.',
+  'Schema validation failed': "Required property 'eta' is null.",
+  'Carrier API returned 503': 'nordline tracking endpoint unavailable, retries exhausted.',
+  'TTLExpiredException': 'The message expired and was dead lettered.'
+};
+function bodyFor(m) {
+  var id = 'SHP-2026-04' + m[0].slice(1) + '7';
+  if (m[2] === 'EtaChanged') return '{\n  "shipmentId": "' + id + '",\n  "carrier": "nordline",\n  "previousEta": "2026-10-16T14:00:00Z",\n  "eta": null,\n  "reasonCode": "HUB_DELAY",\n  "hub": "VIE-03"\n}';
+  if (m[2] === 'ShipmentException') return '{\n  "shipmentId": "' + id + '",\n  "carrier": "nordline",\n  "code": "ADDRESS_UNREACHABLE",\n  "attempt": 2,\n  "occurredAt": "2026-10-15T07:38:12Z"\n}';
+  return '{\n  "shipmentId": "' + id + '",\n  "carrier": "nordline",\n  "status": "' + m[2].replace('Shipment', '') + '",\n  "parcels": 3,\n  "occurredAt": "2026-10-15T07:' + m[1].slice(-5) + 'Z"\n}';
+}
+class Component extends DCLogic {
+  constructor(props) { super(props); this.state = { sel: 2 }; }
+  renderVals() {
+    var self = this;
+    var t = PAL[(this.props.theme ?? 'dark') === 'light' ? 'light' : 'dark'];
+    var rowH = (this.props.density ?? 'compact') === 'comfortable' ? '26px' : '22px';
+    var sel = this.state.sel;
+    var tree = TREE.map(function (n) {
+      var hasDlq = !!n.dlq && n.dlq !== '0';
+      return {
+        label: n.label, open: !!n.open, closed: !!n.closed, prod: !!n.prod,
+        isNs: n.k === 'ns', isQueue: n.k === 'queue', isTopic: n.k === 'topic', isSub: n.k === 'sub',
+        pad: (8 + n.d * 14) + 'px',
+        active: n.k === 'group' ? n.active : (n.active || ''),
+        dlq: n.dlq || '', hasDlq: hasDlq,
+        weight: n.k === 'ns' || n.k === 'group' ? '600' : '400',
+        bg: n.sel ? t.sel : 'transparent',
+        fg: n.k === 'group' ? t.muted : t.fg
+      };
+    });
+    var docs = [
+      { label: 'tracking-sync', path: 'shipment-events', on: true },
+      { label: 'invoice-generate', path: 'queue', on: false },
+      { label: 'carrier-updates', path: 'topic', on: false }
+    ].map(function (d) {
+      return { label: d.label, path: d.path, on: d.on ? 'true' : 'false', bg: d.on ? t.content : 'transparent', fg: d.on ? t.fg : t.muted, mark: d.on ? 'inset 0 2px 0 ' + t.fg : 'none' };
+    });
+    var subtabs = [
+      ['Overview', ''], ['Messages', '2,906'], ['Dead-letter', '3,417'], ['Transfer DLQ', '0'], ['Scheduled', '0'], ['Deferred', '0'], ['Sessions', ''], ['Rules', '2'], ['Listener', '']
+    ].map(function (s, i) {
+      var on = i === 2;
+      return { label: s[0], count: s[1], on: on ? 'true' : 'false', fg: on ? t.fg : t.muted, countFg: i === 2 ? t.accent : t.faint, mark: on ? 'inset 0 -2px 0 ' + t.fg : 'none' };
+    });
+    var msgs = MSGS.map(function (m, i) {
+      var on = i === sel;
+      return { seq: m[0], time: m[1], subject: m[2], id: m[3], reason: m[4], deliveries: m[5], size: m[6], on: on ? 'true' : 'false', bg: on ? t.sel : 'transparent', fg: t.fg, dim: on ? t.fg : t.muted, pick: function () { self.setState({ sel: i }); } };
+    });
+    var c = MSGS[sel];
+    var cur = { seq: c[0], reason: c[4], desc: DESC[c[4]], size: c[6], body: bodyFor(c) };
+    var props = [
+      { k: 'MessageId', v: c[3] + '-91e2-4d3b8f5a' },
+      { k: 'CorrelationId', v: 'ord-77' + c[0].slice(2) },
+      { k: 'Subject', v: c[2] },
+      { k: 'Enqueued', v: '2026-' + c[1].replace(' Oct ', '-10-').replace(/^(\d+)-10-/, '10-$1 ').replace(/^10-(\d+) /, '10-$1 ') },
+      { k: 'DeliveryCount', v: c[5] },
+      { k: 'TimeToLive', v: '14 d' },
+      { k: 'SessionId', v: 'none' }
+    ];
+    var app = [
+      { k: 'tenant', v: 'at-vienna' },
+      { k: 'schemaVersion', v: '3' },
+      { k: 'source', v: 'carrier-adapter' }
+    ];
+    return { t: t, rowH: rowH, tree: tree, docs: docs, subtabs: subtabs, msgs: msgs, cur: cur, props: props, app: app };
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,211 @@
+import { act, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { useState } from "react";
+import { describe, expect, it, vi } from "vitest";
+import { Tree, type TreeNode } from "./Tree";
+
+const RECT = { width: 300, height: 220 };
+
+function node(id: string, parentId: string | null, depth: number, expandable = false, expanded = false): TreeNode {
+  return { id, parentId, depth, label: id, expandable, expanded };
+}
+
+const NODES: TreeNode[] = [
+  node("queues", null, 0, true, true),
+  node("invoice-generate", "queues", 1),
+  node("label-print", "queues", 1),
+  node("topics", null, 0, true, true),
+  node("shipment-events", "topics", 1, true, false),
+  node("tracking-sync", "topics", 1),
+];
+
+function Harness(props: { nodes?: TreeNode[]; onToggle?: (id: string, e: boolean) => void; onActivate?: (id: string) => void }) {
+  const [sel, setSel] = useState<string | null>("queues");
+  return (
+    <Tree
+      label="Namespace"
+      nodes={props.nodes ?? NODES}
+      selectedId={sel}
+      onSelect={setSel}
+      onActivate={props.onActivate ?? (() => {})}
+      onToggle={props.onToggle ?? (() => {})}
+      renderRow={(n) => <span>{n.label}</span>}
+      rowHeight={22}
+      initialRect={RECT}
+    />
+  );
+}
+
+const selected = () => screen.getAllByRole("treeitem").find((r) => r.getAttribute("aria-selected") === "true");
+
+describe("Tree", () => {
+  it("renders_only_visible_rows_of_5000", () => {
+    const many = Array.from({ length: 5000 }, (_, i) => node(`q-${i}`, null, 0));
+    render(<Harness nodes={many} />);
+    expect(screen.getAllByRole("treeitem").length).toBeLessThan(60);
+  });
+
+  it("exposes tree semantics", () => {
+    render(<Harness />);
+    const tree = screen.getByRole("tree", { name: "Namespace" });
+    expect(tree).toHaveAttribute("tabindex", "0");
+    const topics = within(tree).getByRole("treeitem", { name: "topics" });
+    expect(topics).toHaveAttribute("aria-level", "1");
+    expect(topics).toHaveAttribute("aria-expanded", "true");
+    expect(within(tree).getByRole("treeitem", { name: "tracking-sync" })).toHaveAttribute("aria-level", "2");
+    expect(within(tree).getByRole("treeitem", { name: "tracking-sync" })).not.toHaveAttribute("aria-expanded");
+  });
+
+  it("marks the active row with the focus outline only while the tree is focused", () => {
+    render(<Harness />);
+    const tree = screen.getByRole("tree");
+    expect(tree.className).toContain("outline-none");
+    expect(selected()?.className).not.toContain("outline-fg");
+    act(() => tree.focus());
+    expect(selected()?.className).toContain("outline-fg");
+    expect(screen.getAllByRole("treeitem").filter((r) => r.className.includes("outline-fg"))).toHaveLength(1);
+    act(() => tree.blur());
+    expect(selected()?.className).not.toContain("outline-fg");
+  });
+
+  it("shows the focus outline once a key is pressed, even when the tree was focused by the pointer", async () => {
+    render(<Harness />);
+    const tree = screen.getByRole("tree");
+    await userEvent.keyboard("{Tab}");
+    expect(tree).toHaveFocus();
+    await userEvent.keyboard("{ArrowDown}");
+    expect(selected()?.className).toContain("outline-fg");
+  });
+
+  it("moves with arrows and j/k, Home and End", async () => {
+    render(<Harness />);
+    screen.getByRole("tree").focus();
+    await userEvent.keyboard("{ArrowDown}j");
+    expect(selected()).toHaveAccessibleName("label-print");
+    await userEvent.keyboard("k");
+    expect(selected()).toHaveAccessibleName("invoice-generate");
+    await userEvent.keyboard("{End}");
+    expect(selected()).toHaveAccessibleName("tracking-sync");
+    await userEvent.keyboard("{Home}");
+    expect(selected()).toHaveAccessibleName("queues");
+  });
+
+  it("expands, collapses and moves to the parent", async () => {
+    const onToggle = vi.fn();
+    render(<Harness onToggle={onToggle} />);
+    screen.getByRole("tree").focus();
+    await userEvent.keyboard("{End}{ArrowUp}{ArrowRight}");
+    expect(onToggle).toHaveBeenCalledWith("shipment-events", true);
+    await userEvent.keyboard("{Home}{ArrowLeft}");
+    expect(onToggle).toHaveBeenCalledWith("queues", false);
+    await userEvent.keyboard("{ArrowDown}{ArrowLeft}");
+    expect(selected()).toHaveAccessibleName("queues");
+  });
+
+  it("activates with Enter and double-click", async () => {
+    const onActivate = vi.fn();
+    render(<Harness onActivate={onActivate} />);
+    screen.getByRole("tree").focus();
+    await userEvent.keyboard("{End}{Enter}");
+    expect(onActivate).toHaveBeenCalledWith("tracking-sync");
+    await userEvent.dblClick(screen.getByRole("treeitem", { name: "label-print" }));
+    expect(onActivate).toHaveBeenCalledWith("label-print");
+  });
+
+  it("type-ahead jumps to the next matching label", async () => {
+    render(<Harness />);
+    screen.getByRole("tree").focus();
+    await userEvent.keyboard("tr");
+    expect(selected()).toHaveAccessibleName("tracking-sync");
+  });
+
+  it("treats j and k as letters while a type-ahead is in progress", async () => {
+    render(<Harness />);
+    screen.getByRole("tree").focus();
+    await userEvent.keyboard("tracking");
+    expect(selected()).toHaveAccessibleName("tracking-sync");
+  });
+
+  it("clicking a chevron toggles without selecting or activating", async () => {
+    const onToggle = vi.fn();
+    const onActivate = vi.fn();
+    render(<Harness onToggle={onToggle} onActivate={onActivate} />);
+    const chevron = screen.getByRole("treeitem", { name: "shipment-events" }).firstElementChild as HTMLElement;
+    await userEvent.dblClick(chevron);
+    expect(onToggle).toHaveBeenCalledWith("shipment-events", true);
+    expect(onActivate).not.toHaveBeenCalled();
+    expect(selected()).toHaveAccessibleName("queues");
+  });
+
+  it("arrow keys still navigate right after typing", async () => {
+    render(<Harness />);
+    screen.getByRole("tree").focus();
+    await userEvent.keyboard("tr");
+    expect(selected()).toHaveAccessibleName("tracking-sync");
+    await userEvent.keyboard("{ArrowUp}");
+    expect(selected()).toHaveAccessibleName("shipment-events");
+  });
+
+  describe("focus mark", () => {
+    const outlined = (el: HTMLElement) => el.className.includes("outline-fg");
+
+    it("outlines the tree itself when it has keyboard focus but nothing is selected", () => {
+      render(<Tree label="Namespace" nodes={NODES} selectedId={null} onSelect={() => {}} onActivate={() => {}} onToggle={() => {}} renderRow={(n) => <span>{n.label}</span>} rowHeight={22} initialRect={RECT} />);
+      const tree = screen.getByRole("tree");
+      expect(outlined(tree)).toBe(false);
+      act(() => tree.focus());
+      expect(outlined(tree)).toBe(true);
+      expect(screen.getAllByRole("treeitem").some(outlined)).toBe(false);
+      act(() => tree.blur());
+      expect(outlined(tree)).toBe(false);
+    });
+
+    it("outlines the tree when the selected row is filtered out", () => {
+      render(<Tree label="Namespace" nodes={NODES} selectedId="gone" onSelect={() => {}} onActivate={() => {}} onToggle={() => {}} renderRow={(n) => <span>{n.label}</span>} rowHeight={22} initialRect={RECT} />);
+      const tree = screen.getByRole("tree");
+      act(() => tree.focus());
+      expect(outlined(tree)).toBe(true);
+    });
+
+    it("outlines the tree when the selected row is scrolled out of the rendered window", () => {
+      const many = Array.from({ length: 5000 }, (_, i) => node(`q-${i}`, null, 0));
+      render(<Tree label="Namespace" nodes={many} selectedId="q-4000" onSelect={() => {}} onActivate={() => {}} onToggle={() => {}} renderRow={(n) => <span>{n.label}</span>} rowHeight={22} initialRect={RECT} />);
+      const tree = screen.getByRole("tree");
+      act(() => tree.focus());
+      expect(outlined(tree)).toBe(true);
+    });
+
+    it("does not outline the tree while a row is selected and shown", () => {
+      render(<Harness />);
+      const tree = screen.getByRole("tree");
+      act(() => tree.focus());
+      expect(outlined(tree)).toBe(false);
+      expect(outlined(selected()!)).toBe(true);
+    });
+
+    it("leaves the mark off, and the key to the control, when Enter is pressed on a control inside a row", async () => {
+      const onActivate = vi.fn();
+      const onRetry = vi.fn();
+      render(
+        <Tree
+          label="Namespace"
+          nodes={NODES}
+          selectedId="queues"
+          onSelect={() => {}}
+          onActivate={onActivate}
+          onToggle={() => {}}
+          renderRow={(n) => (n.id === "label-print" ? <button onClick={onRetry}>Retry</button> : <span>{n.label}</span>)}
+          rowHeight={22}
+          initialRect={RECT}
+        />,
+      );
+      const button = screen.getByRole("button", { name: "Retry" });
+      act(() => button.focus());
+      await userEvent.keyboard("{Enter}");
+      expect(onRetry).toHaveBeenCalledTimes(1);
+      expect(onActivate).not.toHaveBeenCalled();
+      expect(screen.getAllByRole("treeitem").some(outlined)).toBe(false);
+      expect(outlined(screen.getByRole("tree"))).toBe(false);
+    });
+  });
+});

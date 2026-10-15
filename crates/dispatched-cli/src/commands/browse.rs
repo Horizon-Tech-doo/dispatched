@@ -7,6 +7,7 @@ use crate::resolve::{Selection, needs_sign_in, resolve};
 use anyhow::Context as _;
 use clap::Args;
 use dispatched_core::messaging::DEFAULT_SCAN_LIMIT;
+pub use dispatched_core::namespace::known_entities;
 use dispatched_core::{
     BodyFilter, EntityCounts, EntityPath, Explorer, ExportFormat, ExportedMessage, MessageBody,
     MessageFilter, Namespace, PeekOptions, PeekPage, PeekView, PeekedMessage, PropertyFilter,
@@ -362,24 +363,6 @@ fn subscriptions_section(topic_count: usize, subs: &[&SubscriptionInfo]) -> Stri
     } else {
         subscriptions_table(subs)
     }
-}
-
-/// The entities we can show without listing the namespace: the connection
-/// string's EntityPath, then the profile's pins. Duplicates (any case) and
-/// unparsable pins are dropped.
-pub fn known_entities(entity_path: Option<&str>, pins: &[String]) -> Vec<EntityPath> {
-    let mut out: Vec<EntityPath> = Vec::new();
-    for raw in entity_path
-        .into_iter()
-        .chain(pins.iter().map(String::as_str))
-    {
-        if let Ok(e) = EntityPath::parse(raw)
-            && !out.iter().any(|k| k.base().eq_ignore_ascii_case(&e.base()))
-        {
-            out.push(e);
-        }
-    }
-    out
 }
 
 /// Known entities as tables, every count `?`.
@@ -1393,19 +1376,6 @@ mod tests {
             APPROX_FOOTNOTE,
             "~ counted by peeking (the service reports no counts)"
         );
-    }
-
-    #[test]
-    fn known_entities_combine_entity_path_and_pins_without_duplicates() {
-        let pins = vec![
-            "Orders".to_string(),
-            "events/Subscriptions/all".to_string(),
-            "a/b/c/d".to_string(),
-        ];
-        let k = known_entities(Some("orders"), &pins);
-        let bases: Vec<String> = k.iter().map(EntityPath::base).collect();
-        assert_eq!(bases, vec!["orders", "events/Subscriptions/all"]);
-        assert!(known_entities(None, &[]).is_empty());
     }
 
     #[test]
