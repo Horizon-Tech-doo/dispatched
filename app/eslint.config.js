@@ -3,7 +3,7 @@ import tseslint from "typescript-eslint";
 import reactHooks from "eslint-plugin-react-hooks";
 import globals from "globals";
 
-const tauri = { group: ["@tauri-apps/*"], message: "Only src/engine/ipc.ts talks to Tauri." };
+const tauri = { group: ["@tauri-apps/*"], message: "Only src/engine/ipc.ts and src/engine/updater.ts talk to Tauri." };
 const appCode = (dirs) => dirs.flatMap((d) => [`**/${d}`, `**/${d}/**`, `@/${d}`, `@/${d}/**`]);
 const restrict = (...patterns) => ["error", { patterns }];
 
@@ -39,7 +39,7 @@ export default tseslint.config(
       }),
     },
   },
-  { files: ["src/engine/ipc.ts"], rules: { "no-restricted-imports": "off" } },
+  { files: ["src/engine/ipc.ts", "src/engine/updater.ts"], rules: { "no-restricted-imports": "off" } },
   {
     files: ["src/shell/**"],
     rules: {

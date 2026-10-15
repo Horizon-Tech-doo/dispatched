@@ -2,13 +2,15 @@ import { CircleAlert } from "lucide-react";
 import { keys, useAppInfo } from "@/engine";
 import { Button, formatClock } from "@/ui";
 import { useShell } from "./context";
+import { useUpdate } from "./sheets/useUpdate";
 import { useJobs } from "./drawer/activity";
 import { useIsFetching, useQueryState } from "./queryState";
 
 const LOST = new Set(["network", "timeout", "auth", "not_signed_in"]);
 
 export function StatusBar() {
-  const { conn, shell, live, dispatch } = useShell();
+  const { conn, shell, live, dispatch, openSheet } = useShell();
+  const update = useUpdate().data;
   const info = useAppInfo().data;
   const running = useJobs().filter((j) => !j.finished).length;
   const entities = useQueryState(keys.entities(conn.status === "connected" ? conn.profileId : null));
@@ -39,6 +41,9 @@ export function StatusBar() {
         </span>
       )}
       <div className="flex-1" />
+      {update && (
+        <Button size="sm" variant="quiet" onClick={() => openSheet({ kind: "update" })}>Update {update.version} available</Button>
+      )}
       {conn.status === "connected" && entities.dataUpdatedAt > 0 && (
         <span className="tabular-nums">{fetching ? "Refreshing…" : `Refreshed ${formatClock(new Date(entities.dataUpdatedAt).toISOString())}`}</span>
       )}

@@ -2,7 +2,11 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
 import { afterEach } from "vitest";
 
-afterEach(() => cleanup());
+afterEach(async () => {
+  cleanup();
+  // A test's fake updater must not leak into the next one.
+  if (typeof window !== "undefined") (await import("@/engine/updater")).resetUpdater();
+});
 
 // Some suites opt into `// @vitest-environment node` (e.g. the ESLint boundary test);
 // the DOM stubs only apply where a DOM exists.

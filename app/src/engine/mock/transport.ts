@@ -1,5 +1,6 @@
 import { EngineError, setTransport, type IpcTransport, type Unlisten } from "../ipc";
 import type { AccountView, ActivityEntry, ConnectionView, EntityListing, Profile, ProfileDraft } from "../types";
+import { setUpdater } from "../updater";
 import * as fx from "./fixtures";
 
 export type Scenario = "default" | "empty" | "forbidden" | "missing-secret" | "network" | "many" | "many-topics";
@@ -184,7 +185,7 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
   return transport;
 }
 
-/** Mock builds: `?scenario=` picks the scenario, `?autoconnect=<profile id>`
+/** Mock builds: `?scenario=` picks the scenario, `?update=1` offers a fake update, `?autoconnect=<profile id>`
  *  seeds the last-used profile so the app opens connected, and `?seed=<json object>` seeds further settings
  *  (screenshots use it to start with saved tabs). */
 export function installMock(): void {
@@ -197,6 +198,20 @@ export function installMock(): void {
     if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) seed = raw as Record<string, unknown>;
   } catch {
     // an unreadable seed is ignored
+  }
+  // `?update=1` offers an update that installs; `?update=downloading` stops the install at 60% (for screenshots).
+  const update = params.get("update");
+  if (update === "1" || update === "downloading") {
+    setUpdater({
+      check: async () => ({ version: "0.1.0", notes: "Faster tree loading.\nThe PROD badge now shows in every theme.", date: "2026-10-20" }),
+      install: async (cb) => {
+        for (const p of update === "1" ? [20, 60, 100] : [20, 60]) {
+          await wait(150);
+          cb(p);
+        }
+        if (update === "downloading") await new Promise(() => {});
+      },
+    });
   }
   setTransport(createMockTransport(scenario, 120, autoconnect ? { ...seed, last_profile: autoconnect } : seed));
 }

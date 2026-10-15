@@ -298,6 +298,67 @@ export const shots: {
     holds: (p) => p.getByRole("dialog", { name: "Connections" }),
     viewportOnly: true,
   },
+  {
+    name: "settings",
+    path: "/?scenario=default&autoconnect=p-logistics",
+    ready: (p) => p.getByRole("tree", { name: "Namespace" }).getByRole("treeitem", { name: "invoice-generate" }),
+    prepare: async (page) => {
+      await page.keyboard.press("Shift"); // keyboard modality so :focus-visible matches
+      await page.keyboard.press("ControlOrMeta+,");
+      await page.getByRole("dialog", { name: "Settings" }).getByText("Row height in the tree and grids.").waitFor();
+    },
+    holds: (p) => p.getByRole("dialog", { name: "Settings" }),
+    viewportOnly: true,
+  },
+  {
+    name: "settings-comfortable",
+    path: `/?scenario=default&autoconnect=p-logistics&seed=${encodeURIComponent(JSON.stringify({ ui: { theme: "system", density: "comfortable", autoRefresh: 30 } }))}`,
+    ready: (p) => p.getByRole("tree", { name: "Namespace" }).getByRole("treeitem", { name: "invoice-generate" }),
+    prepare: async (page) => {
+      await page.keyboard.press("ControlOrMeta+,");
+      await page.getByRole("dialog", { name: "Settings" }).getByText("Row height in the tree and grids.").waitFor();
+    },
+    holds: (p) => p.getByRole("dialog", { name: "Settings" }),
+    viewportOnly: true,
+  },
+  ...(["update", "update-downloading"] as const).map((name) => ({
+    name,
+    path: `/?scenario=default&autoconnect=p-logistics&update=${name === "update" ? "1" : "downloading"}`,
+    ready: (p: Page) => p.getByRole("tree", { name: "Namespace" }).getByRole("treeitem", { name: "invoice-generate" }),
+    prepare: async (page: Page) => {
+      await page.keyboard.press("Shift"); // keyboard modality so :focus-visible matches
+      await page.getByRole("button", { name: "Update 0.1.0 available" }).click(); // appears 3 s after start
+      const sheet = page.getByRole("dialog", { name: "Update available" });
+      if (name === "update-downloading") {
+        await sheet.getByRole("button", { name: "Install and restart" }).click();
+        await sheet.getByRole("button", { name: "Downloading 60%" }).waitFor();
+      } else {
+        await sheet.getByText("Faster tree loading.").waitFor();
+      }
+    },
+    holds: (p: Page) => p.getByRole("dialog", { name: "Update available" }),
+    viewportOnly: true,
+  })),
+  {
+    name: "update-notice",
+    path: "/?scenario=default&autoconnect=p-logistics&update=1",
+    ready: (p) => p.getByRole("tree", { name: "Namespace" }).getByRole("treeitem", { name: "invoice-generate" }),
+    prepare: async (page) => {
+      await page.getByRole("button", { name: "Update 0.1.0 available" }).waitFor(); // appears 3 s after start
+    },
+  },
+  {
+    name: "update-uptodate",
+    path: "/?scenario=default&autoconnect=p-logistics",
+    ready: (p) => p.getByRole("tree", { name: "Namespace" }).getByRole("treeitem", { name: "invoice-generate" }),
+    prepare: async (page) => {
+      await page.keyboard.press("ControlOrMeta+,");
+      await page.getByRole("dialog", { name: "Settings" }).getByRole("button", { name: "Check for updates" }).click();
+      await page.getByRole("dialog", { name: "Dispatched is up to date" }).getByText("You have the latest version.").waitFor();
+    },
+    holds: (p) => p.getByRole("dialog", { name: "Dispatched is up to date" }),
+    viewportOnly: true,
+  },
 ];
 
 for (const colorScheme of ["dark", "light"] as const) {

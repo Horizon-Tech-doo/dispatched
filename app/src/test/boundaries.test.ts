@@ -25,9 +25,11 @@ describe("import boundaries", () => {
     expect(await restricted("src/engine/queries.ts", `import { a } from "@/shell/state";\nexport const b = a;`)).toHaveLength(1);
   });
 
-  it("only engine/ipc.ts imports Tauri", async () => {
+  it("only engine/ipc.ts and engine/updater.ts import Tauri", async () => {
     expect(await restricted("src/shell/x.ts", `import { invoke } from "@tauri-apps/api/core";\nexport const b = invoke;`)).toHaveLength(1);
     expect(await restricted("src/engine/ipc.ts", `import { invoke } from "@tauri-apps/api/core";\nexport const b = invoke;`)).toHaveLength(0);
+    expect(await restricted("src/engine/updater.ts", `import { check } from "@tauri-apps/plugin-updater";\nexport const b = check;`)).toHaveLength(0);
+    expect(await restricted("src/engine/queries.ts", `import { check } from "@tauri-apps/plugin-updater";\nexport const b = check;`)).toHaveLength(1);
   });
 
   it("shell cannot import the dev catalogue", async () => {
