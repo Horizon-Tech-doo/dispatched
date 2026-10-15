@@ -46,6 +46,22 @@ pub(crate) mod test_util {
         s
     }
 
+    /// The same person's own sign-in in another tenant: another object id, `home`'s user principal.
+    pub fn remember_guest_sign_in(
+        state: &AppState,
+        home: &horizon_azure_kit::auth::SignIn,
+        id: &str,
+        tenant: &str,
+        with_token: bool,
+    ) -> horizon_azure_kit::auth::SignIn {
+        let s = horizon_azure_kit::auth::SignIn {
+            user_principal: home.user_principal.clone(),
+            ..remember_sign_in(state, id, tenant, with_token)
+        };
+        state.store.save_sign_in(&s).unwrap();
+        s
+    }
+
     pub fn state() -> AppState {
         AppState::new(
             ProfileStore::open_in_memory().unwrap(),

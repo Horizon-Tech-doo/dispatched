@@ -112,23 +112,57 @@ impl AppState {
         }
     }
 
-    /// A remembered sign-in made in `tenant_id` itself (a guest tenant's own sign-in), if its refresh
-    /// token still exists. When several accounts signed in to that tenant, the current sign-in itself
-    /// wins, then one by the current sign-in's account (same user principal), then the first.
+    /// A remembered sign-in made in `tenant_id` itself (a guest tenant's own sign-in) by the current
+    /// account, with its refresh token. The current account is the current sign-in's identity: the same
+    /// object id, or the same user principal (any case). Another account's sign-in is never returned:
+    /// without a match the caller uses the current sign-in and asks for the tenant.
     pub fn sign_in_for_tenant(&self, tenant_id: &str) -> Result<Option<SignIn>, CommandError> {
-        let current = self.store.current_sign_in()?;
-        let mut live = Vec::new();
+        let Some(current) = self.store.current_sign_in()? else {
+            return Ok(None);
+        };
+        self.live_sign_in_like(tenant_id, &current)
+    }
+
+    /// A sign-in made in `tenant_id` by the same identity as `who`, whose refresh token exists; `who`
+    /// itself first.
+    pub fn live_sign_in_like(
+        &self,
+        tenant_id: &str,
+        who: &SignIn,
+    ) -> Result<Option<SignIn>, CommandError> {
+        let mut found = None;
         for s in self.store.sign_ins_for_tenant(tenant_id)? {
-            if self.session.is_signed_in(&s)? {
-                live.push(s);
+            if same_identity(&s, who) && self.session.is_signed_in(&s)? {
+                if s.id == who.id {
+                    return Ok(Some(s));
+                }
+                found.get_or_insert(s);
             }
         }
-        let rank = |s: &SignIn| match &current {
-            Some(c) if c.id == s.id => 0,
-            Some(c) if c.user_principal.eq_ignore_ascii_case(&s.user_principal) => 1,
-            _ => 2,
-        };
-        // `min_by_key` keeps the first of equal ranks, so the store's order breaks ties.
-        Ok(live.into_iter().min_by_key(|s| rank(s)))
+        Ok(found)
     }
+
+    /// The sign-in an Entra profile bound to `sign_in_id` (asking for `tenant`, if any) uses now: its
+    /// own sign-in while that has its refresh token; else a live sign-in by the same identity in the
+    /// tenant the profile lists (its `tenant`, or the bound sign-in's own). Returns the bound record too.
+    pub fn usable_sign_in(
+        &self,
+        sign_in_id: &str,
+        tenant: Option<&str>,
+    ) -> Result<(Option<SignIn>, Option<SignIn>), CommandError> {
+        let Some(bound) = self.store.sign_in(sign_in_id)? else {
+            return Ok((None, None));
+        };
+        if self.session.is_signed_in(&bound)? {
+            return Ok((Some(bound.clone()), Some(bound)));
+        }
+        let t = tenant.unwrap_or(&bound.tenant_id);
+        let usable = self.live_sign_in_like(t, &bound)?;
+        Ok((Some(bound), usable))
+    }
+}
+
+/// Whether two sign-ins are the same person: the same object id, or the same user principal (any case).
+pub fn same_identity(a: &SignIn, b: &SignIn) -> bool {
+    a.id == b.id || a.user_principal.eq_ignore_ascii_case(&b.user_principal)
 }

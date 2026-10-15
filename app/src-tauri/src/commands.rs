@@ -3,9 +3,10 @@
 use crate::error::CommandError;
 use crate::events::TauriEvents;
 use crate::ops;
+use crate::ops::profiles::ProfileView;
 use crate::state::AppState;
 use dispatched_core::diagnostics::ConnectionReport;
-use dispatched_core::profiles::{Profile, ProfileDraft};
+use dispatched_core::profiles::ProfileDraft;
 use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, State};
@@ -43,7 +44,7 @@ pub async fn settings_set(
 }
 
 #[tauri::command]
-pub async fn profiles_list(state: State<'_, AppState>) -> Result<Vec<Profile>, CommandError> {
+pub async fn profiles_list(state: State<'_, AppState>) -> Result<Vec<ProfileView>, CommandError> {
     ops::profiles::list(&state)
 }
 
@@ -52,7 +53,7 @@ pub async fn profile_save(
     app: AppHandle,
     state: State<'_, AppState>,
     draft: ProfileDraft,
-) -> Result<Profile, CommandError> {
+) -> Result<ProfileView, CommandError> {
     ops::profiles::save(&state, &TauriEvents(app), draft).await
 }
 
@@ -74,7 +75,7 @@ pub async fn profile_test(
     ops::profiles::test(&state, &TauriEvents(app), &id).await
 }
 
-use crate::ops::account::AccountView;
+use crate::ops::account::{AccountView, SignInView};
 use crate::ops::connection::ConnectionView;
 use crate::ops::discovery::{DiscoveryView, TenantView};
 use crate::ops::tree::EntityListing;
@@ -95,7 +96,7 @@ pub async fn sign_in(
     state: State<'_, AppState>,
     tenant: Option<String>,
     device_code: bool,
-) -> Result<AccountView, CommandError> {
+) -> Result<SignInView, CommandError> {
     ops::account::sign_in(&state, &TauriEvents(app), tenant, device_code).await
 }
 

@@ -1,21 +1,87 @@
 use crate::error::CommandError;
 use crate::events::{Events, tracked};
-use crate::state::AppState;
+use crate::state::{AppState, same_identity};
 use dispatched_core::diagnostics::{Check, ConnectionReport, test_connection};
-use dispatched_core::profiles::{Profile, ProfileAuth, ProfileDraft, namespace_for};
+use dispatched_core::profiles::store::normalize_tenant;
+use dispatched_core::profiles::{DraftAuth, Profile, ProfileAuth, ProfileDraft, namespace_for};
 use dispatched_core::{Error, Explorer, Namespace};
+use horizon_azure_kit::auth::SignIn;
+use serde::Serialize;
 
-pub fn list(state: &AppState) -> Result<Vec<Profile>, CommandError> {
-    Ok(state.store.list()?)
+/// The sign-in an Entra profile uses, as the UI needs it: whose it is and whether it still works.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BoundSignIn {
+    pub id: String,
+    pub user_principal: String,
+    /// The sign-in's own (home) tenant.
+    pub tenant_id: String,
+    /// Its refresh token exists, so connecting can get tokens without signing in again.
+    pub live: bool,
+    /// It is the current account's identity (same object id or user principal).
+    pub same_account: bool,
+    /// It is a tenant's own sign-in, made outside the current account's home tenant: the profile's
+    /// tenant is that one even though none is stored.
+    pub own_tenant: bool,
 }
 
-/// The sign-in a new Entra profile binds to: the current sign-in for its home tenant (no tenant, or the
-/// current sign-in's own tenant); for another tenant, the sign-in made in that tenant when there is one
-/// (a guest tenant's own sign-in), else the current sign-in.
-fn entra_sign_in(
-    state: &AppState,
-    tenant: Option<&str>,
-) -> Result<Option<horizon_azure_kit::auth::SignIn>, CommandError> {
+/// A profile as the UI sees it: the stored profile plus, for Entra, the sign-in it uses.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProfileView {
+    #[serde(flatten)]
+    pub profile: Profile,
+    pub bound_sign_in: Option<BoundSignIn>,
+}
+
+impl std::ops::Deref for ProfileView {
+    type Target = Profile;
+    fn deref(&self) -> &Profile {
+        &self.profile
+    }
+}
+
+/// The sign-in an Entra profile uses now (see `AppState::usable_sign_in`), described for the UI. A
+/// bound sign-in with no usable replacement is reported as not live.
+pub fn bound_sign_in(state: &AppState, p: &Profile) -> Result<Option<BoundSignIn>, CommandError> {
+    let ProfileAuth::Entra { sign_in_id, tenant } = &p.auth else {
+        return Ok(None);
+    };
+    let (record, usable) = state.usable_sign_in(sign_in_id, tenant.as_deref())?;
+    let Some(s) = usable.clone().or(record) else {
+        return Ok(None);
+    };
+    let current = state.current_sign_in()?;
+    Ok(Some(BoundSignIn {
+        live: usable.is_some(),
+        same_account: current.as_ref().is_some_and(|c| same_identity(c, &s)),
+        own_tenant: current
+            .as_ref()
+            .is_some_and(|c| !c.tenant_id.eq_ignore_ascii_case(&s.tenant_id)),
+        id: s.id,
+        user_principal: s.user_principal,
+        tenant_id: s.tenant_id,
+    }))
+}
+
+pub fn view(state: &AppState, profile: Profile) -> Result<ProfileView, CommandError> {
+    Ok(ProfileView {
+        bound_sign_in: bound_sign_in(state, &profile)?,
+        profile,
+    })
+}
+
+pub fn list(state: &AppState) -> Result<Vec<ProfileView>, CommandError> {
+    state
+        .store
+        .list()?
+        .into_iter()
+        .map(|p| view(state, p))
+        .collect()
+}
+
+/// The sign-in an Entra profile binds to: the current sign-in for its home tenant (no tenant, or the
+/// current sign-in's own tenant); for another tenant, the current account's own sign-in in that tenant
+/// when there is one, else the current sign-in (asking for the tenant). Never another account's.
+fn entra_sign_in(state: &AppState, tenant: Option<&str>) -> Result<Option<SignIn>, CommandError> {
     let current = state.current_sign_in()?;
     let Some(t) = tenant.map(str::trim).filter(|t| !t.is_empty()) else {
         return Ok(current);
@@ -32,26 +98,54 @@ fn entra_sign_in(
     Ok(current)
 }
 
+/// The sign-in an edited Entra profile is rebound to, if any: the one `entra_sign_in` resolves for its
+/// tenant, but only when that is the same identity as the sign-in the profile uses now, or the profile
+/// has no working sign-in. An edit never moves a profile to another account.
+fn rebind_on_edit(
+    state: &AppState,
+    existing: &Profile,
+    tenant: Option<&str>,
+) -> Result<Option<SignIn>, CommandError> {
+    let ProfileAuth::Entra {
+        sign_in_id,
+        tenant: stored,
+    } = &existing.auth
+    else {
+        return Ok(None);
+    };
+    let Some(resolved) = entra_sign_in(state, tenant)? else {
+        return Ok(None);
+    };
+    let (record, usable) = state.usable_sign_in(sign_in_id, stored.as_deref())?;
+    Ok(match usable.or(record) {
+        Some(now) if !same_identity(&now, &resolved) && state.session.is_signed_in(&now)? => None,
+        _ => Some(resolved),
+    })
+}
+
 pub async fn save(
     state: &AppState,
     ev: &dyn Events,
     draft: ProfileDraft,
-) -> Result<Profile, CommandError> {
+) -> Result<ProfileView, CommandError> {
     tracked(
         ev,
         "Saving the connection failed",
         async {
-            let sign_in = match &draft.auth {
-                dispatched_core::profiles::DraftAuth::Entra { tenant, .. } => {
-                    entra_sign_in(state, tenant.as_deref())?
-                }
+            let sign_in = match (&draft.auth, &draft.id) {
+                (DraftAuth::Entra { tenant, .. }, None) => entra_sign_in(state, tenant.as_deref())?,
+                (DraftAuth::Entra { tenant, .. }, Some(id)) => match state.store.get_by_id(id)? {
+                    Some(existing) => rebind_on_edit(state, &existing, tenant.as_deref())?,
+                    None => None,
+                },
                 _ => None,
             };
-            Ok(state
+            let p = state
                 .store
-                .save_draft(&draft, state.secrets.as_ref(), sign_in.as_ref())?)
+                .save_draft(&draft, state.secrets.as_ref(), sign_in.as_ref())?;
+            view(state, p)
         },
-        |p| format!("Saved connection {}", p.name),
+        |p| format!("Saved connection {}", p.profile.name),
     )
     .await
 }
@@ -91,26 +185,35 @@ pub async fn delete(state: &AppState, ev: &dyn Events, id: &str) -> Result<(), C
     .await
 }
 
-/// The namespace a profile points at, with errors that name the profile and the fix.
+/// The namespace a profile points at, with errors that name the profile and the fix. An Entra profile
+/// uses the sign-in `AppState::usable_sign_in` finds, which may be the same account's newer sign-in in
+/// the profile's tenant (made after the profile was saved); it then asks that sign-in's own tenant.
 pub fn namespace_for_profile(state: &AppState, p: &Profile) -> Result<Namespace, CommandError> {
-    let sign_in = match &p.auth {
-        ProfileAuth::ConnectionString => None,
-        ProfileAuth::Entra { sign_in_id, .. } => {
-            let s = state.store.sign_in(sign_in_id)?;
-            match s {
-                Some(s) if state.session.is_signed_in(&s)? => Some(s),
-                _ => {
-                    return Err(Error::NotSignedIn(format!(
-                        "the sign-in used by profile `{}` has expired; sign in again",
-                        p.name
-                    ))
-                    .into());
-                }
+    let (profile, sign_in) = match &p.auth {
+        ProfileAuth::ConnectionString => (p.clone(), None),
+        ProfileAuth::Entra { sign_in_id, tenant } => {
+            let Some(s) = state.usable_sign_in(sign_in_id, tenant.as_deref())?.1 else {
+                return Err(Error::NotSignedIn(format!(
+                    "the sign-in used by profile `{}` has expired; sign in again",
+                    p.name
+                ))
+                .into());
+            };
+            let mut used = p.clone();
+            if s.id != *sign_in_id {
+                used.auth = ProfileAuth::Entra {
+                    sign_in_id: s.id.clone(),
+                    tenant: normalize_tenant(
+                        Some(tenant.as_deref().unwrap_or(&s.tenant_id)),
+                        Some(&s.tenant_id),
+                    ),
+                };
             }
+            (used, Some(s))
         }
     };
     Ok(namespace_for(
-        p,
+        &profile,
         state.secrets.as_ref(),
         &state.session,
         sign_in.as_ref(),
@@ -285,88 +388,83 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_entra_profile_binds_to_the_sign_in_made_in_its_own_tenant() {
-        use crate::ops::test_util::remember_sign_in;
+    async fn an_entra_profile_binds_to_the_current_account_s_sign_in_in_its_tenant() {
+        use crate::ops::test_util::{remember_guest_sign_in, remember_sign_in};
         let s = state();
         let home = remember_sign_in(&s, "home-oid", "tenant-home", true);
         s.store.set_current_sign_in(Some(&home.id)).unwrap();
-        remember_sign_in(&s, "guest-oid", "tenant-guest", true);
+        remember_guest_sign_in(&s, &home, "guest-oid", "tenant-guest", true);
         let ev = Recorder::default();
         let guest = save(&s, &ev, entra_draft("Guest ns", Some("tenant-guest")))
             .await
             .unwrap();
+        // That sign-in's home is the tenant, so no tenant is stored.
         assert_eq!(
-            guest.auth,
+            guest.profile.auth,
             ProfileAuth::Entra {
                 sign_in_id: "guest-oid".into(),
-                tenant: Some("tenant-guest".into())
+                tenant: None
             }
         );
+        let bound = guest.bound_sign_in.unwrap();
+        assert!(bound.live && bound.same_account && bound.own_tenant);
+        assert_eq!(bound.tenant_id, "tenant-guest");
         // No tenant, or one with no sign-in of its own: the current (home) sign-in.
         let plain = save(&s, &ev, entra_draft("Home ns", None)).await.unwrap();
         assert!(
-            matches!(&plain.auth, ProfileAuth::Entra { sign_in_id, .. } if sign_in_id == "home-oid")
+            matches!(&plain.profile.auth, ProfileAuth::Entra { sign_in_id, .. } if sign_in_id == "home-oid")
         );
         let other = save(&s, &ev, entra_draft("Other ns", Some("tenant-other")))
             .await
             .unwrap();
         assert!(
-            matches!(&other.auth, ProfileAuth::Entra { sign_in_id, tenant }
+            matches!(&other.profile.auth, ProfileAuth::Entra { sign_in_id, tenant }
             if sign_in_id == "home-oid" && tenant.as_deref() == Some("tenant-other"))
         );
     }
 
     #[tokio::test]
-    async fn the_current_sign_in_s_own_tenant_is_home_and_binds_to_it() {
+    async fn another_account_s_sign_in_is_never_bound() {
         use crate::ops::test_util::remember_sign_in;
         let s = state();
-        // Another account signed in to the same tenant, sorting before the current one.
+        // Another account signed in to the home tenant (sorting first) and to the guest tenant.
         remember_sign_in(&s, "a-other-oid", "tenant-home", true);
+        remember_sign_in(&s, "a-stranger-oid", "tenant-guest", true);
         let home = remember_sign_in(&s, "home-oid", "tenant-home", true);
         s.store.set_current_sign_in(Some(&home.id)).unwrap();
         let ev = Recorder::default();
         let p = save(&s, &ev, entra_draft("Home ns", Some("TENANT-HOME")))
             .await
             .unwrap();
-        assert!(
-            matches!(&p.auth, ProfileAuth::Entra { sign_in_id, .. } if sign_in_id == "home-oid"),
-            "{:?}",
-            p.auth
-        );
-    }
-
-    #[test]
-    fn a_tenant_s_own_sign_in_prefers_the_current_account() {
-        use crate::ops::test_util::remember_sign_in;
-        let s = state();
-        let home = remember_sign_in(&s, "home-oid", "tenant-home", true);
-        s.store.set_current_sign_in(Some(&home.id)).unwrap();
-        // Two accounts signed in to the guest tenant; the second is the current account's guest sign-in.
-        remember_sign_in(&s, "a-stranger-oid", "tenant-guest", true);
-        let mine = horizon_azure_kit::auth::SignIn {
-            user_principal: home.user_principal.clone(),
-            ..remember_sign_in(&s, "b-guest-oid", "tenant-guest", true)
-        };
-        s.store.save_sign_in(&mine).unwrap();
         assert_eq!(
-            s.sign_in_for_tenant("tenant-guest").unwrap().unwrap().id,
-            "b-guest-oid"
+            p.profile.auth,
+            ProfileAuth::Entra {
+                sign_in_id: "home-oid".into(),
+                tenant: None
+            }
         );
-        // Without a current sign-in the store's order decides.
+        let p = save(&s, &ev, entra_draft("Guest ns", Some("tenant-guest")))
+            .await
+            .unwrap();
+        assert_eq!(
+            p.profile.auth,
+            ProfileAuth::Entra {
+                sign_in_id: "home-oid".into(),
+                tenant: Some("tenant-guest".into())
+            }
+        );
+        // Without a current sign-in nothing in the tenant counts as the current account's.
         s.store.set_current_sign_in(None).unwrap();
-        assert_eq!(
-            s.sign_in_for_tenant("tenant-guest").unwrap().unwrap().id,
-            "a-stranger-oid"
-        );
+        assert!(s.sign_in_for_tenant("tenant-guest").unwrap().is_none());
     }
 
     #[tokio::test]
     async fn a_tenant_sign_in_without_its_token_is_not_used_for_a_profile() {
-        use crate::ops::test_util::remember_sign_in;
+        use crate::ops::test_util::{remember_guest_sign_in, remember_sign_in};
         let s = state();
         let home = remember_sign_in(&s, "home-oid", "tenant-home", true);
         s.store.set_current_sign_in(Some(&home.id)).unwrap();
-        remember_sign_in(&s, "guest-oid", "tenant-guest", false);
+        remember_guest_sign_in(&s, &home, "guest-oid", "tenant-guest", false);
         let p = save(
             &s,
             &Recorder::default(),
@@ -375,7 +473,98 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            matches!(&p.auth, ProfileAuth::Entra { sign_in_id, .. } if sign_in_id == "home-oid")
+            matches!(&p.profile.auth, ProfileAuth::Entra { sign_in_id, .. } if sign_in_id == "home-oid")
         );
+    }
+
+    #[tokio::test]
+    async fn a_guest_bound_profile_is_the_current_account_s_and_not_a_different_one() {
+        use crate::ops::test_util::{remember_guest_sign_in, remember_sign_in};
+        let s = state();
+        let home = remember_sign_in(&s, "home-oid", "tenant-home", true);
+        s.store.set_current_sign_in(Some(&home.id)).unwrap();
+        remember_guest_sign_in(&s, &home, "guest-oid", "tenant-guest", true);
+        let ev = Recorder::default();
+        let p = save(&s, &ev, entra_draft("Guest ns", Some("tenant-guest")))
+            .await
+            .unwrap();
+        // Editing it (the form shows the tenant the profile uses) keeps the binding, live and the same account.
+        let mut edit = entra_draft("Guest ns renamed", Some("tenant-guest"));
+        edit.id = Some(p.profile.id.clone());
+        let e = save(&s, &ev, edit).await.unwrap();
+        assert!(
+            matches!(&e.profile.auth, ProfileAuth::Entra { sign_in_id, .. } if sign_in_id == "guest-oid")
+        );
+        let listed = list(&s).unwrap();
+        let bound = listed[0].bound_sign_in.clone().unwrap();
+        assert!(bound.live && bound.same_account, "{bound:?}");
+        // Signed in as someone else: the profile's sign-in belongs to another identity.
+        let other = remember_sign_in(&s, "other-oid", "tenant-other", true);
+        s.store.set_current_sign_in(Some(&other.id)).unwrap();
+        let bound = list(&s).unwrap()[0].bound_sign_in.clone().unwrap();
+        assert!(bound.live && !bound.same_account, "{bound:?}");
+        // ... and an edit does not move it to that account.
+        let mut edit = entra_draft("Guest ns", Some("tenant-guest"));
+        edit.id = Some(p.profile.id.clone());
+        let e = save(&s, &ev, edit).await.unwrap();
+        assert!(
+            matches!(&e.profile.auth, ProfileAuth::Entra { sign_in_id, .. } if sign_in_id == "guest-oid")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_edit_rebinds_a_profile_made_before_its_tenant_sign_in() {
+        use crate::ops::test_util::{remember_guest_sign_in, remember_sign_in};
+        let s = state();
+        let home = remember_sign_in(&s, "home-oid", "tenant-home", true);
+        s.store.set_current_sign_in(Some(&home.id)).unwrap();
+        let ev = Recorder::default();
+        let p = save(&s, &ev, entra_draft("Guest ns", Some("tenant-guest")))
+            .await
+            .unwrap();
+        assert!(
+            matches!(&p.profile.auth, ProfileAuth::Entra { sign_in_id, .. } if sign_in_id == "home-oid")
+        );
+        // The user then signs in to the tenant (MFA) and saves the profile again.
+        remember_guest_sign_in(&s, &home, "guest-oid", "tenant-guest", true);
+        let mut edit = entra_draft("Guest ns", Some("tenant-guest"));
+        edit.id = Some(p.profile.id.clone());
+        let e = save(&s, &ev, edit).await.unwrap();
+        assert_eq!(
+            e.profile.auth,
+            ProfileAuth::Entra {
+                sign_in_id: "guest-oid".into(),
+                tenant: None
+            }
+        );
+    }
+
+    #[test]
+    fn an_expired_bound_sign_in_falls_back_to_the_same_person_s_tenant_sign_in() {
+        use crate::ops::test_util::{remember_guest_sign_in, remember_sign_in};
+        let s = state();
+        // Bound to a home sign-in whose token is gone, asking for the guest tenant.
+        let home = remember_sign_in(&s, "home-oid", "tenant-home", false);
+        let p = Profile::entra(
+            "G",
+            "g.servicebus.windows.net",
+            "home-oid",
+            Some("tenant-guest"),
+        );
+        s.store.insert(&p).unwrap();
+        let bound = bound_sign_in(&s, &p).unwrap().unwrap();
+        assert!(!bound.live);
+        assert_eq!(
+            namespace_for_profile(&s, &p).unwrap_err().kind,
+            "not_signed_in"
+        );
+        // Another person's tenant sign-in does not help; the same person's does.
+        remember_sign_in(&s, "stranger-oid", "tenant-guest", true);
+        assert!(!bound_sign_in(&s, &p).unwrap().unwrap().live);
+        remember_guest_sign_in(&s, &home, "guest-oid", "tenant-guest", true);
+        let bound = bound_sign_in(&s, &p).unwrap().unwrap();
+        assert!(bound.live);
+        assert_eq!(bound.id, "guest-oid");
+        assert!(namespace_for_profile(&s, &p).is_ok());
     }
 }
