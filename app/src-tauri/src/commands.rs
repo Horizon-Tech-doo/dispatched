@@ -76,6 +76,7 @@ pub async fn profile_test(
 
 use crate::ops::account::AccountView;
 use crate::ops::connection::ConnectionView;
+use crate::ops::discovery::{DiscoveryView, TenantView};
 use crate::ops::tree::EntityListing;
 use dispatched_core::{
     EntityPath, PeekOptions, PeekView, PeekedMessage, SubQueue, SubscriptionInfo,
@@ -101,6 +102,23 @@ pub async fn sign_in(
 #[tauri::command]
 pub fn sign_in_cancel(state: State<'_, AppState>) {
     ops::account::cancel(&state);
+}
+
+#[tauri::command]
+pub async fn list_tenants(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<TenantView>, CommandError> {
+    ops::discovery::list_tenants(&state, &TauriEvents(app)).await
+}
+
+#[tauri::command]
+pub async fn discover_namespaces(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    tenant: Option<String>,
+) -> Result<DiscoveryView, CommandError> {
+    ops::discovery::discover(&state, &TauriEvents(app), tenant).await
 }
 
 #[tauri::command]

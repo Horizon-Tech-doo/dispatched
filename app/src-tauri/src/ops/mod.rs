@@ -3,6 +3,7 @@
 
 pub mod account;
 pub mod connection;
+pub mod discovery;
 pub mod profiles;
 pub mod settings;
 pub mod tree;

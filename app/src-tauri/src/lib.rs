@@ -80,6 +80,8 @@ pub fn run() {
             commands::account_current,
             commands::sign_in,
             commands::sign_in_cancel,
+            commands::list_tenants,
+            commands::discover_namespaces,
             commands::connect,
             commands::disconnect,
             commands::list_entities,
