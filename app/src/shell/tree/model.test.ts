@@ -1,0 +1,79 @@
+import { describe, expect, it } from "vitest";
+import * as fx from "@/engine/mock/fixtures";
+import type { EntityListing } from "@/engine";
+import { buildNodes, type SubsState } from "./model";
+
+const listing: EntityListing = { queues: fx.queues, topics: fx.topics, limited: null, known: [] };
+const loaded = (topic: string): SubsState => ({ data: fx.subscriptions[topic], error: null, pending: false });
+const ids = (n: { id: string }[]) => n.map((x) => x.id);
+
+describe("buildNodes", () => {
+  it("builds namespace, groups and entities with depth and parents", () => {
+    const n = buildNodes({ host: "sb-logistics-prod", listing, subs: {}, expanded: new Set(["group:queues", "group:topics"]), filter: "" });
+    expect(n[0]).toMatchObject({ id: "ns", depth: 0, parentId: null, kind: "namespace" });
+    expect(n.find((x) => x.id === "q:invoice-generate")).toMatchObject({ depth: 2, parentId: "group:queues", entity: { id: "invoice-generate", kind: "queue" } });
+    expect(n.find((x) => x.id === "t:shipment-events")).toMatchObject({ expandable: true, expanded: false });
+    expect(ids(n)).not.toContain("s:shipment-events/tracking-sync");
+  });
+
+  it("model_handles_empty_topics_and_unknown_counts", () => {
+    const n = buildNodes({
+      host: "h", listing,
+      subs: { "archive-events": loaded("archive-events"), "stock-levels": loaded("stock-levels") },
+      expanded: new Set(["group:topics", "t:archive-events", "t:stock-levels"]), filter: "",
+    });
+    expect(n.find((x) => x.id === "note:archive-events")).toMatchObject({ kind: "note", label: "No subscriptions", depth: 3 });
+    expect(n.find((x) => x.id === "s:stock-levels/replenish")).toMatchObject({ counts: null, entity: { id: "stock-levels/subscriptions/replenish", kind: "subscription" } });
+  });
+
+  it("shows loading and error children for expanded topics", () => {
+    const n = buildNodes({
+      host: "h", listing,
+      subs: { "carrier-updates": { pending: true }, "shipment-events": { pending: false, error: { message: "access denied" } } },
+      expanded: new Set(["group:topics", "t:carrier-updates", "t:shipment-events"]), filter: "",
+    });
+    expect(n.find((x) => x.id === "loading:carrier-updates")?.kind).toBe("loading");
+    expect(n.find((x) => x.id === "error:shipment-events")).toMatchObject({ kind: "error", message: "access denied" });
+  });
+
+  it("filter_is_case_insensitive_and_keeps_ancestors", () => {
+    const n = buildNodes({
+      host: "h", listing, subs: { "shipment-events": loaded("shipment-events") },
+      expanded: new Set(), filter: "TRACK",
+    });
+    expect(ids(n)).toEqual(["ns", "group:topics", "t:shipment-events", "s:shipment-events/tracking-sync"]);
+    expect(n.find((x) => x.id === "t:shipment-events")?.expanded).toBe(true);
+  });
+
+  it("limited_listing_shows_known_entities_and_the_reason", () => {
+    const limited: EntityListing = {
+      queues: [], topics: [], limited: "This identity can't list the namespace (needs Manage). Showing pinned entities.",
+      known: [{ entity: "orders", subscription: null }, { entity: "shipment-events", subscription: "tracking-sync" }],
+    };
+    const n = buildNodes({ host: "h", listing: limited, subs: {}, expanded: new Set(), filter: "" });
+    expect(ids(n)).toEqual(["ns", "group:pinned", "k:orders", "k:shipment-events/subscriptions/tracking-sync"]);
+    expect(n[2]).toMatchObject({ entity: { id: "orders", kind: "queue" }, counts: null });
+    expect(n[3]).toMatchObject({ entity: { id: "shipment-events/subscriptions/tracking-sync", kind: "subscription" } });
+  });
+
+  it("pinned_entities_sit_under_their_group_like_queues_do", () => {
+    const limited: EntityListing = { queues: [], topics: [], limited: "x", known: [{ entity: "orders", subscription: null }] };
+    const n = buildNodes({ host: "h", listing: limited, subs: {}, expanded: new Set(), filter: "" });
+    expect(n.find((x) => x.id === "group:pinned")).toMatchObject({ depth: 1, parentId: "ns", expandable: false });
+    expect(n.find((x) => x.id === "k:orders")).toMatchObject({ depth: 2, parentId: "group:pinned" });
+  });
+
+  it("a collapsed group hides its entities", () => {
+    const n = buildNodes({ host: "h", listing, subs: {}, expanded: new Set(), filter: "" });
+    expect(ids(n)).toEqual(["ns", "group:queues", "group:topics"]);
+    expect(n.find((x) => x.id === "group:queues")).toMatchObject({ expandable: true, expanded: false });
+  });
+
+  it("group rows carry the number of entities they list", () => {
+    const n = buildNodes({ host: "h", listing, subs: {}, expanded: new Set(), filter: "" });
+    expect(n.find((x) => x.id === "group:queues")?.count).toBe(4);
+    expect(n.find((x) => x.id === "group:topics")?.count).toBe(4);
+    const f = buildNodes({ host: "h", listing, subs: {}, expanded: new Set(), filter: "label" });
+    expect(f.find((x) => x.id === "group:queues")?.count).toBe(1);
+  });
+});

@@ -1,6 +1,7 @@
 import { Shell } from "./Shell";
+import { NamespaceTree } from "./tree/NamespaceTree";
 
-/** Fills the shell's slots. Tasks 14, 15 and 17 add the tree, workspace and drawer here. */
+/** Fills the shell's slots. Tasks 15 and 17 add the workspace and drawer here. */
 export function Workbench() {
-  return <Shell />;
+  return <Shell tree={<NamespaceTree />} />;
 }

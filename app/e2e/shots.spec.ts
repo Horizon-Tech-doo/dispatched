@@ -68,6 +68,50 @@ export const shots: {
     holds: (p) => p.getByRole("menu"),
     viewportOnly: true,
   },
+  {
+    name: "tree",
+    path: "/?scenario=default&autoconnect=p-logistics",
+    ready: (p) => p.getByRole("tree", { name: "Namespace" }).getByRole("treeitem", { name: "invoice-generate" }),
+    prepare: async (page) => {
+      const tree = page.getByRole("tree", { name: "Namespace" });
+      await page.keyboard.press("Shift"); // keyboard modality so :focus-visible matches
+      for (const topic of ["archive-events", "carrier-updates", "stock-levels", "shipment-events"]) {
+        await tree.getByRole("treeitem", { name: topic, exact: true }).click();
+        await page.keyboard.press("ArrowRight");
+      }
+      await tree.getByRole("treeitem", { name: "replenish" }).waitFor(); // every subscription list has loaded
+      await tree.getByRole("treeitem", { name: "No subscriptions" }).waitFor();
+      await tree.getByRole("treeitem", { name: "tracking-sync" }).click();
+      await expect(tree.getByRole("treeitem", { name: "tracking-sync" })).toHaveAttribute("aria-selected", "true");
+      // WebKit can photograph the row highlight one frame late; let it paint.
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+    },
+  },
+  {
+    name: "tree-menu",
+    path: "/?scenario=default&autoconnect=p-logistics",
+    ready: (p) => p.getByRole("tree", { name: "Namespace" }).getByRole("treeitem", { name: "invoice-generate" }),
+    prepare: async (page) => {
+      await page.getByRole("tree", { name: "Namespace" }).getByRole("treeitem", { name: "invoice-generate" }).click({ button: "right" });
+    },
+    holds: (p) => p.getByRole("menu"),
+    viewportOnly: true,
+  },
+  {
+    name: "tree-forbidden",
+    path: "/?scenario=forbidden&autoconnect=p-logistics",
+    ready: (p) => p.getByRole("tree", { name: "Namespace" }).getByRole("treeitem", { name: "orders" }),
+  },
+  {
+    name: "tree-error",
+    path: "/?scenario=network&autoconnect=p-logistics",
+    ready: (p) => p.getByRole("heading", { name: "Can't list this namespace" }),
+  },
+  {
+    name: "tree-many",
+    path: "/?scenario=many&autoconnect=p-logistics",
+    ready: (p) => p.getByRole("tree", { name: "Namespace" }).getByRole("treeitem", { name: "queue-0000" }),
+  },
 ];
 
 for (const colorScheme of ["dark", "light"] as const) {
