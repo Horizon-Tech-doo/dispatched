@@ -70,7 +70,7 @@ impl AppState {
                     secrets,
                 );
                 s.startup_error = Some(format!(
-                    "Your saved profiles could not be opened ({e}). Changes made now will not be kept."
+                    "Your saved connections could not be opened ({e}). Changes made now will not be kept."
                 ));
                 s
             }
