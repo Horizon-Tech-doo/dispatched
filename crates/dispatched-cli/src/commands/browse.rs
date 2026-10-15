@@ -9,9 +9,9 @@ use clap::Args;
 use dispatched_core::messaging::DEFAULT_SCAN_LIMIT;
 pub use dispatched_core::namespace::known_entities;
 use dispatched_core::{
-    BodyFilter, EntityCounts, EntityPath, Explorer, ExportFormat, ExportedMessage, MessageBody,
-    MessageFilter, Namespace, PeekOptions, PeekPage, PeekView, PeekedMessage, PropertyFilter,
-    QueueInfo, SubscriptionInfo, TopicInfo, write_messages,
+    EntityCounts, EntityPath, Explorer, ExportFormat, ExportedMessage, MessageBody, MessageFilter,
+    Namespace, PeekOptions, PeekPage, PeekView, PeekedMessage, QueueInfo, SubscriptionInfo,
+    TopicInfo, write_messages,
 };
 use std::future::Future;
 use std::io::Write;
@@ -97,6 +97,7 @@ pub struct FilterArgs<'a> {
     pub body_regex: Option<&'a str>,
     pub body_json: Option<&'a str>,
     pub body_json_eq: Option<&'a str>,
+    pub session: Option<&'a str>,
 }
 
 impl ViewArgs {
@@ -107,27 +108,24 @@ impl ViewArgs {
             body_regex: self.body_regex.as_deref(),
             body_json: self.body_json.as_deref(),
             body_json_eq: self.body_json_eq.as_deref(),
+            session: None,
         }
     }
 }
 
 pub fn build_filter(a: &FilterArgs<'_>) -> anyhow::Result<MessageFilter> {
-    let mut f = MessageFilter::default();
-    if let Some(expr) = a.filter {
-        f.property = Some(PropertyFilter::parse(expr)?);
+    if a.body_json_eq.is_some() && a.body_json.is_none() {
+        anyhow::bail!("--body-json-eq needs --body-json PATH");
     }
-    if let Some(t) = a.body_contains {
-        f.body.push(BodyFilter::contains(t));
-    }
-    if let Some(r) = a.body_regex {
-        f.body.push(BodyFilter::regex(r)?);
-    }
-    match (a.body_json, a.body_json_eq) {
-        (Some(p), eq) => f.body.push(BodyFilter::json(p, eq)?),
-        (None, Some(_)) => anyhow::bail!("--body-json-eq needs --body-json PATH"),
-        (None, None) => {}
-    }
-    Ok(f)
+    let spec = dispatched_core::FilterSpec {
+        property: a.filter.map(str::to_string),
+        body_contains: a.body_contains.map(str::to_string),
+        body_regex: a.body_regex.map(str::to_string),
+        body_json_path: a.body_json.map(str::to_string),
+        body_json_equals: a.body_json_eq.map(str::to_string),
+        session_id: a.session.map(str::to_string),
+    };
+    Ok(spec.build()?)
 }
 
 pub fn pick_view(view: Option<&str>, dlq: bool, transfer_dlq: bool) -> anyhow::Result<PeekView> {

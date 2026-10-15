@@ -533,6 +533,7 @@ mod tests {
         let filter = MessageFilter {
             property: Some(PropertyFilter::parse("sys.DeliveryCount = 2").unwrap()),
             body: vec![],
+            ..Default::default()
         };
         let page = scan_messages(
             &mut src,

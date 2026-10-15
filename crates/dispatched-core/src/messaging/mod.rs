@@ -5,6 +5,7 @@ mod management;
 mod message;
 pub mod peek;
 pub mod scan;
+pub mod summary;
 #[cfg(feature = "test-support")]
 pub mod testing;
 mod tokens_ledger;
@@ -21,3 +22,4 @@ pub use scan::{
     DEFAULT_SCAN_LIMIT, PeekOptions, PeekPage, PeekSource, StateCounts, count_messages,
     scan_messages,
 };
+pub use summary::{DETAIL_BODY_CAP, MessageDetail, MessageSummary};
