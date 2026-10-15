@@ -1,84 +1,124 @@
 import { CircleAlert } from "lucide-react";
-import { useEffect, useState } from "react";
-import { installUpdate, type EngineError } from "@/engine";
-import { Button, EmptyState, Sheet } from "@/ui";
+import { useEffect } from "react";
+import { useAppInfo } from "@/engine";
+import { Button, Sheet, formatClock } from "@/ui";
 import { useShell } from "../context";
+import { useJobs } from "../drawer/activity";
+import { installStore, reasonOf, useInstall } from "./installState";
 import { useUpdate } from "./useUpdate";
 
 /** The updater reports dates like "2026-10-20 10:00:00.0 +00:00:00"; the day is all a reader needs. */
 const day = (date: string) => (/^\d{4}-\d{2}-\d{2}/.test(date) ? date.slice(0, 10) : date);
 
+function Problem({ title, reason }: { title: string; reason: string }) {
+  return (
+    <div role="alert" className="flex items-start gap-1.5 text-12">
+      <CircleAlert aria-hidden="true" className="mt-px size-3.5 shrink-0 text-accent" />
+      <div className="flex min-w-0 flex-col">
+        <span className="font-semibold">{title}</span>
+        <span className="break-words">{reason}</span>
+      </div>
+    </div>
+  );
+}
+
+/** A 2px bar. `value` null: size unknown, so a full-width static bar at half strength. */
+function Bar({ value }: { value: number | null }) {
+  return (
+    <div
+      role="progressbar"
+      aria-label="Download progress"
+      aria-valuemin={0}
+      aria-valuemax={100}
+      {...(value == null ? {} : { "aria-valuenow": value })}
+      className="h-0.5 w-full bg-line"
+    >
+      <div className={value == null ? "h-full w-full bg-fg opacity-40" : "h-full bg-fg"} style={value == null ? undefined : { width: `${value}%` }} />
+    </div>
+  );
+}
+
 export function UpdateSheet() {
   const { closeSheet } = useShell();
   const update = useUpdate({ onDemand: true });
-  // undefined: not installing, null: downloading with no known size, number: percent.
-  const [progress, setProgress] = useState<number | null | undefined>(undefined);
-  const [restarting, setRestarting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const install = useInstall();
+  const version = useAppInfo().data?.version;
+  const running = useJobs().filter((j) => !j.finished).length;
   const u = update.data;
-  const installing = progress !== undefined;
+  const checking = update.isFetching;
+  const installing = install.phase !== "idle";
+  const checkError = !checking && update.error ? reasonOf(update.error) : null;
 
-  // Opening the sheet checks now; it must not wait for the start-up delay.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { void update.refetch(); }, []);
+  // Opening the sheet checks now (it must not wait for the start-up delay) and forgets an older install failure.
+  // An install in progress is left alone.
+  useEffect(() => {
+    if (installStore.busy()) return;
+    installStore.reset();
+    void update.refetch();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  async function install() {
-    setError(null);
-    setProgress(null);
-    try {
-      await installUpdate(setProgress);
-      setRestarting(true);
-    } catch (e) {
-      setProgress(undefined);
-      setError((e as EngineError).message ?? String(e));
-    }
-  }
+  const status =
+    install.phase === "downloading" ? (install.progress == null ? "Downloading…" : `Downloading ${install.progress}%`)
+    : install.phase === "installing" ? "Installing…"
+    : install.phase === "restarting" ? "Restarting…"
+    : null;
+  const label = install.phase === "idle" ? (install.error ? "Try again" : "Install and restart") : install.phase === "downloading" ? "Downloading…" : status;
 
-  const title = u
-    ? "Update available"
-    : update.isFetching ? "Checking for updates"
-    : update.error ? "Update check failed"
-    : "Dispatched is up to date";
-  const installLabel = restarting ? "Restarting…" : installing ? (progress == null ? "Downloading…" : `Downloading ${progress}%`) : "Install and restart";
   return (
     <Sheet
       open
       onOpenChange={(o) => !o && !installing && closeSheet()}
-      title={title}
+      dismissible={!installing}
+      title="Updates"
+      width={440}
       footer={
-        u ? (
-          <>
-            <Button variant="quiet" onClick={closeSheet} disabled={installing}>Later</Button>
-            <Button variant="primary" onClick={() => void install()} disabled={installing}>{installLabel}</Button>
-          </>
-        ) : (
-          <Button onClick={() => void update.refetch()} disabled={update.isFetching}>Check again</Button>
-        )
+        <div className="flex w-full flex-col gap-2">
+          {u && running > 0 && (
+            <p className="m-0 text-11 text-muted">
+              {running} {running === 1 ? "job" : "jobs"} running will stop when Dispatched restarts.
+            </p>
+          )}
+          <div className="flex justify-end gap-2">
+            {u ? (
+              <>
+                {checkError && <Button variant="quiet" onClick={() => void update.refetch()} disabled={installing}>Check again</Button>}
+                <Button variant="quiet" onClick={closeSheet} disabled={installing}>Later</Button>
+                <Button variant="primary" onClick={() => void installStore.start()} disabled={installing}>{label}</Button>
+              </>
+            ) : (
+              <Button onClick={() => void update.refetch()} disabled={checking}>Check again</Button>
+            )}
+          </div>
+        </div>
       }
     >
-      {u ? (
-        <div className="flex flex-col gap-2">
-          <p className="m-0 text-13">
-            <span className="font-semibold">Version {u.version}</span>
-            {u.date && <span className="text-muted">, released {day(u.date)}</span>}
+      <div className="flex flex-col gap-3">
+        {checking && !u && <p role="status" className="m-0 text-12 text-muted">Checking for updates…</p>}
+        {checkError && <Problem title="Couldn't check for updates" reason={checkError} />}
+        {u && (
+          <div className="flex flex-col gap-2">
+            <p className="m-0 text-13">
+              <span className="font-semibold">Version {u.version}</span>
+              {u.date && <span className="text-muted">, released {day(u.date)}</span>}
+            </p>
+            {version && <p className="m-0 text-12 text-muted">You have {version}.</p>}
+            {u.notes && <p className="m-0 whitespace-pre-wrap text-12">{u.notes}</p>}
+          </div>
+        )}
+        {installing && (
+          <div className="flex flex-col gap-1.5">
+            {install.phase === "downloading" && <Bar value={install.progress} />}
+            <p role="status" className="m-0 text-12 text-muted">{status}</p>
+          </div>
+        )}
+        {install.error && <Problem title="Couldn't install the update" reason={install.error} />}
+        {!u && !checking && !update.error && (
+          <p className="m-0 text-12 text-muted">
+            Dispatched{version && ` ${version}`}.{update.dataUpdatedAt > 0 && ` Checked ${formatClock(new Date(update.dataUpdatedAt).toISOString())}.`}
           </p>
-          {u.notes && <p className="m-0 whitespace-pre-wrap text-12">{u.notes}</p>}
-          {installing && <p className="m-0 text-12 text-muted">Dispatched restarts when the download finishes.</p>}
-          {error && (
-            <div className="flex items-start gap-1.5 text-12" role="alert">
-              <CircleAlert aria-hidden="true" className="mt-px size-3.5 shrink-0 text-accent" />
-              <div className="flex flex-col">
-                <span className="font-semibold">Couldn't install the update.</span>
-                <span>{error}</span>
-              </div>
-            </div>
-          )}
-        </div>
-      ) : update.error ? (
-        <EmptyState tone="error" title="Couldn't check for updates" body={(update.error as Error).message} />
-      ) : (
-        !update.isFetching && <p className="m-0 text-12 text-muted">You have the latest version.</p>
-      )}
+        )}
+      </div>
     </Sheet>
   );
 }

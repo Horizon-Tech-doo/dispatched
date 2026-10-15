@@ -22,7 +22,7 @@ export function SettingsSheet() {
   return (
     <Sheet open onOpenChange={(o) => !o && closeSheet()} title="Settings" width={440}>
       <div className="flex flex-col divide-y divide-line">
-        <Row label="Theme">
+        <Row label="Theme" hint="System follows the operating system.">
           <Segmented
             label="Theme"
             value={prefs.theme}

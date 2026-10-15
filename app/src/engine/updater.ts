@@ -5,7 +5,9 @@ import { inTauri } from "./ipc";
 export interface UpdateInfo { version: string; notes: string | null; date: string | null }
 export interface Updater {
   check(): Promise<UpdateInfo | null>;
-  install(onProgress: (pct: number | null) => void): Promise<void>;
+  /** `onProgress` reports the download percent (null while the size is unknown); `onInstalling` fires when the
+   *  download is done and the update is being applied. Resolves just before the app restarts. */
+  install(onProgress: (pct: number | null) => void, onInstalling?: () => void): Promise<void>;
 }
 
 let pending: Update | null = null;
@@ -16,8 +18,8 @@ const tauriUpdater: Updater = {
     pending = await check();
     return pending ? { version: pending.version, notes: pending.body ?? null, date: pending.date ?? null } : null;
   },
-  async install(onProgress) {
-    if (!pending) return;
+  async install(onProgress, onInstalling) {
+    if (!pending) throw new Error("No update is ready to install. Check for updates again.");
     let total = 0;
     let got = 0;
     await pending.downloadAndInstall((e) => {
@@ -25,7 +27,7 @@ const tauriUpdater: Updater = {
       else if (e.event === "Progress") {
         got += e.data.chunkLength;
         onProgress(total ? Math.round((got / total) * 100) : null);
-      }
+      } else if (e.event === "Finished") onInstalling?.();
     });
     await relaunch();
   },
@@ -42,4 +44,5 @@ export function resetUpdater(): void {
   impl = tauriUpdater;
 }
 export const checkForUpdate = () => impl.check();
-export const installUpdate = (onProgress: (pct: number | null) => void) => impl.install(onProgress);
+export const installUpdate = (onProgress: (pct: number | null) => void, onInstalling?: () => void) =>
+  impl.install(onProgress, onInstalling);

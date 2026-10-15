@@ -328,15 +328,15 @@ export const shots: {
     prepare: async (page: Page) => {
       await page.keyboard.press("Shift"); // keyboard modality so :focus-visible matches
       await page.getByRole("button", { name: "Update 0.1.0 available" }).click(); // appears 3 s after start
-      const sheet = page.getByRole("dialog", { name: "Update available" });
+      const sheet = page.getByRole("dialog", { name: "Updates" });
       if (name === "update-downloading") {
         await sheet.getByRole("button", { name: "Install and restart" }).click();
-        await sheet.getByRole("button", { name: "Downloading 60%" }).waitFor();
+        await sheet.getByRole("progressbar").and(page.locator("[aria-valuenow=\"60\"]")).waitFor();
       } else {
         await sheet.getByText("Faster tree loading.").waitFor();
       }
     },
-    holds: (p: Page) => p.getByRole("dialog", { name: "Update available" }),
+    holds: (p: Page) => p.getByRole("dialog", { name: "Updates" }),
     viewportOnly: true,
   })),
   {
@@ -348,15 +348,40 @@ export const shots: {
     },
   },
   {
+    name: "update-check-error",
+    path: "/?scenario=default&autoconnect=p-logistics&update=check-error",
+    ready: (p) => p.getByRole("tree", { name: "Namespace" }).getByRole("treeitem", { name: "invoice-generate" }),
+    prepare: async (page) => {
+      await page.keyboard.press("ControlOrMeta+,");
+      await page.getByRole("dialog", { name: "Settings" }).getByRole("button", { name: "Check for updates" }).click();
+      await page.getByRole("dialog", { name: "Updates" }).getByText("Could not reach the update server.").waitFor();
+    },
+    holds: (p) => p.getByRole("dialog", { name: "Updates" }),
+    viewportOnly: true,
+  },
+  {
+    name: "update-install-error",
+    path: "/?scenario=default&autoconnect=p-logistics&update=install-error",
+    ready: (p) => p.getByRole("tree", { name: "Namespace" }).getByRole("treeitem", { name: "invoice-generate" }),
+    prepare: async (page) => {
+      await page.getByRole("button", { name: "Update 0.1.0 available" }).click(); // appears 3 s after start
+      const sheet = page.getByRole("dialog", { name: "Updates" });
+      await sheet.getByRole("button", { name: "Install and restart" }).click();
+      await sheet.getByText("The download was interrupted.").waitFor();
+    },
+    holds: (p) => p.getByRole("dialog", { name: "Updates" }),
+    viewportOnly: true,
+  },
+  {
     name: "update-uptodate",
     path: "/?scenario=default&autoconnect=p-logistics",
     ready: (p) => p.getByRole("tree", { name: "Namespace" }).getByRole("treeitem", { name: "invoice-generate" }),
     prepare: async (page) => {
       await page.keyboard.press("ControlOrMeta+,");
       await page.getByRole("dialog", { name: "Settings" }).getByRole("button", { name: "Check for updates" }).click();
-      await page.getByRole("dialog", { name: "Dispatched is up to date" }).getByText("You have the latest version.").waitFor();
+      await page.getByRole("dialog", { name: "Updates" }).getByText(/^Dispatched 0\.0\.1-mock\. Checked/).waitFor();
     },
-    holds: (p) => p.getByRole("dialog", { name: "Dispatched is up to date" }),
+    holds: (p) => p.getByRole("dialog", { name: "Updates" }),
     viewportOnly: true,
   },
 ];

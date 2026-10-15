@@ -3,6 +3,7 @@ import { createContext, useCallback, useContext, useEffect, useState, type Dispa
 import { useTheme } from "@/ui";
 import { startEventCapture } from "./drawer/activity";
 import { useConnectionController, type ConnectionController } from "./connection";
+import { installStore } from "./sheets/installState";
 import { usePrefs, useProfileShell, type Prefs, type ProfileShell, type ShellAction } from "./state";
 
 export type SheetState =
@@ -68,7 +69,9 @@ export function ShellProvider({ children }: { children: ReactNode }) {
     <ShellContext.Provider
       value={{
         prefs, setPrefs, conn, shell, dispatch, shellLoaded, shellProfileId, live, sheet,
-        openSheet: setSheet, closeSheet: () => setSheet(null),
+        // While an update installs, its sheet stays put: other sheets would hide the progress.
+        openSheet: (s) => { if (!installStore.busy() || s.kind === "update") setSheet(s); },
+        closeSheet: () => setSheet(null),
         paletteOpen, setPaletteOpen, refresh,
       }}
     >

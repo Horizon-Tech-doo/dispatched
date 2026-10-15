@@ -15,6 +15,7 @@ export function Sheet({
   children,
   footer,
   width = 420,
+  dismissible = true,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -23,6 +24,8 @@ export function Sheet({
   children: ReactNode;
   footer?: ReactNode;
   width?: number;
+  /** false: no close button, and Escape or a click outside does nothing (a task that must finish first). */
+  dismissible?: boolean;
 }) {
   const reduce = useReducedMotion();
   return (
@@ -31,7 +34,12 @@ export function Sheet({
         {open && (
           <Dialog.Portal forceMount>
             <Dialog.Overlay className="fixed inset-0 z-40 bg-transparent" />
-            <Dialog.Content asChild forceMount {...(description ? {} : { "aria-describedby": undefined })}>
+            <Dialog.Content
+              asChild
+              forceMount
+              {...(description ? {} : { "aria-describedby": undefined })}
+              {...(dismissible ? {} : { onEscapeKeyDown: (e: Event) => e.preventDefault(), onInteractOutside: (e: Event) => e.preventDefault() })}
+            >
               <motion.div
                 initial={reduce ? false : { x: 24, opacity: 0 }}
                 animate={{ x: 0, opacity: 1 }}
@@ -47,9 +55,11 @@ export function Sheet({
                       <Dialog.Description className="m-0 text-12 text-muted">{description}</Dialog.Description>
                     ) : null}
                   </div>
-                  <Dialog.Close asChild>
-                    <IconButton label="Close"><X /></IconButton>
-                  </Dialog.Close>
+                  {dismissible && (
+                    <Dialog.Close asChild>
+                      <IconButton label="Close"><X /></IconButton>
+                    </Dialog.Close>
+                  )}
                 </div>
                 <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">{children}</div>
                 {footer && <div className="flex justify-end gap-2 border-t border-line px-4 py-3">{footer}</div>}
