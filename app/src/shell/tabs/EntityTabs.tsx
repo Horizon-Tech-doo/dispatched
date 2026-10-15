@@ -1,27 +1,45 @@
 import { X } from "lucide-react";
-import { EntityGlyph, IconButton, Tabs, TabsList, TabsTrigger } from "@/ui";
+import { useEffect, useRef } from "react";
+import { IconButton, Tabs, TabsList, TabsTrigger } from "@/ui";
 import { useShell } from "../context";
 import { splitSubscription } from "./subtabs";
 
 export function EntityTabs() {
   const { shell, dispatch } = useShell();
+  const root = useRef<HTMLDivElement>(null);
+  const refocus = useRef(false);
+
+  // After a close button removes its tab, the focused element is gone: move focus to the tab that became active.
+  useEffect(() => {
+    if (!refocus.current) return;
+    refocus.current = false;
+    root.current?.querySelector<HTMLElement>('[role="tab"][data-state="active"]')?.focus();
+  }, [shell.tabs]);
+
   return (
-    <Tabs value={shell.activeTab ?? ""} onValueChange={(id) => dispatch({ type: "activate", id })}>
+    <Tabs ref={root} value={shell.activeTab ?? ""} onValueChange={(id) => dispatch({ type: "activate", id })}>
       <TabsList variant="strip" aria-label="Open entities" className="border-b border-line">
         {shell.tabs.map((t) => {
           const sub = t.kind === "subscription" ? splitSubscription(t.id) : null;
           const name = sub ? sub.name : t.id;
           return (
-            <div key={t.id} className="group/tab flex items-stretch border-r border-line" onAuxClick={(e) => e.button === 1 && dispatch({ type: "close", id: t.id })}>
-              <TabsTrigger value={t.id} className="border-r-0 pr-1.5">
-                <EntityGlyph kind={t.kind} className="text-icon" />
+            // The marker and the active background belong to the whole tab, close button included.
+            <div
+              key={t.id}
+              className="group/tab flex items-stretch border-r border-t-2 border-line border-t-transparent has-[[data-state=active]]:border-t-fg has-[[data-state=active]]:bg-content"
+              onAuxClick={(e) => e.button === 1 && dispatch({ type: "close", id: t.id })}
+            >
+              <TabsTrigger value={t.id} className="border-r-0 border-t-0 pr-1 data-[state=active]:border-t-0 data-[state=active]:bg-transparent">
                 <span>{name}</span>
-                {sub && <span className="text-faint">{sub.topic}</span>}
+                <span className="text-faint">{sub ? sub.topic : t.kind}</span>
               </TabsTrigger>
               <IconButton
-                label={`Close ${name}`}
-                onClick={() => dispatch({ type: "close", id: t.id })}
-                className="my-auto mr-1 size-5 opacity-0 group-hover/tab:opacity-100 focus-visible:opacity-100 group-has-[[data-state=active]]/tab:opacity-100"
+                label={sub ? `Close ${name} on ${sub.topic}` : `Close ${name}`}
+                onClick={() => {
+                  refocus.current = true;
+                  dispatch({ type: "close", id: t.id });
+                }}
+                className="my-auto mr-1.5 size-4 opacity-0 group-hover/tab:opacity-100 focus-visible:opacity-100 group-has-[[data-state=active]]/tab:opacity-100"
               >
                 <X />
               </IconButton>

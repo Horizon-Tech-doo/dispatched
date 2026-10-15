@@ -43,6 +43,11 @@ const iso = (d: string | null) => {
   return min && !sec ? `${min} min` : min ? `${min} min ${sec} s` : `${sec} s`;
 };
 
+/** The sub-tab to show: a persisted one that does not apply to this kind of entity falls back to Overview. */
+export function validSubTab(kind: EntityKind, subTab: SubTabId): SubTabId {
+  return subTabsFor(kind).some((d) => d.id === subTab) ? subTab : "overview";
+}
+
 export interface EntityInfo {
   status: "loading" | "found" | "gone" | "unknown";
   counts: EntityCounts | null;
@@ -57,11 +62,14 @@ export function useEntityInfo(tab: OpenTab): EntityInfo {
   const subs = useQuery({
     queryKey: keys.subscriptions(conn.profileId, sub?.topic ?? ""),
     queryFn: () => commands.listSubscriptions(sub!.topic),
-    enabled: sub !== null && conn.profileId !== null && !entities.data?.limited,
+    enabled: sub !== null && conn.profileId !== null && !entities.data?.limited && !!entities.data?.topics.some((t) => t.name === sub.topic),
   });
   const listing = entities.data;
-  if (!listing || (sub && subs.isPending && !listing.limited)) return { status: "loading", counts: null, facts: [] };
+  // A listing that failed with nothing cached is a state to show, not a loading state to wait on forever.
+  if (!listing) return { status: entities.isError ? "unknown" : "loading", counts: null, facts: [], parent: sub?.topic };
   if (listing.limited) return { status: "unknown", counts: null, facts: [], parent: sub?.topic };
+  if (sub && !listing.topics.some((t) => t.name === sub.topic)) return { status: "gone", counts: null, facts: [], parent: sub.topic };
+  if (sub && subs.isPending) return { status: "loading", counts: null, facts: [], parent: sub.topic };
   if (tab.kind === "queue") {
     const q = listing.queues.find((x) => x.name === tab.id);
     if (!q) return { status: "gone", counts: null, facts: [] };

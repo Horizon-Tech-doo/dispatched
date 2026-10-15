@@ -159,10 +159,18 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
 }
 
 /** Mock builds: `?scenario=` picks the scenario, `?autoconnect=<profile id>`
- *  seeds the last-used profile so the app opens connected. */
+ *  seeds the last-used profile so the app opens connected, and `?seed=<json object>` seeds further settings
+ *  (screenshots use it to start with saved tabs). */
 export function installMock(): void {
   const params = new URLSearchParams(window.location.search);
   const scenario = (params.get("scenario") ?? "default") as Scenario;
   const autoconnect = params.get("autoconnect");
-  setTransport(createMockTransport(scenario, 120, autoconnect ? { last_profile: autoconnect } : {}));
+  let seed: Record<string, unknown> = {};
+  try {
+    const raw = JSON.parse(params.get("seed") ?? "{}") as unknown;
+    if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) seed = raw as Record<string, unknown>;
+  } catch {
+    // an unreadable seed is ignored
+  }
+  setTransport(createMockTransport(scenario, 120, autoconnect ? { ...seed, last_profile: autoconnect } : seed));
 }

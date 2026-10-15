@@ -30,6 +30,37 @@ describe("entity tabs", () => {
     expect(within(dl).getByText("37").className).toContain("text-accent");
     await focus(dl); // Radix activates a focused tab; the panels swallow the pointer-down a click starts with
     expect(await screen.findByRole("heading", { name: "Dead-letter isn't available yet" })).toBeInTheDocument();
+    expect(screen.getByText(/Messages that could not be delivered or processed/)).not.toHaveTextContent("next update");
+  });
+
+  it("shows the kind word beside a queue or topic name, with no glyph, and the topic beside a subscription", async () => {
+    renderShell("default", {
+      last_profile: "p-logistics",
+      "shell:p-logistics": {
+        tabs: [
+          { id: "label-print", kind: "queue", subTab: "overview" },
+          { id: "shipment-events", kind: "topic", subTab: "overview" },
+          { id: "shipment-events/subscriptions/tracking-sync", kind: "subscription", subTab: "overview" },
+        ],
+        activeTab: "label-print",
+      },
+    });
+    const strip = await screen.findByRole("tablist", { name: "Open entities" });
+    expect(within(within(strip).getByRole("tab", { name: /label-print/ })).getByText("queue").className).toContain("text-faint");
+    expect(within(within(strip).getByRole("tab", { name: /^shipment-events topic/ })).getByText("topic").className).toContain("text-faint");
+    expect(within(within(strip).getByRole("tab", { name: /tracking-sync/ })).getByText("shipment-events").className).toContain("text-faint");
+    expect(strip.querySelector("svg:not([class*='lucide-x'])")).toBeNull();
+  });
+
+  it("draws the active marker on the whole tab, close button included", async () => {
+    renderShell("default", { last_profile: "p-logistics", "shell:p-logistics": { tabs: [{ id: "label-print", kind: "queue", subTab: "overview" }], activeTab: "label-print" } });
+    const close = await screen.findByRole("button", { name: "Close label-print" });
+    expect(close.parentElement?.className).toContain("border-t-fg");
+    expect(close.parentElement?.className).toContain("bg-content");
+    const trigger = screen.getByRole("tab", { name: /label-print/ }).className;
+    expect(trigger).toContain("data-[state=active]:bg-transparent");
+    expect(trigger).not.toContain("data-[state=active]:bg-content");
+    expect(trigger).toContain("border-t-0");
   });
 
   it("close with the close button and fall back to the empty workspace", async () => {
@@ -41,10 +72,48 @@ describe("entity tabs", () => {
 
   it("tab_for_missing_entity_shows_gone_state", async () => {
     renderShell("default", { last_profile: "p-logistics", "shell:p-logistics": { tabs: [{ id: "deleted-queue", kind: "queue", subTab: "overview" }], activeTab: "deleted-queue" } });
-    expect(await screen.findByRole("heading", { name: "This entity no longer exists" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "This entity wasn't found" })).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Close tab" }));
     await waitFor(() => expect(screen.queryByRole("tab", { name: /deleted-queue/ })).not.toBeInTheDocument());
   });
+
+  it("names the topic in a subscription's close button", async () => {
+    renderShell("default", { last_profile: "p-logistics", "shell:p-logistics": { tabs: [{ id: "shipment-events/subscriptions/tracking-sync", kind: "subscription", subTab: "overview" }], activeTab: "shipment-events/subscriptions/tracking-sync" } });
+    expect(await screen.findByRole("button", { name: "Close tracking-sync on shipment-events" })).toBeInTheDocument();
+  });
+
+  it("moves focus to the newly active tab after closing with the close button", async () => {
+    renderShell("default", {
+      last_profile: "p-logistics",
+      "shell:p-logistics": {
+        tabs: [{ id: "label-print", kind: "queue", subTab: "overview" }, { id: "customs-docs", kind: "queue", subTab: "overview" }],
+        activeTab: "label-print",
+      },
+    });
+    await userEvent.click(await screen.findByRole("button", { name: "Close label-print" }));
+    await waitFor(() => expect(screen.getByRole("tab", { name: /customs-docs/ })).toHaveFocus());
+    expect(screen.getByRole("tab", { name: /customs-docs/ })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("subscription_of_missing_topic_shows_gone_state", async () => {
+    renderShell("default", { last_profile: "p-logistics", "shell:p-logistics": { tabs: [{ id: "deleted-topic/subscriptions/x", kind: "subscription", subTab: "overview" }], activeTab: "deleted-topic/subscriptions/x" } });
+    expect(await screen.findByRole("heading", { name: "This entity wasn't found" })).toBeInTheDocument();
+  });
+
+  it("falls_back_to_overview_for_a_saved_sub_tab_the_kind_does_not_have", async () => {
+    renderShell("default", { last_profile: "p-logistics", "shell:p-logistics": { tabs: [{ id: "shipment-events", kind: "topic", subTab: "dead-letter" }], activeTab: "shipment-events" } });
+    const views = await screen.findByRole("tablist", { name: "Entity views" });
+    expect(within(views).getByRole("tab", { name: "Overview" })).toHaveAttribute("aria-selected", "true");
+    expect(await screen.findByRole("heading", { name: "Overview isn't available yet" })).toBeInTheDocument();
+  });
+
+  it("shows_the_header_and_a_note_when_the_namespace_cannot_be_listed", async () => {
+    renderShell("network", { last_profile: "p-logistics", "shell:p-logistics": { tabs: [{ id: "label-print", kind: "queue", subTab: "overview" }], activeTab: "label-print" } });
+    expect(await screen.findByRole("heading", { level: 1, name: "label-print" })).toBeInTheDocument();
+    expect(await screen.findByText("Counts are unavailable while the namespace can't be listed.", {}, { timeout: 5000 })).toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: "Loading" })).not.toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Messages" })).toBeInTheDocument();
+  }, 10000);
 
   it("restores the saved sub-tab", async () => {
     renderShell("default", { last_profile: "p-logistics", "shell:p-logistics": { tabs: [{ id: "shipment-events/subscriptions/tracking-sync", kind: "subscription", subTab: "dead-letter" }], activeTab: "shipment-events/subscriptions/tracking-sync" } });
