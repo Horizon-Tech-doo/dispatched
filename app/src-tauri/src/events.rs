@@ -2,16 +2,14 @@
 //! Payloads are built from names, counts and error texts only, never from
 //! secrets or message bodies.
 
-// Jobs and sign-in prompts are emitted by the sign-in and transfer commands
-// that arrive in later tasks.
-#![allow(dead_code)]
-
 use crate::error::CommandError;
 use serde::Serialize;
 use std::future::Future;
 use std::time::Instant;
 
 pub const ACTIVITY: &str = "activity";
+// Jobs are emitted by the transfer commands that arrive in a later milestone.
+#[allow(dead_code)]
 pub const JOB: &str = "job";
 pub const SIGN_IN_PROMPT: &str = "sign-in-prompt";
 
@@ -32,6 +30,7 @@ pub struct ActivityEntry {
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "kebab-case")]
+#[allow(dead_code)]
 pub enum JobEvent {
     Started {
         id: String,
@@ -60,6 +59,7 @@ pub struct SignInPrompt {
 
 pub trait Events: Send + Sync {
     fn activity(&self, e: ActivityEntry);
+    #[allow(dead_code)]
     fn job(&self, e: JobEvent);
     fn sign_in_prompt(&self, p: SignInPrompt);
 }
@@ -87,6 +87,7 @@ impl Events for TauriEvents {
 #[derive(Default)]
 pub struct Recorder {
     pub activity: std::sync::Mutex<Vec<ActivityEntry>>,
+    #[allow(dead_code)]
     pub jobs: std::sync::Mutex<Vec<JobEvent>>,
     pub prompts: std::sync::Mutex<Vec<SignInPrompt>>,
 }

@@ -18,6 +18,14 @@ pub fn run() {
             commands::profile_save,
             commands::profile_delete,
             commands::profile_test,
+            commands::account_current,
+            commands::sign_in,
+            commands::sign_in_cancel,
+            commands::connect,
+            commands::disconnect,
+            commands::list_entities,
+            commands::list_subscriptions,
+            commands::peek,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Dispatched");

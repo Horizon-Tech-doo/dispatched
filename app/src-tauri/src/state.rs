@@ -15,14 +15,21 @@ pub struct Active {
     pub explorer: Arc<Explorer>,
 }
 
+// Hand-written: `Explorer` holds connections and credentials and is not `Debug`.
+impl std::fmt::Debug for Active {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Active")
+            .field("profile_id", &self.profile_id)
+            .finish_non_exhaustive()
+    }
+}
+
 /// App-wide state.
 pub struct AppState {
     pub store: ProfileStore,
     pub secrets: Arc<dyn CredentialStore>,
     pub session: Arc<EntraSession>,
     pub active: RwLock<Option<Active>>,
-    // Read by the sign-in commands added in the next task.
-    #[allow(dead_code)]
     /// Wakes a running `sign_in` so it returns `cancelled`.
     pub sign_in_cancel: Notify,
     /// Why the real database could not be opened, if it couldn't.
@@ -66,8 +73,6 @@ impl AppState {
         }
     }
 
-    // Used by the connection and tree commands added in the next task.
-    #[allow(dead_code)]
     pub async fn active(&self) -> Result<Active, CommandError> {
         self.active
             .read()

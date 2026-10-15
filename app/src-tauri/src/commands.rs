@@ -72,3 +72,86 @@ pub async fn profile_test(
 ) -> Result<ConnectionReport, CommandError> {
     ops::profiles::test(&state, &TauriEvents(app), &id).await
 }
+
+use crate::ops::account::AccountView;
+use crate::ops::connection::ConnectionView;
+use crate::ops::tree::EntityListing;
+use dispatched_core::{
+    EntityPath, PeekOptions, PeekView, PeekedMessage, SubQueue, SubscriptionInfo,
+};
+
+#[tauri::command]
+pub fn account_current(state: State<'_, AppState>) -> Result<Option<AccountView>, CommandError> {
+    ops::account::current(&state)
+}
+
+#[tauri::command]
+pub async fn sign_in(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    tenant: Option<String>,
+    device_code: bool,
+) -> Result<AccountView, CommandError> {
+    ops::account::sign_in(&state, &TauriEvents(app), tenant, device_code).await
+}
+
+#[tauri::command]
+pub fn sign_in_cancel(state: State<'_, AppState>) {
+    ops::account::cancel(&state);
+}
+
+#[tauri::command]
+pub async fn connect(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile_id: String,
+) -> Result<ConnectionView, CommandError> {
+    ops::connection::connect(&state, &TauriEvents(app), &profile_id).await
+}
+
+#[tauri::command]
+pub async fn disconnect(app: AppHandle, state: State<'_, AppState>) -> Result<(), CommandError> {
+    ops::connection::disconnect(&state, &TauriEvents(app)).await
+}
+
+#[tauri::command]
+pub async fn list_entities(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<EntityListing, CommandError> {
+    ops::tree::list_entities(&state, &TauriEvents(app)).await
+}
+
+#[tauri::command]
+pub async fn list_subscriptions(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    topic: String,
+) -> Result<Vec<SubscriptionInfo>, CommandError> {
+    ops::tree::list_subscriptions(&state, &TauriEvents(app), &topic).await
+}
+
+/// Kept from M0 for M1c's message views.
+#[tauri::command]
+pub async fn peek(
+    state: State<'_, AppState>,
+    entity: String,
+    sub_queue: SubQueue,
+    from_sequence: i64,
+    max: u32,
+) -> Result<Vec<PeekedMessage>, CommandError> {
+    let path = EntityPath::parse(&entity)?;
+    let view = match sub_queue {
+        SubQueue::Active => PeekView::Active,
+        SubQueue::DeadLetter => PeekView::DeadLetter,
+        SubQueue::TransferDeadLetter => PeekView::TransferDeadLetter,
+    };
+    let opts = PeekOptions::new(max.min(500)).from_sequence(from_sequence);
+    let page = state
+        .active()
+        .await?
+        .explorer
+        .peek(&path, view, &opts)
+        .await?;
+    Ok(page.messages)
+}

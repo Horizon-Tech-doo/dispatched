@@ -1,8 +1,11 @@
 //! Plain functions behind the Tauri commands. Commands only unwrap Tauri's
 //! state and handle, so everything here is testable without a window.
 
+pub mod account;
+pub mod connection;
 pub mod profiles;
 pub mod settings;
+pub mod tree;
 
 #[cfg(test)]
 pub(crate) mod test_util {
