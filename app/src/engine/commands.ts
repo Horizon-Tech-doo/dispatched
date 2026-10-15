@@ -19,5 +19,6 @@ export const signInCancel = () => call<void>("sign_in_cancel");
 export const connect = (profileId: string) => call<ConnectionView>("connect", { profileId });
 export const disconnect = () => call<void>("disconnect");
 
-export const listEntities = () => call<EntityListing>("list_entities");
-export const listSubscriptions = (topic: string) => call<SubscriptionInfo[]>("list_subscriptions", { topic });
+/** Listings name the profile they are for; the engine refuses one that is no longer connected. */
+export const listEntities = (profileId: string) => call<EntityListing>("list_entities", { profileId });
+export const listSubscriptions = (profileId: string, topic: string) => call<SubscriptionInfo[]>("list_subscriptions", { profileId, topic });

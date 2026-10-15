@@ -3,7 +3,7 @@ import type { AccountView, ActivityEntry, ConnectionView, EntityListing, Profile
 import { setUpdater } from "../updater";
 import * as fx from "./fixtures";
 
-export type Scenario = "default" | "empty" | "forbidden" | "missing-secret" | "network" | "many" | "many-topics";
+export type Scenario = "default" | "empty" | "forbidden" | "missing-secret" | "network" | "sign-in-expired" | "many" | "many-topics";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -12,6 +12,9 @@ function hostFromConnectionString(cs: string | null | undefined): string {
   const m = /Endpoint=sb:\/\/([^/;\s]+)/i.exec(cs ?? "");
   return m?.[1]?.toLowerCase() ?? "new.servicebus.windows.net";
 }
+
+/** `1 queue`, `4 queues`: the Rust activity lines use real plurals. */
+const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
 export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Record<string, unknown> = {}) {
   const listeners = new Map<string, Set<(p: unknown) => void>>();
@@ -66,11 +69,11 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
         };
         if (profiles.some((o) => o.id !== p.id && o.name.toLowerCase() === p.name.toLowerCase())) {
           const e = new EngineError("invalid", `a profile named \`${p.name}\` already exists`);
-          activity("Saving the profile failed", started, e);
+          activity("Saving the connection failed", started, e);
           throw e;
         }
         profiles = existing ? profiles.map((o) => (o.id === p.id ? p : o)) : [...profiles, p];
-        activity(`Saved profile ${p.name}`, started);
+        activity(`Saved connection ${p.name}`, started);
         return structuredClone(p);
       }
       case "profile_delete": {
@@ -79,7 +82,7 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
         profiles = profiles.filter((o) => o.id !== args.id);
         if (active?.id === p.id) active = null;
         settings.delete(`shell:${p.id}`);
-        activity(`Removed profile ${p.name}`, started);
+        activity(`Removed connection ${p.name}`, started);
         return null;
       }
       case "profile_test": {
@@ -110,9 +113,9 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
           };
         });
         if (cancelled) {
-          const e = new EngineError("cancelled", "Sign-in cancelled.");
-          activity("Sign-in cancelled", started, e);
-          throw e;
+          // As in Rust: a cancelled operation is logged as its message, with no error.
+          activity("Sign-in cancelled", started);
+          throw new EngineError("cancelled", "Sign-in cancelled.");
         }
         // Signing in again while signed in picks the other fixture account.
         account = account?.id === "oid-1"
@@ -145,14 +148,19 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
         activity("Disconnected", started);
         return null;
       case "list_entities": {
-        if (!active) throw new EngineError("not_connected", "Choose a connection first.");
+        if (!active || active.id !== args.profileId) throw new EngineError("not_connected", "Choose a connection first.");
         if (scenario === "network") {
           const e = new EngineError("network", "network error: connection reset by peer");
           activity("Listing the namespace failed", started, e);
           throw e;
         }
+        if (scenario === "sign-in-expired") {
+          const e = new EngineError("not_signed_in", "not signed in: the refresh token has expired; sign in again");
+          activity("Listing the namespace failed", started, e);
+          throw e;
+        }
         if (scenario === "forbidden") {
-          activity("Listing not allowed; showing 2 pinned entities", started);
+          activity(`Listing not allowed; showing ${count(2, "pinned entity", "pinned entities")}`, started);
           return {
             queues: [], topics: [],
             limited: "This identity can't list the namespace (needs Manage,EntityRead). Showing pinned entities.",
@@ -161,13 +169,13 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
         }
         const queues = scenario === "many" ? fx.manyQueues : fx.queues;
         const topics = scenario === "many-topics" ? fx.manyTopics : fx.topics;
-        activity(`Listed ${queues.length} queues and ${topics.length} topics`, started);
+        activity(`Listed ${count(queues.length, "queue", "queues")} and ${count(topics.length, "topic", "topics")}`, started);
         return { queues, topics, limited: null, known: [] } satisfies EntityListing;
       }
       case "list_subscriptions": {
-        if (!active) throw new EngineError("not_connected", "Choose a connection first.");
+        if (!active || active.id !== args.profileId) throw new EngineError("not_connected", "Choose a connection first.");
         const subs = fx.subscriptions[args.topic as string] ?? [];
-        activity(`Listed ${subs.length} subscriptions of ${args.topic}`, started);
+        activity(`Listed ${count(subs.length, "subscription", "subscriptions")} of ${args.topic}`, started);
         return subs;
       }
       default:

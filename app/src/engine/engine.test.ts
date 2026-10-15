@@ -32,13 +32,24 @@ describe("commands over the mock transport", () => {
     const log: string[] = [];
     await onActivity((e) => log.push(e.action));
     await commands.connect("p-logistics");
-    const l = await commands.listEntities();
+    const l = await commands.listEntities("p-logistics");
     expect(l.queues.map((q) => q.name)).toContain("invoice-generate");
     expect(log).toContain("Connected to Logistics");
+    expect(log).toContain("Listed 4 queues and 4 topics");
+    await commands.listSubscriptions("p-logistics", "stock-levels");
+    expect(log).toContain("Listed 1 subscription of stock-levels");
   });
 
   it("rejects listing before connecting with not_connected", async () => {
-    await expect(commands.listEntities()).rejects.toMatchObject({ kind: "not_connected" });
+    await expect(commands.listEntities("p-logistics")).rejects.toMatchObject({ kind: "not_connected" });
+  });
+
+  it("rejects listing a profile that is no longer the connected one", async () => {
+    await commands.connect("p-logistics");
+    await commands.connect("p-partner");
+    await expect(commands.listEntities("p-logistics")).rejects.toMatchObject({ kind: "not_connected", message: "Choose a connection first." });
+    await expect(commands.listSubscriptions("p-logistics", "shipment-events")).rejects.toMatchObject({ kind: "not_connected" });
+    await expect(commands.listEntities("p-partner")).resolves.toMatchObject({ limited: null });
   });
 
   it("never returns a stored connection string", async () => {
@@ -56,19 +67,22 @@ describe("commands over the mock transport", () => {
   it("serves scenarios", async () => {
     setTransport(createMockTransport("forbidden"));
     await commands.connect("p-logistics");
-    const l = await commands.listEntities();
+    const l = await commands.listEntities("p-logistics");
     expect(l.limited).toMatch(/can't list/);
     expect(l.known.length).toBeGreaterThan(0);
     setTransport(createMockTransport("empty"));
     expect(await commands.profilesList()).toEqual([]);
   });
 
-  it("cancels a pending sign-in", async () => {
+  it("cancels a pending sign-in and logs it as cancelled, not failed", async () => {
+    const log: { action: string; error: unknown }[] = [];
+    await onActivity((e) => log.push({ action: e.action, error: e.error }));
     const pending = commands.signIn(null, false);
     const outcome = pending.then(() => null, (e: unknown) => e);
     await commands.signInCancel();
     expect(await outcome).toMatchObject({ kind: "cancelled", message: "Sign-in cancelled." });
     expect(await commands.accountCurrent()).toBeNull();
+    expect(log).toEqual([{ action: "Sign-in cancelled", error: null }]);
   });
 
   it("validates new drafts like the engine does", async () => {

@@ -32,10 +32,11 @@ export const useAccount = () => useQuery({ queryKey: keys.account, queryFn: comm
 export function useEntities(profileId: string | null, refetchMs = 0) {
   return useQuery({
     queryKey: keys.entities(profileId),
-    queryFn: commands.listEntities,
+    queryFn: () => commands.listEntities(profileId!),
     enabled: profileId !== null,
     refetchInterval: refetchMs > 0 ? refetchMs : false,
-    placeholderData: (prev) => prev,
+    // Keep showing the last listing while the same profile reloads, never another profile's.
+    placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[1] === profileId ? prev : undefined),
   });
 }
 
@@ -44,7 +45,7 @@ export function useSubscriptionsFor(profileId: string | null, topics: string[], 
   return useQueries({
     queries: topics.map((topic) => ({
       queryKey: keys.subscriptions(profileId, topic),
-      queryFn: () => commands.listSubscriptions(topic),
+      queryFn: () => commands.listSubscriptions(profileId!, topic),
       enabled: profileId !== null,
       refetchInterval: refetchMs > 0 ? refetchMs : (false as const),
     })),
