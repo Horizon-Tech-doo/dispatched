@@ -1,6 +1,7 @@
 mod commands;
 mod error;
 mod events;
+mod jobs;
 mod ops;
 mod state;
 
@@ -68,6 +69,7 @@ pub fn run() {
     builder
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(state::AppState::open())
         .invoke_handler(tauri::generate_handler![
             commands::app_info,
@@ -93,6 +95,10 @@ pub fn run() {
             commands::list_rules,
             commands::list_sessions,
             commands::dashboard,
+            commands::pick_export_path,
+            commands::export_start,
+            commands::job_cancel,
+            commands::job_reveal,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Dispatched");

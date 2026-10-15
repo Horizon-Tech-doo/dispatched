@@ -7,6 +7,7 @@ pub mod connection;
 pub mod dashboard;
 pub mod discovery;
 pub mod entity;
+pub mod export;
 pub mod profiles;
 pub mod settings;
 pub mod tree;

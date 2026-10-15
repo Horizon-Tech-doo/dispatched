@@ -37,6 +37,12 @@ pub struct AppState {
     pub sign_in_cancel: Notify,
     /// Why the real database could not be opened, if it couldn't.
     pub startup_error: Option<String>,
+    /// Running and finished jobs (exports).
+    pub jobs: Arc<crate::jobs::Jobs>,
+    /// The URL of the sign-in prompt shown last, while a sign-in waits for it.
+    // Set and read by the sign-in commands once "Open sign-in page" lands (M1c Task 10).
+    #[allow(dead_code)]
+    pub last_prompt_url: std::sync::Mutex<Option<String>>,
 }
 
 impl AppState {
@@ -54,6 +60,8 @@ impl AppState {
             connect_lock: Mutex::new(()),
             sign_in_cancel: Notify::new(),
             startup_error: None,
+            jobs: Arc::default(),
+            last_prompt_url: std::sync::Mutex::new(None),
         }
     }
 

@@ -8,8 +8,6 @@ use std::future::Future;
 use std::time::Instant;
 
 pub const ACTIVITY: &str = "activity";
-// Jobs are emitted by the transfer commands that arrive in a later milestone.
-#[allow(dead_code)]
 pub const JOB: &str = "job";
 pub const SIGN_IN_PROMPT: &str = "sign-in-prompt";
 
@@ -30,7 +28,6 @@ pub struct ActivityEntry {
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "kebab-case")]
-#[allow(dead_code)]
 pub enum JobEvent {
     Started {
         id: String,
@@ -45,6 +42,10 @@ pub enum JobEvent {
     Finished {
         id: String,
         error: Option<ActivityError>,
+        /// What was done, e.g. `Exported 1,284 messages to orders-dead-letter-20261016-0941.json`.
+        summary: Option<String>,
+        /// The file written, in full.
+        output: Option<String>,
     },
 }
 
@@ -59,7 +60,6 @@ pub struct SignInPrompt {
 
 pub trait Events: Send + Sync {
     fn activity(&self, e: ActivityEntry);
-    #[allow(dead_code)]
     fn job(&self, e: JobEvent);
     fn sign_in_prompt(&self, p: SignInPrompt);
 }
@@ -87,7 +87,6 @@ impl Events for TauriEvents {
 #[derive(Default)]
 pub struct Recorder {
     pub activity: std::sync::Mutex<Vec<ActivityEntry>>,
-    #[allow(dead_code)]
     pub jobs: std::sync::Mutex<Vec<JobEvent>>,
     pub prompts: std::sync::Mutex<Vec<SignInPrompt>>,
 }
@@ -260,6 +259,16 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&j).unwrap(),
             serde_json::json!({"type":"progress","id":"j1","done":5,"total":10})
+        );
+        let f = JobEvent::Finished {
+            id: "j1".into(),
+            error: None,
+            summary: Some("Exported 5 messages to out.json".into()),
+            output: Some("/tmp/out.json".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(&f).unwrap(),
+            serde_json::json!({"type":"finished","id":"j1","error":null,"summary":"Exported 5 messages to out.json","output":"/tmp/out.json"})
         );
         let p = SignInPrompt {
             kind: "device-code",
