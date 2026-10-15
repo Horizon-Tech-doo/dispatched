@@ -23,10 +23,12 @@ describe("Button", () => {
     expect(onClick).toHaveBeenCalledOnce();
   });
 
-  it("uses the accent only for the danger variant", () => {
-    render(<><Button>A</Button><Button variant="danger">B</Button></>);
-    expect(screen.getByRole("button", { name: "A" }).className).not.toContain("bg-accent");
-    expect(screen.getByRole("button", { name: "B" }).className).toContain("bg-accent");
+  it("never fills a variant with the accent (amber is reserved for dead letters, PROD and errors)", () => {
+    const variants = ["default", "quiet", "primary", "danger"] as const;
+    render(<>{variants.map((v) => <Button key={v} variant={v}>{v}</Button>)}</>);
+    for (const v of variants) {
+      expect(screen.getByRole("button", { name: v }).className).not.toContain("bg-accent");
+    }
   });
 });
 

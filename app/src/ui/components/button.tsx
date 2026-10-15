@@ -3,14 +3,14 @@ import type { ComponentProps } from "react";
 import { cn } from "../lib/cn";
 
 export const buttonVariants = cva(
-  "inline-flex select-none items-center justify-center gap-1.5 whitespace-nowrap rounded-ctl text-12 font-normal transition-colors duration-100 disabled:pointer-events-none disabled:opacity-45 [&_svg]:size-3.5 [&_svg]:shrink-0",
+  "inline-flex select-none items-center justify-center gap-1.5 whitespace-nowrap rounded-ctl text-12 font-normal disabled:pointer-events-none disabled:opacity-45 [&_svg]:size-3.5 [&_svg]:shrink-0",
   {
     variants: {
       variant: {
         default: "border border-line bg-field text-fg hover:bg-hover active:bg-selection",
         quiet: "text-fg hover:bg-hover active:bg-selection",
-        primary: "bg-fg text-content hover:opacity-90 active:opacity-80",
-        danger: "bg-accent text-accent-ink hover:opacity-90 active:opacity-80",
+        primary: "border border-fg bg-field font-semibold text-fg hover:bg-hover active:bg-selection focus-visible:outline-offset-1",
+        danger: "border border-line bg-field text-fg hover:bg-hover active:bg-selection",
       },
       size: { sm: "h-[22px] px-1.5", md: "h-6 px-2", lg: "h-7 px-3 text-13" },
     },

@@ -18,7 +18,7 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 function Column({ theme, density }: { theme: ThemeName; density: Density }) {
   return (
     <ThemeScope theme={theme} density={density}>
-      <div className="min-h-screen">
+      <div>
         <Section title="Buttons">
           <Button>Default</Button>
           <Button variant="quiet">Quiet</Button>
@@ -74,7 +74,7 @@ function Column({ theme, density }: { theme: ThemeName; density: Density }) {
 export default function Catalogue() {
   const [density, setDensity] = useState<Density>("compact");
   return (
-    <div className="h-full overflow-auto">
+    <div data-shot-scroller className="h-full overflow-auto">
       <div className="flex items-center gap-2 border-b border-line bg-chrome px-4 py-2">
         <span className="font-semibold">Component catalogue</span>
         <Button variant="quiet" onClick={() => setDensity(density === "compact" ? "comfortable" : "compact")}>
