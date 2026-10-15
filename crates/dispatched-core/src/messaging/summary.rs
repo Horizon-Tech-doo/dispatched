@@ -68,28 +68,61 @@ fn kind(b: &MessageBody) -> &'static str {
     }
 }
 
-fn preview(b: &MessageBody) -> Option<String> {
-    let text = match b {
-        // Only look at the head of a large binary body.
-        MessageBody::Binary(bytes) => {
-            let head = &bytes[..bytes.len().min(PREVIEW_CHARS * 4)];
-            match std::str::from_utf8(head) {
-                Ok(s) => s.to_string(),
-                // A multi-byte character cut at the end of the head is still text.
-                Err(e) if e.error_len().is_none() => {
-                    String::from_utf8_lossy(&head[..e.valid_up_to()]).into_owned()
-                }
-                Err(_) => return None,
-            }
+/// The first [`PREVIEW_CHARS`] characters of `text` with whitespace runs collapsed, built word by
+/// word so a large body is not copied.
+fn collapse_head(text: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut chars = 0;
+    for word in text.split_whitespace() {
+        if chars > 0 {
+            out.push(' ');
+            chars += 1;
         }
-        other => other.as_text()?,
-    };
-    let collapsed: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    (!collapsed.is_empty()).then(|| collapsed.chars().take(PREVIEW_CHARS).collect())
+        for c in word.chars() {
+            if chars >= PREVIEW_CHARS {
+                break;
+            }
+            out.push(c);
+            chars += 1;
+        }
+        if chars >= PREVIEW_CHARS {
+            break;
+        }
+    }
+    let out = out.trim_end().to_string();
+    (!out.is_empty()).then_some(out)
+}
+
+/// The text at the head of a binary body, if it is text there. A multi-byte character cut at
+/// the end of the head is still text; an invalid byte is accepted only after a full preview's
+/// worth of valid characters (so a binary blob does not show its first printable bytes).
+fn binary_head(bytes: &[u8]) -> Option<&str> {
+    let head = &bytes[..bytes.len().min(PREVIEW_CHARS * 4)];
+    match std::str::from_utf8(head) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            let valid = std::str::from_utf8(&head[..e.valid_up_to()]).ok()?;
+            (e.error_len().is_none() || valid.chars().count() >= PREVIEW_CHARS).then_some(valid)
+        }
+    }
+}
+
+/// Body size and text preview, computing a value body's JSON text once.
+fn size_and_preview(b: &MessageBody) -> (usize, Option<String>) {
+    match b {
+        MessageBody::Binary(bytes) => (bytes.len(), binary_head(bytes).and_then(collapse_head)),
+        MessageBody::Text(t) => (t.len(), collapse_head(t)),
+        MessageBody::Value(j) | MessageBody::Sequence(j) => {
+            let t = j.to_string();
+            (t.len(), collapse_head(&t))
+        }
+        MessageBody::Empty => (0, None),
+    }
 }
 
 impl From<&PeekedMessage> for MessageSummary {
     fn from(m: &PeekedMessage) -> Self {
+        let (body_size, body_preview) = size_and_preview(&m.body);
         Self {
             sequence_number: m.sequence_number,
             state: m.state,
@@ -109,8 +142,8 @@ impl From<&PeekedMessage> for MessageSummary {
             dead_letter_source: m.dead_letter_source.clone(),
             application_properties: m.application_properties.clone(),
             body_kind: kind(&m.body),
-            body_size: m.body.len(),
-            body_preview: preview(&m.body),
+            body_size,
+            body_preview,
         }
     }
 }
@@ -118,6 +151,7 @@ impl From<&PeekedMessage> for MessageSummary {
 /// One message for a detail view, its body cut to a cap.
 #[derive(Debug, Clone, Serialize)]
 pub struct MessageDetail {
+    /// The message, its body cut to the cap.
     #[serde(flatten)]
     pub message: PeekedMessage,
     /// The full body size in bytes.
@@ -227,5 +261,28 @@ mod tests {
         assert_eq!(v["sequence_number"], 3);
         assert_eq!(v["body_truncated"], false);
         assert_eq!(v["body"]["kind"], "text");
+    }
+
+    #[test]
+    fn binary_with_a_bad_byte_after_a_full_preview_still_previews() {
+        let mut bytes = "a".repeat(PREVIEW_CHARS + 10).into_bytes();
+        bytes.push(0xff);
+        let mut m = test_message(1);
+        m.body = MessageBody::Binary(bytes);
+        let p = MessageSummary::from(&m).body_preview.unwrap();
+        assert_eq!(p, "a".repeat(PREVIEW_CHARS));
+        m.body = MessageBody::Binary(b"hi\xffthere".to_vec());
+        assert_eq!(MessageSummary::from(&m).body_preview, None);
+    }
+
+    #[test]
+    fn preview_of_value_bodies_and_size_agree_with_the_body() {
+        let mut m = test_message(1);
+        m.body = MessageBody::Value(serde_json::json!({"a": "b"}));
+        let s = MessageSummary::from(&m);
+        assert_eq!(s.body_size, m.body.len());
+        assert_eq!(s.body_preview.as_deref(), Some("{\"a\":\"b\"}"));
+        m.body = MessageBody::Text("  \n ".into());
+        assert_eq!(MessageSummary::from(&m).body_preview, None);
     }
 }

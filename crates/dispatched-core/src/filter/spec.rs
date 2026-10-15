@@ -50,6 +50,11 @@ fn trimmed(s: &Option<String>) -> Option<&str> {
     s.as_deref().map(str::trim).filter(|t| !t.is_empty())
 }
 
+/// The original string unless it is blank (trimming only decides blankness; the text is kept).
+fn unless_blank(s: &Option<String>) -> Option<&str> {
+    s.as_deref().filter(|t| !t.trim().is_empty())
+}
+
 fn raw(s: &Option<String>) -> Option<&str> {
     s.as_deref().filter(|t| !t.is_empty())
 }
@@ -59,9 +64,9 @@ impl FilterSpec {
     pub fn is_empty(&self) -> bool {
         trimmed(&self.property).is_none()
             && raw(&self.body_contains).is_none()
-            && trimmed(&self.body_regex).is_none()
+            && unless_blank(&self.body_regex).is_none()
             && trimmed(&self.body_json_path).is_none()
-            && trimmed(&self.body_json_equals).is_none()
+            && unless_blank(&self.body_json_equals).is_none()
             && raw(&self.session_id).is_none()
     }
 
@@ -84,7 +89,7 @@ impl FilterSpec {
         if let Some(t) = raw(&self.body_contains) {
             f.body.push(BodyFilter::contains(t));
         }
-        if let Some(r) = trimmed(&self.body_regex) {
+        if let Some(r) = unless_blank(&self.body_regex) {
             match BodyFilter::regex(r) {
                 Ok(b) => f.body.push(b),
                 Err(e) => issue(FilterField::BodyRegex, e),
@@ -92,7 +97,7 @@ impl FilterSpec {
         }
         match (
             trimmed(&self.body_json_path),
-            trimmed(&self.body_json_equals),
+            unless_blank(&self.body_json_equals),
         ) {
             (Some(path), eq) => match BodyFilter::json(path, eq) {
                 Ok(b) => f.body.push(b),
@@ -213,5 +218,33 @@ mod tests {
         let s: FilterSpec = serde_json::from_str(r#"{"property":"x = 1"}"#).unwrap();
         assert_eq!(s.property.as_deref(), Some("x = 1"));
         assert!(s.session_id.is_none());
+    }
+
+    #[test]
+    fn regex_and_expected_value_keep_their_spaces() {
+        let s = FilterSpec {
+            body_regex: Some(" a b ".into()),
+            ..Default::default()
+        };
+        let f = s.build().unwrap();
+        let mut m = crate::messaging::test_message(1);
+        m.body = crate::MessageBody::Text("xa bx".into());
+        assert!(
+            !f.matches(&m),
+            "the surrounding spaces are part of the pattern"
+        );
+        m.body = crate::MessageBody::Text("x a b x".into());
+        assert!(f.matches(&m));
+
+        let s = FilterSpec {
+            body_json_path: Some("$.s".into()),
+            body_json_equals: Some(" shipped".into()),
+            ..Default::default()
+        };
+        let f = s.build().unwrap();
+        m.body = crate::MessageBody::Text(r#"{"s":" shipped"}"#.into());
+        assert!(f.matches(&m));
+        m.body = crate::MessageBody::Text(r#"{"s":"shipped"}"#.into());
+        assert!(!f.matches(&m));
     }
 }

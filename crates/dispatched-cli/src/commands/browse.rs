@@ -114,7 +114,8 @@ impl ViewArgs {
 }
 
 pub fn build_filter(a: &FilterArgs<'_>) -> anyhow::Result<MessageFilter> {
-    if a.body_json_eq.is_some() && a.body_json.is_none() {
+    let set = |s: Option<&str>| s.is_some_and(|s| !s.trim().is_empty());
+    if set(a.body_json_eq) && !set(a.body_json) {
         anyhow::bail!("--body-json-eq needs --body-json PATH");
     }
     let spec = dispatched_core::FilterSpec {
@@ -947,6 +948,15 @@ mod tests {
             .is_err()
         );
         assert!(build_filter(&FilterArgs::default()).unwrap().is_empty());
+        let blank = build_filter(&FilterArgs {
+            filter: Some(""),
+            body_regex: Some("  "),
+            body_json: Some(" "),
+            body_json_eq: Some(" "),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(blank.is_empty(), "blank flags mean no condition");
     }
 
     #[test]
