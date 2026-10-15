@@ -86,7 +86,9 @@ pub fn run() {
             commands::disconnect,
             commands::list_entities,
             commands::list_subscriptions,
-            commands::peek,
+            commands::peek_page,
+            commands::message_detail,
+            commands::check_filter,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Dispatched");

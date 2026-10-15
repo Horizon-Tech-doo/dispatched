@@ -76,12 +76,11 @@ pub async fn profile_test(
 }
 
 use crate::ops::account::{AccountView, SignInView};
+use crate::ops::browse::{PeekPageView, PeekRequest};
 use crate::ops::connection::ConnectionView;
 use crate::ops::discovery::{DiscoveryView, TenantView};
 use crate::ops::tree::EntityListing;
-use dispatched_core::{
-    EntityPath, PeekOptions, PeekView, PeekedMessage, SubQueue, SubscriptionInfo,
-};
+use dispatched_core::{FilterIssue, FilterSpec, MessageDetail, PeekView, SubscriptionInfo};
 
 #[tauri::command]
 pub async fn account_current(
@@ -155,27 +154,38 @@ pub async fn list_subscriptions(
     ops::tree::list_subscriptions(&state, &TauriEvents(app), &profile_id, &topic).await
 }
 
-/// Kept from M0 for M1c's message views.
 #[tauri::command]
-pub async fn peek(
+pub async fn peek_page(
+    app: AppHandle,
     state: State<'_, AppState>,
+    profile_id: String,
+    request: PeekRequest,
+) -> Result<PeekPageView, CommandError> {
+    ops::browse::peek_page(&state, &TauriEvents(app), &profile_id, request).await
+}
+
+#[tauri::command]
+pub async fn message_detail(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile_id: String,
     entity: String,
-    sub_queue: SubQueue,
-    from_sequence: i64,
-    max: u32,
-) -> Result<Vec<PeekedMessage>, CommandError> {
-    let path = EntityPath::parse(&entity)?;
-    let view = match sub_queue {
-        SubQueue::Active => PeekView::Active,
-        SubQueue::DeadLetter => PeekView::DeadLetter,
-        SubQueue::TransferDeadLetter => PeekView::TransferDeadLetter,
-    };
-    let opts = PeekOptions::new(max.min(500)).from_sequence(from_sequence);
-    let page = state
-        .active()
-        .await?
-        .explorer
-        .peek(&path, view, &opts)
-        .await?;
-    Ok(page.messages)
+    view: PeekView,
+    sequence: i64,
+) -> Result<Option<MessageDetail>, CommandError> {
+    ops::browse::message_detail(
+        &state,
+        &TauriEvents(app),
+        &profile_id,
+        &entity,
+        view,
+        sequence,
+    )
+    .await
+}
+
+/// Pure and local: no network, no state.
+#[tauri::command]
+pub fn check_filter(filter: FilterSpec) -> Vec<FilterIssue> {
+    ops::browse::check_filter(&filter)
 }

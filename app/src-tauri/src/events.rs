@@ -143,6 +143,31 @@ pub async fn tracked<T>(
     result
 }
 
+/// Run `work` and record an activity entry only if it fails (reads that happen on every
+/// selection or page would otherwise flood the log). A cancellation is not a failure.
+pub async fn tracked_failures<T>(
+    ev: &dyn Events,
+    failed: &str,
+    work: impl Future<Output = Result<T, CommandError>>,
+) -> Result<T, CommandError> {
+    let started = Instant::now();
+    let result = work.await;
+    if let Err(e) = &result
+        && e.kind != "cancelled"
+    {
+        ev.activity(ActivityEntry {
+            at: now_rfc3339(),
+            action: failed.to_string(),
+            duration_ms: started.elapsed().as_millis() as u64,
+            error: Some(ActivityError {
+                kind: e.kind.to_string(),
+                message: e.message.clone(),
+            }),
+        });
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,6 +219,25 @@ mod tests {
         let log = ev.activity.lock().unwrap();
         assert_eq!(log[0].action, "Sign-in cancelled");
         assert!(log[0].error.is_none());
+    }
+
+    #[tokio::test]
+    async fn tracked_failures_logs_only_failures() {
+        let ev = Recorder::default();
+        let _ = tracked_failures(&ev, "Reading failed", async { Ok::<_, CommandError>(1) }).await;
+        assert!(ev.activity.lock().unwrap().is_empty());
+        let _ = tracked_failures::<u8>(&ev, "Reading failed", async {
+            Err(CommandError::new("network", "reset"))
+        })
+        .await;
+        let _ = tracked_failures::<u8>(&ev, "Reading failed", async {
+            Err(CommandError::new("cancelled", "Stopped."))
+        })
+        .await;
+        let log = ev.activity.lock().unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].action, "Reading failed");
+        assert_eq!(log[0].error.as_ref().unwrap().kind, "network");
     }
 
     #[test]
