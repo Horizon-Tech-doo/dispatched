@@ -9,18 +9,27 @@ pub fn list(state: &AppState) -> Result<Vec<Profile>, CommandError> {
     Ok(state.store.list()?)
 }
 
-/// The sign-in a new Entra profile binds to: the one made in the profile's own tenant when there is one
-/// (a guest tenant), else the current sign-in.
+/// The sign-in a new Entra profile binds to: the current sign-in for its home tenant (no tenant, or the
+/// current sign-in's own tenant); for another tenant, the sign-in made in that tenant when there is one
+/// (a guest tenant's own sign-in), else the current sign-in.
 fn entra_sign_in(
     state: &AppState,
     tenant: Option<&str>,
 ) -> Result<Option<horizon_azure_kit::auth::SignIn>, CommandError> {
-    if let Some(t) = tenant.map(str::trim).filter(|t| !t.is_empty())
-        && let Some(own) = state.sign_in_for_tenant(t)?
+    let current = state.current_sign_in()?;
+    let Some(t) = tenant.map(str::trim).filter(|t| !t.is_empty()) else {
+        return Ok(current);
+    };
+    if current
+        .as_ref()
+        .is_some_and(|c| c.tenant_id.eq_ignore_ascii_case(t))
     {
+        return Ok(current);
+    }
+    if let Some(own) = state.sign_in_for_tenant(t)? {
         return Ok(Some(own));
     }
-    state.current_sign_in()
+    Ok(current)
 }
 
 pub async fn save(
@@ -304,6 +313,50 @@ mod tests {
         assert!(
             matches!(&other.auth, ProfileAuth::Entra { sign_in_id, tenant }
             if sign_in_id == "home-oid" && tenant.as_deref() == Some("tenant-other"))
+        );
+    }
+
+    #[tokio::test]
+    async fn the_current_sign_in_s_own_tenant_is_home_and_binds_to_it() {
+        use crate::ops::test_util::remember_sign_in;
+        let s = state();
+        // Another account signed in to the same tenant, sorting before the current one.
+        remember_sign_in(&s, "a-other-oid", "tenant-home", true);
+        let home = remember_sign_in(&s, "home-oid", "tenant-home", true);
+        s.store.set_current_sign_in(Some(&home.id)).unwrap();
+        let ev = Recorder::default();
+        let p = save(&s, &ev, entra_draft("Home ns", Some("TENANT-HOME")))
+            .await
+            .unwrap();
+        assert!(
+            matches!(&p.auth, ProfileAuth::Entra { sign_in_id, .. } if sign_in_id == "home-oid"),
+            "{:?}",
+            p.auth
+        );
+    }
+
+    #[test]
+    fn a_tenant_s_own_sign_in_prefers_the_current_account() {
+        use crate::ops::test_util::remember_sign_in;
+        let s = state();
+        let home = remember_sign_in(&s, "home-oid", "tenant-home", true);
+        s.store.set_current_sign_in(Some(&home.id)).unwrap();
+        // Two accounts signed in to the guest tenant; the second is the current account's guest sign-in.
+        remember_sign_in(&s, "a-stranger-oid", "tenant-guest", true);
+        let mine = horizon_azure_kit::auth::SignIn {
+            user_principal: home.user_principal.clone(),
+            ..remember_sign_in(&s, "b-guest-oid", "tenant-guest", true)
+        };
+        s.store.save_sign_in(&mine).unwrap();
+        assert_eq!(
+            s.sign_in_for_tenant("tenant-guest").unwrap().unwrap().id,
+            "b-guest-oid"
+        );
+        // Without a current sign-in the store's order decides.
+        s.store.set_current_sign_in(None).unwrap();
+        assert_eq!(
+            s.sign_in_for_tenant("tenant-guest").unwrap().unwrap().id,
+            "a-stranger-oid"
         );
     }
 

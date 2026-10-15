@@ -113,13 +113,22 @@ impl AppState {
     }
 
     /// A remembered sign-in made in `tenant_id` itself (a guest tenant's own sign-in), if its refresh
-    /// token still exists. The current sign-in is not consulted.
+    /// token still exists. When several accounts signed in to that tenant, the current sign-in itself
+    /// wins, then one by the current sign-in's account (same user principal), then the first.
     pub fn sign_in_for_tenant(&self, tenant_id: &str) -> Result<Option<SignIn>, CommandError> {
+        let current = self.store.current_sign_in()?;
+        let mut live = Vec::new();
         for s in self.store.sign_ins_for_tenant(tenant_id)? {
             if self.session.is_signed_in(&s)? {
-                return Ok(Some(s));
+                live.push(s);
             }
         }
-        Ok(None)
+        let rank = |s: &SignIn| match &current {
+            Some(c) if c.id == s.id => 0,
+            Some(c) if c.user_principal.eq_ignore_ascii_case(&s.user_principal) => 1,
+            _ => 2,
+        };
+        // `min_by_key` keeps the first of equal ranks, so the store's order breaks ties.
+        Ok(live.into_iter().min_by_key(|s| rank(s)))
     }
 }
