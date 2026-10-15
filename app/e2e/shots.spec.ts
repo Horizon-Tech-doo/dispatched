@@ -7,6 +7,15 @@ import { test, type Page } from "@playwright/test";
 export const shots: { name: string; path: string; scroll?: boolean; prepare?: (page: Page) => Promise<void> }[] = [
   { name: "catalogue", path: "/#catalogue", scroll: true },
   {
+    name: "catalogue-tree",
+    path: "/#catalogue",
+    prepare: async (page) => {
+      await page.getByRole("heading", { name: "Tree" }).first().evaluate((el) => el.scrollIntoView({ block: "start" }));
+      await page.keyboard.press("Shift"); // keyboard modality so :focus-visible matches
+      await page.getByRole("tree", { name: "Explorer" }).first().focus();
+    },
+  },
+  {
     name: "catalogue-overlays",
     path: "/#catalogue",
     prepare: async (page) => {

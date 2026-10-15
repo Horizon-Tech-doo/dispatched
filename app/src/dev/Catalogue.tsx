@@ -1,12 +1,12 @@
-import { useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { Copy, RefreshCw, Settings } from "lucide-react";
 import {
   Button, CommandGroup, CommandInput, CommandItem, CommandList, CommandPaletteDialog, CommandShortcut,
   CountBadge, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
   EmptyState, EntityGlyph, Field, Hint, IconButton, Input, Kbd, MenuShortcut, Panel, PanelGroup, ProdBadge,
   ResizeHandle, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Sheet, SkeletonRows,
-  Tabs, TabsList, TabsTrigger, ThemeScope, TooltipProvider,
-  shortcutLabel, type Density, type ThemeName,
+  Tabs, TabsList, TabsTrigger, ThemeScope, TooltipProvider, Tree,
+  rowHeight, shortcutLabel, type Density, type EntityKind, type ThemeName, type TreeNode,
 } from "@/ui";
 
 const SUB_TABS = ["Overview", "Messages", "Dead-letter", "Subscriptions", "Rules", "Properties", "Metrics", "Access", "Settings"];
@@ -17,6 +17,100 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
       <h2 className="m-0 mb-2 text-12 font-semibold text-muted">{title}</h2>
       <div className="flex flex-wrap items-start gap-3">{children}</div>
     </section>
+  );
+}
+
+interface Entity { id: string; label: string; kind?: EntityKind; group?: boolean; prod?: boolean; active?: number; dead?: number; children?: Entity[] }
+
+const NAMESPACES: Entity[] = [
+  {
+    id: "prod", label: "sb-logistics-prod", kind: "namespace", prod: true, children: [
+      {
+        id: "prod/queues", label: "Queues", group: true, children: [
+          { id: "customs-docs", label: "customs-docs", kind: "queue", active: 112, dead: 0 },
+          { id: "invoice-generate", label: "invoice-generate", kind: "queue", active: 1284, dead: 37 },
+          { id: "label-print", label: "label-print", kind: "queue", active: 6, dead: 0 },
+          { id: "returns-intake", label: "returns-intake", kind: "queue", active: 0, dead: 211 },
+        ],
+      },
+      {
+        id: "prod/topics", label: "Topics", group: true, children: [
+          {
+            id: "carrier-updates", label: "carrier-updates", kind: "topic", children: [
+              { id: "audit-log", label: "audit-log", kind: "subscription", active: 0, dead: 0 },
+              { id: "eta-recalc", label: "eta-recalc", kind: "subscription", active: 58, dead: 9 },
+            ],
+          },
+          {
+            id: "shipment-events", label: "shipment-events", kind: "topic", children: [
+              { id: "billing", label: "billing", kind: "subscription", active: 0, dead: 0 },
+              { id: "tracking-sync", label: "tracking-sync", kind: "subscription", active: 2906, dead: 3417 },
+              { id: "warehouse-notify", label: "warehouse-notify", kind: "subscription", active: 14, dead: 1 },
+            ],
+          },
+          { id: "stock-levels", label: "stock-levels", kind: "topic", children: [{ id: "stock-sync", label: "stock-sync", kind: "subscription", active: 0, dead: 0 }] },
+        ],
+      },
+    ],
+  },
+  { id: "dev", label: "sb-logistics-dev", kind: "namespace", children: [{ id: "dev/queues", label: "Queues", group: true, children: [] }] },
+  { id: "gateway", label: "sb-partner-gateway", kind: "namespace", children: [{ id: "gateway/queues", label: "Queues", group: true, children: [] }] },
+];
+
+type EntityNode = TreeNode & { entity: Entity };
+
+function flatten(items: Entity[], open: Set<string>, parentId: string | null = null, depth = 0): EntityNode[] {
+  return items.flatMap((entity) => {
+    const expandable = !!entity.children?.length || !!entity.group || entity.kind === "namespace";
+    const expanded = expandable && open.has(entity.id);
+    const self: EntityNode = { id: entity.id, parentId, depth, label: entity.label, expandable, expanded, entity };
+    return expanded ? [self, ...flatten(entity.children ?? [], open, entity.id, depth + 1)] : [self];
+  });
+}
+
+function TreeDemo({ density }: { density: Density }) {
+  const [open, setOpen] = useState(
+    () => new Set(["prod", "prod/queues", "prod/topics", "carrier-updates", "shipment-events"]),
+  );
+  const [selectedId, setSelectedId] = useState<string | null>("tracking-sync");
+  const nodes = useMemo(() => flatten(NAMESPACES, open), [open]);
+  return (
+    <div className="h-[360px] w-[260px] border border-line bg-side">
+      <Tree
+        label="Explorer"
+        nodes={nodes}
+        selectedId={selectedId}
+        onSelect={setSelectedId}
+        onActivate={(id) => setOpen((o) => new Set(o).add(id))}
+        onToggle={(id, expanded) =>
+          setOpen((o) => {
+            const next = new Set(o);
+            if (expanded) next.add(id);
+            else next.delete(id);
+            return next;
+          })
+        }
+        rowHeight={rowHeight[density]}
+        renderRow={({ entity }) => (
+          <>
+            {entity.kind && (
+              <span className="shrink-0 text-icon"><EntityGlyph kind={entity.kind} /></span>
+            )}
+            <span className={entity.group ? "truncate text-muted" : entity.kind === "namespace" ? "truncate font-semibold" : "truncate"}>
+              {entity.label}
+            </span>
+            {entity.prod && <ProdBadge className="ml-auto" />}
+            {entity.group && <CountBadge value={entity.children?.length ?? 0} className="ml-auto" />}
+            {entity.active != null && (
+              <span className="ml-auto flex shrink-0 items-baseline gap-1.5">
+                <CountBadge value={entity.active} />
+                <CountBadge value={entity.dead} attention className="min-w-6 text-right" />
+              </span>
+            )}
+          </>
+        )}
+      />
+    </div>
   );
 }
 
@@ -134,6 +228,9 @@ function Column({ theme, density }: { theme: ThemeName; density: Density }) {
           {(["namespace", "queue", "topic", "subscription", "rule"] as const).map((k) => (
             <span key={k} className="flex items-center gap-1.5 text-icon"><EntityGlyph kind={k} /><span className="text-fg">{k}</span></span>
           ))}
+        </Section>
+        <Section title="Tree">
+          <TreeDemo density={density} />
         </Section>
         <Section title="Loading and empty">
           <div className="w-72 border border-line"><SkeletonRows rows={4} columns={2} /></div>
