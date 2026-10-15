@@ -5,6 +5,7 @@ mod management;
 mod message;
 pub mod peek;
 pub mod scan;
+pub mod sessions;
 pub mod summary;
 #[cfg(feature = "test-support")]
 pub mod testing;
@@ -22,4 +23,5 @@ pub use scan::{
     DEFAULT_SCAN_LIMIT, PeekOptions, PeekPage, PeekSource, SequenceCollection, StateCounts,
     collect_sequences, count_messages, last_sequence, peek_one, peek_tail, scan_messages,
 };
+pub use sessions::{SessionListing, SessionSummary};
 pub use summary::{DETAIL_BODY_CAP, MessageDetail, MessageSummary};

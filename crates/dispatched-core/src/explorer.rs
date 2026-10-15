@@ -2,7 +2,8 @@
 
 use crate::messaging::{
     PeekOptions, PeekPage, PeekSource, PeekedMessage, SequenceCollection, ServiceBusConnection,
-    StateCounts, collect_sequences, count_messages, peek_one, peek_tail, scan_messages,
+    StateCounts, collect_sequences, count_messages, peek_one, peek_tail, scan_messages, sessions,
+    sessions::SessionListing,
 };
 use crate::mgmt::{
     EntityCounts, EntityDetails, EntityKind, ManagementClient, QueueInfo, RuleInfo,
@@ -216,6 +217,27 @@ impl Explorer {
         .await
     }
 
+    /// Sessions of `entity`: the broker's list merged with a peek tally of up to
+    /// `COUNT_CAP` messages. Fails only when both fail, with the broker's error. The tally
+    /// runs over [`PerBatch`] and takes the connection lock per batch; the broker list is
+    /// short and keeps the lock for its few pages. Read-only: no session is accepted.
+    pub async fn list_sessions(&self, entity: &EntityPath) -> Result<SessionListing> {
+        let address = entity.address(SubQueue::Active);
+        let broker = with_one_retry(|_| async {
+            let mut guard = self.connection().await?;
+            let result =
+                sessions::list_session_ids(guard.as_mut().expect("opened"), &address).await;
+            Self::drop_if_broken(&mut guard, result).await
+        })
+        .await;
+        let tally = with_one_retry(|_| async {
+            sessions::tally_sessions(&mut PerBatch { explorer: self }, &address, Self::COUNT_CAP)
+                .await
+        })
+        .await;
+        sessions::combine(broker, tally)
+    }
+
     /// The cached connection, opened on demand. Hold the guard for the whole operation.
     async fn connection(&self) -> Result<Guard<'_>> {
         let mut guard = self.amqp.lock().await;
@@ -424,6 +446,7 @@ mod tests {
         assert_send(&e.peek_message(p, PeekView::Active, 1));
         assert_send(&e.collect_sequences(p, PeekView::Active, &[1], 10, None));
         assert_send(&e.peek(p, PeekView::Active, o));
+        assert_send(&e.list_sessions(p));
     }
 
     #[test]

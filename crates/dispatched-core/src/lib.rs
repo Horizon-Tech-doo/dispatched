@@ -29,7 +29,7 @@ pub use export::{
 pub use filter::{BodyFilter, FilterField, FilterIssue, FilterSpec, MessageFilter, PropertyFilter};
 pub use messaging::{
     MessageBody, MessageDetail, MessageState, MessageSummary, PeekOptions, PeekPage, PeekedMessage,
-    PropValue,
+    PropValue, SessionListing, SessionSummary,
 };
 pub use mgmt::{
     CorrelationProperty, EntityCounts, EntityDetails, EntityKind, EntityProperty, ManagementClient,

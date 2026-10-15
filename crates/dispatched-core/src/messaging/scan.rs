@@ -239,24 +239,29 @@ pub struct StateCounts {
     pub truncated: bool,
 }
 
-/// Count messages in `address` by peeking, examining at most `cap`.
-///
-/// `truncated` is set only when a message exists beyond the cap (an entity of
-/// exactly `cap` messages is not truncated). Like [`scan_messages`], a message
-/// without a sequence number ends the count and stale messages (below the
-/// current position) are skipped and not counted; a batch that makes no
-/// progress ends the count, so it always terminates.
-pub async fn count_messages(
-    src: &mut (impl PeekSource + ?Sized),
+/// What [`walk_messages`] examined.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Walked {
+    /// Messages handed to the visitor.
+    pub examined: u64,
+    /// A message exists beyond the cap.
+    pub truncated: bool,
+}
+
+/// Hand every message of `address` to `visit`, from the start, examining at most `cap` (and
+/// asking for one more to learn whether anything lies beyond it). Stale messages (below the
+/// current position) are skipped; a message without a sequence number or a batch that makes
+/// no progress ends the walk, so it always terminates.
+pub(crate) async fn walk_messages<S: PeekSource + ?Sized>(
+    src: &mut S,
     address: &str,
     cap: u32,
-) -> Result<StateCounts> {
-    let mut counts = StateCounts::default();
+    mut visit: impl FnMut(&PeekedMessage) + Send,
+) -> Result<Walked> {
+    let mut w = Walked::default();
     let mut next = 0i64;
     'outer: loop {
-        // When the cap is reached, ask for one more message to see whether
-        // anything lies beyond it.
-        let want = (u64::from(cap).saturating_sub(counts.total))
+        let want = (u64::from(cap).saturating_sub(w.examined))
             .min(u64::from(MAX_PER_REQUEST))
             .max(1) as u32;
         let batch = src.peek_batch(address, next, want).await?;
@@ -271,23 +276,43 @@ pub async fn count_messages(
             if m.sequence_number < next {
                 continue;
             }
-            if counts.total >= u64::from(cap) {
-                counts.truncated = true;
+            if w.examined >= u64::from(cap) {
+                w.truncated = true;
                 break 'outer;
             }
-            counts.total += 1;
-            match m.state {
-                MessageState::Active => counts.active += 1,
-                MessageState::Deferred => counts.deferred += 1,
-                MessageState::Scheduled => counts.scheduled += 1,
-            }
+            w.examined += 1;
             next = m.sequence_number + 1;
             advanced = true;
+            visit(m);
         }
         if !advanced {
             break;
         }
     }
+    Ok(w)
+}
+
+/// Count messages in `address` by peeking, examining at most `cap`.
+///
+/// `truncated` is set only when a message exists beyond the cap (an entity of
+/// exactly `cap` messages is not truncated). Like [`scan_messages`], a message
+/// without a sequence number ends the count and stale messages (below the
+/// current position) are skipped and not counted; a batch that makes no
+/// progress ends the count, so it always terminates.
+pub async fn count_messages(
+    src: &mut (impl PeekSource + ?Sized),
+    address: &str,
+    cap: u32,
+) -> Result<StateCounts> {
+    let mut counts = StateCounts::default();
+    let walked = walk_messages(src, address, cap, |m| match m.state {
+        MessageState::Active => counts.active += 1,
+        MessageState::Deferred => counts.deferred += 1,
+        MessageState::Scheduled => counts.scheduled += 1,
+    })
+    .await?;
+    counts.total = walked.examined;
+    counts.truncated = walked.truncated;
     Ok(counts)
 }
 

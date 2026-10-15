@@ -65,16 +65,16 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          DISPATCHED_EMULATOR=1 cargo test --locked -p dispatched-core --features test-support --test emulator_m0 --test emulator_m1 -- --nocapture 2>&1 | tee emulator-gate.log
+          DISPATCHED_EMULATOR=1 cargo test --locked -p dispatched-core --features test-support --test emulator_m0 --test emulator_m1 --test emulator_m1c -- --nocapture 2>&1 | tee emulator-gate.log
           # The gate tests print "skipped: ..." and pass when the emulator is
           # not enabled; that must never count as a green gate.
           if grep -q 'skipped:' emulator-gate.log; then
             echo "::error::An emulator gate test skipped itself; the gate did not run."
             exit 1
           fi
-          # ...and both tests must positively report that they ran and passed.
-          if [ "$(grep -c 'test result: ok. 1 passed' emulator-gate.log)" -ne 2 ]; then
-            echo "::error::Both emulator gate tests must report 'test result: ok. 1 passed'."
+          # ...and all three tests must positively report that they ran and passed.
+          if [ "$(grep -c 'test result: ok. 1 passed' emulator-gate.log)" -ne 3 ]; then
+            echo "::error::All three emulator gate tests must report 'test result: ok. 1 passed'."
             exit 1
           fi
       - if: always()
