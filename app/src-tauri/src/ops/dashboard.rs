@@ -93,7 +93,7 @@ pub fn limited_view(
     pins: &[String],
     needed: Option<String>,
 ) -> DashboardView {
-    let rows = known_entities(entity_path, pins)
+    let rows: Vec<DashboardRow> = known_entities(entity_path, pins)
         .into_iter()
         .map(|k| match k.subscription {
             Some(sub) => DashboardRow {
@@ -115,13 +115,52 @@ pub fn limited_view(
         })
         .collect();
     let right = needed.unwrap_or_else(|| "Manage".into());
+    let limited = if rows.is_empty() {
+        format!(
+            "This identity can't list the namespace (needs {right}). Edit the profile to pin the entities you use."
+        )
+    } else {
+        format!(
+            "This identity can't list the namespace (needs {right}). Showing pinned entities without counts."
+        )
+    };
     DashboardView {
         rows,
         failures: vec![],
-        limited: Some(format!(
-            "This identity can't list the namespace (needs {right}). Showing pinned entities without counts."
-        )),
+        limited: Some(limited),
     }
+}
+
+/// Lists the subscriptions of every topic, at most `limit` listings at a time, sorted by topic.
+/// A topic whose listing fails stays an `Err` in its slot.
+async fn gather_subscriptions<F, Fut>(
+    topics: Vec<String>,
+    limit: usize,
+    fetch: F,
+) -> Result<Vec<(String, Result<Vec<SubscriptionInfo>, Error>)>, CommandError>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<SubscriptionInfo>, Error>> + Send + 'static,
+{
+    let gate = Arc::new(Semaphore::new(limit));
+    let mut set = tokio::task::JoinSet::new();
+    for topic in topics {
+        let (gate, listing) = (gate.clone(), fetch(topic.clone()));
+        set.spawn(async move {
+            let _permit = gate.acquire_owned().await.expect("semaphore open");
+            (topic, listing.await)
+        });
+    }
+    let mut out = Vec::new();
+    while let Some(joined) = set.join_next().await {
+        out.push(
+            joined.map_err(|e| {
+                CommandError::new("protocol", format!("dashboard task failed: {e}"))
+            })?,
+        );
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
 }
 
 /// The Dashboard refreshes itself on a timer, so only failures are logged (first load included).
@@ -145,23 +184,12 @@ pub async fn dashboard(
             }
             Err(e) => return Err(e.into()),
         };
-        let gate = Arc::new(Semaphore::new(PARALLEL_TOPICS));
-        let mut set = tokio::task::JoinSet::new();
-        for t in topics {
-            let (ex, gate) = (ex.clone(), gate.clone());
-            set.spawn(async move {
-                let _permit = gate.acquire_owned().await.expect("semaphore open");
-                let r = ex.list_subscriptions(&t.name).await;
-                (t.name, r)
-            });
-        }
-        let mut subs = Vec::new();
-        while let Some(joined) = set.join_next().await {
-            subs.push(joined.map_err(|e| {
-                CommandError::new("protocol", format!("dashboard task failed: {e}"))
-            })?);
-        }
-        subs.sort_by(|a, b| a.0.cmp(&b.0));
+        let names = topics.into_iter().map(|t| t.name).collect();
+        let subs = gather_subscriptions(names, PARALLEL_TOPICS, |t| {
+            let ex = ex.clone();
+            async move { ex.list_subscriptions(&t).await }
+        })
+        .await?;
         Ok(rows_from(queues, subs))
     })
     .await
@@ -262,6 +290,52 @@ mod tests {
         assert_eq!(v.rows.len(), 2);
         assert!(v.rows.iter().all(|r| r.counts.is_none()));
         assert!(v.limited.unwrap().contains("Manage,EntityRead"));
+    }
+
+    #[test]
+    fn limited_dashboard_with_nothing_known_says_to_pin_entities() {
+        let v = limited_view(None, &[], None);
+        assert!(v.rows.is_empty());
+        let m = v.limited.unwrap();
+        assert!(m.contains("needs Manage"), "{m}");
+        assert!(m.contains("pin the entities you use"), "{m}");
+        assert!(!m.contains("Showing pinned"), "{m}");
+    }
+
+    #[tokio::test]
+    async fn gather_limits_parallel_listings_sorts_and_keeps_failures() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let high = Arc::new(AtomicUsize::new(0));
+        let topics: Vec<String> = (0..40).rev().map(|i| format!("t{i:02}")).collect();
+        let (f, h) = (in_flight.clone(), high.clone());
+        let out = gather_subscriptions(topics, PARALLEL_TOPICS, move |t| {
+            let (f, h) = (f.clone(), h.clone());
+            async move {
+                let now = f.fetch_add(1, Ordering::SeqCst) + 1;
+                h.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                f.fetch_sub(1, Ordering::SeqCst);
+                if t == "t07" {
+                    Err(Error::Forbidden {
+                        needed: None,
+                        detail: "no".into(),
+                    })
+                } else {
+                    Ok(vec![s(&t, "x")])
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(out.len(), 40);
+        assert!(high.load(Ordering::SeqCst) <= PARALLEL_TOPICS);
+        assert!(high.load(Ordering::SeqCst) > 1, "listings ran in parallel");
+        let names: Vec<&str> = out.iter().map(|(t, _)| t.as_str()).collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted);
+        assert!(out[7].1.is_err() && out[6].1.is_ok());
     }
 
     #[test]

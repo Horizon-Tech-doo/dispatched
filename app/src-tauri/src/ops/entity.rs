@@ -95,4 +95,14 @@ mod tests {
         let e = list_rules(&s, &ev, "p", "orders").await.unwrap_err();
         assert_eq!(e.kind, "invalid", "a queue has no rules: {}", e.message);
     }
+
+    #[tokio::test]
+    async fn rules_of_a_valid_subscription_path_need_the_connected_profile() {
+        let s = state();
+        let ev = Recorder::default();
+        let e = list_rules(&s, &ev, "p", "events/subscriptions/all")
+            .await
+            .unwrap_err();
+        assert_eq!(e.kind, "not_connected");
+    }
 }
