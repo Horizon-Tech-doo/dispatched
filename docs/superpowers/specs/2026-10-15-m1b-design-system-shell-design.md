@@ -219,3 +219,13 @@ New Tauri commands, each a thin wrapper over `dispatched-core`:
 - Sections 2 to 10 are met and CI is green.
 - `docs/live-verification-m1b.md` is recorded.
 - The user opens the app against a real namespace and it matches mockup A.
+
+## Deviations decided during build
+
+- **No "Open in new tab".** Every open is a tab: opening an entity adds its tab or focuses the existing one, so the tree's context menu has Open, Copy name, Copy entity path and Refresh (§6.4).
+- **Auto-refresh refreshes the listing.** The 30 s and 60 s settings reload the connected namespace's listing and the expanded topics' subscriptions, not only the nodes on screen (§6.4, §6.8).
+- **Auth kind lives in the top bar.** The top bar shows the auth line next to the connection selector ("SAS key reader", "Entra ID ops@contoso.example"); the status bar shows transport, connection state and last refresh (§6.7).
+- **A lost connection names its cause.** Network trouble shows "Connection lost" with *Reconnect* in the status bar; an expired or revoked Entra sign-in shows "Sign-in expired" (rejected connection-string credentials: "Credentials rejected") with *Edit connection*. The connection selector carries the amber alert mark for all three.
+- **Sheets are 420 px**, every one of them.
+- **Buttons are bordered.** Recovery actions (Try again, Reconnect, Edit connection) are default bordered buttons; primary marks only the main action of a sheet footer. Amber never appears on a button.
+- **Deferred to M1c:** testing unsaved drafts in the profile sheet (Test connection runs against the saved profile, and asks to save first while the form differs), and an "Open sign-in page" button for the device-code flow (the sheet shows the URL and code to copy).
