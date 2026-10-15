@@ -96,8 +96,20 @@ impl ConnectionString {
 /// `cs` scoped to `entity` (`EntityPath=` replaced or added). Refuses a string that is
 /// already scoped to another entity, since its key works only there. The result is a secret.
 pub fn entity_connection_string(cs: &str, entity: &crate::EntityPath) -> Result<SecretString> {
-    let parsed = ConnectionString::parse(cs)?;
     let base = entity.base();
+    // Only the characters Service Bus names use: anything else (`;`, `=`, spaces, control
+    // characters) could add or change segments of the string the user pastes elsewhere.
+    let valid = !base.is_empty()
+        && base
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'/' | b'~' | b'-'));
+    if !valid {
+        return Err(Error::Invalid(format!(
+            "`{}` is not a valid entity name (letters, digits, `.`, `_`, `-`, `~` and `/` only)",
+            base.escape_debug()
+        )));
+    }
+    let parsed = ConnectionString::parse(cs)?;
     if let Some(scoped) = &parsed.entity_path {
         let same = crate::EntityPath::parse(scoped)
             .map(|p| p.base().eq_ignore_ascii_case(&base))
@@ -112,7 +124,12 @@ pub fn entity_connection_string(cs: &str, entity: &crate::EntityPath) -> Result<
         .trim()
         .split(';')
         .map(str::trim)
-        .filter(|s| !s.is_empty() && !s.to_ascii_lowercase().starts_with("entitypath="))
+        .filter(|s| !s.is_empty())
+        // Keys compare trimmed and in any case, as `ConnectionString::parse` reads them.
+        .filter(|s| {
+            !s.split_once('=')
+                .is_some_and(|(k, _)| k.trim().eq_ignore_ascii_case("entitypath"))
+        })
         .collect();
     Ok(SecretString::from(format!(
         "{};EntityPath={base}",
@@ -261,6 +278,60 @@ mod tests {
                 .expose_secret()
                 .ends_with(";EntityPath=events/Subscriptions/audit")
         );
+    }
+
+    #[test]
+    fn entity_connection_string_refuses_entity_names_that_would_inject_segments() {
+        let cs =
+            "Endpoint=sb://ns.servicebus.windows.net/;SharedAccessKeyName=r;SharedAccessKey=k=";
+        for bad in [
+            "orders;Endpoint=https:evil.example",
+            "orders;UseDevelopmentEmulator=true",
+            "orders=x",
+            "ord ers",
+            "orders\t",
+            "orders\u{7}",
+        ] {
+            let e = entity_connection_string(cs, &crate::EntityPath::queue(bad)).unwrap_err();
+            assert!(matches!(e, Error::Invalid(_)), "{bad:?}");
+            let msg = e.to_string();
+            assert!(msg.contains("not a valid entity name"), "{msg}");
+            assert!(
+                !msg.contains("k=") && !msg.contains("SharedAccess"),
+                "{msg}"
+            );
+        }
+        let sub = crate::EntityPath::subscription("events", "a;b=c");
+        assert!(entity_connection_string(cs, &sub).is_err());
+        // Every character a Service Bus name may use is kept.
+        let ok = crate::EntityPath::queue("eu/Orders_v2.x-y~z");
+        assert!(
+            entity_connection_string(cs, &ok)
+                .unwrap()
+                .expose_secret()
+                .ends_with(";EntityPath=eu/Orders_v2.x-y~z")
+        );
+    }
+
+    #[test]
+    fn entity_connection_string_replaces_an_entity_path_however_it_is_written() {
+        let cs =
+            "Endpoint=sb://ns.servicebus.windows.net/;SharedAccessKeyName=r;SharedAccessKey=k=";
+        let q = crate::EntityPath::queue("orders");
+        for stored in [
+            format!("{cs};EntityPath =orders"),
+            format!("{cs}; entitypath = orders ;"),
+            format!("{cs};EntityPath=Orders"),
+        ] {
+            let out = entity_connection_string(&stored, &q).unwrap();
+            let out = out.expose_secret();
+            assert!(out.ends_with(";EntityPath=orders"), "{stored}: {out}");
+            assert_eq!(
+                out.to_ascii_lowercase().matches("entitypath").count(),
+                1,
+                "{stored}: {out}"
+            );
+        }
     }
 
     #[test]

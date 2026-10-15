@@ -4,6 +4,7 @@ use crate::state::{AppState, same_identity};
 use horizon_azure_kit::auth::SignIn;
 use serde::Serialize;
 use std::future::Future;
+use std::sync::Arc;
 
 #[derive(Debug, Serialize)]
 pub struct AccountView {
@@ -124,7 +125,7 @@ pub async fn sign_in(
         .filter(|t| !t.is_empty());
     let tenant = requested.clone().unwrap_or_else(|| "organizations".into());
     // The prompt's URL is kept for "Open sign-in page" only while this sign-in waits.
-    let _clear = ClearPromptUrl(state);
+    let prompt = PromptUrl::new(state);
     tracked(
         ev,
         "Sign-in failed",
@@ -134,7 +135,7 @@ pub async fn sign_in(
                 let r = if device_code {
                     session
                         .login_device_code(&tenant, |dc| {
-                            remember_prompt_url(state, &dc.verification_uri);
+                            prompt.remember(&dc.verification_uri);
                             ev.sign_in_prompt(SignInPrompt {
                                 kind: "device-code",
                                 url: dc.verification_uri.clone(),
@@ -146,7 +147,7 @@ pub async fn sign_in(
                 } else {
                     session
                         .login_browser(&tenant, |url| {
-                            remember_prompt_url(state, url);
+                            prompt.remember(url);
                             ev.sign_in_prompt(SignInPrompt {
                                 kind: "browser",
                                 url: url.to_string(),
@@ -172,22 +173,57 @@ pub fn cancel(state: &AppState) {
     state.sign_in_cancel.notify_waiters();
 }
 
-fn remember_prompt_url(state: &AppState, url: &str) {
-    *state.last_prompt_url.lock().expect("prompt url poisoned") = Some(url.to_string());
+/// A browser page the app may open for a sign-in: an `https` URL only.
+fn https_url(url: &str) -> Option<url::Url> {
+    url::Url::parse(url).ok().filter(|u| u.scheme() == "https")
 }
 
-/// Forgets the prompt URL when `sign_in` returns, whether it succeeded, failed or was cancelled.
-struct ClearPromptUrl<'a>(&'a AppState);
+/// The prompt URL of one running `sign_in`, kept in `AppState::last_prompt_url` for "Open sign-in
+/// page" while it waits. When the sign-in returns (success, failure or cancel) the URL is cleared,
+/// but only if it is still this sign-in's: a newer sign-in's prompt stays.
+pub(crate) struct PromptUrl<'a> {
+    state: &'a AppState,
+    mine: std::sync::Mutex<Option<Arc<str>>>,
+}
 
-impl Drop for ClearPromptUrl<'_> {
+impl<'a> PromptUrl<'a> {
+    pub(crate) fn new(state: &'a AppState) -> Self {
+        Self {
+            state,
+            mine: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Keep `url` as the waiting prompt's page. Anything but an `https` URL is ignored.
+    pub(crate) fn remember(&self, url: &str) {
+        if https_url(url).is_none() {
+            return;
+        }
+        let url: Arc<str> = Arc::from(url);
+        *self.mine.lock().expect("prompt url poisoned") = Some(url.clone());
+        *self
+            .state
+            .last_prompt_url
+            .lock()
+            .expect("prompt url poisoned") = Some(url);
+    }
+}
+
+impl Drop for PromptUrl<'_> {
     fn drop(&mut self) {
-        if let Ok(mut url) = self.0.last_prompt_url.lock() {
-            *url = None;
+        let Some(mine) = self.mine.get_mut().ok().and_then(Option::take) else {
+            return;
+        };
+        if let Ok(mut current) = self.state.last_prompt_url.lock()
+            && current.as_ref().is_some_and(|c| Arc::ptr_eq(c, &mine))
+        {
+            *current = None;
         }
     }
 }
 
-/// Open the page of the sign-in that is waiting (device code), in the default browser.
+/// Open the page of the sign-in that is waiting (device code), in the default browser. Only an
+/// `https` page is opened.
 pub fn open_sign_in_page(state: &AppState) -> Result<(), CommandError> {
     let url = state
         .last_prompt_url
@@ -195,7 +231,14 @@ pub fn open_sign_in_page(state: &AppState) -> Result<(), CommandError> {
         .expect("prompt url poisoned")
         .clone()
         .ok_or_else(|| CommandError::new("not_found", "No sign-in is waiting."))?;
-    open::that(&url).map_err(|e| CommandError::new("io", format!("Couldn't open the browser: {e}")))
+    let url = https_url(&url).ok_or_else(|| {
+        CommandError::new(
+            "invalid",
+            "The sign-in page is not an https address, so it was not opened.",
+        )
+    })?;
+    open::that(url.as_str())
+        .map_err(|e| CommandError::new("io", format!("Couldn't open the browser: {e}")))
 }
 
 /// One remembered sign-in, for the Settings list.
@@ -250,9 +293,21 @@ pub fn sign_ins(state: &AppState) -> Result<Vec<StoredSignIn>, CommandError> {
         .collect()
 }
 
+/// What signing out changed beyond the sign-in itself.
+#[derive(Debug, Serialize)]
+pub struct SignedOut {
+    /// The connection that used the sign-in was closed: its profile id. The UI refreshes it.
+    pub closed_profile_id: Option<String>,
+}
+
 /// Forget a sign-in: its refresh token and its record. Signing out the current one leaves no
-/// current account.
-pub async fn sign_out(state: &AppState, ev: &dyn Events, id: &str) -> Result<(), CommandError> {
+/// current account. The active connection is closed (cancelling its jobs) when its profile is
+/// bound to this sign-in or connects with it now.
+pub async fn sign_out(
+    state: &AppState,
+    ev: &dyn Events,
+    id: &str,
+) -> Result<SignedOut, CommandError> {
     let s = state
         .store
         .sign_in(id)?
@@ -262,16 +317,70 @@ pub async fn sign_out(state: &AppState, ev: &dyn Events, id: &str) -> Result<(),
         ev,
         "Signing out failed",
         async {
+            // No connect may start or finish while the sign-in goes away.
+            let _serial = state.connect_lock.lock().await;
+            // Decided before logging out: afterwards the sign-in no longer counts as usable.
+            let closing = match state.active.read().await.as_ref() {
+                Some(a) => match state.store.get_by_id(&a.profile_id)? {
+                    Some(p) => uses_sign_in(state, &p, &s.id)?.then_some(p),
+                    None => None,
+                },
+                None => None,
+            };
             state.session.logout(&s)?;
             state.store.remove_sign_in(&s.id)?;
             if state.store.current_sign_in()?.is_none_or(|c| c.id == s.id) {
                 state.store.set_current_sign_in(None)?;
             }
-            Ok(())
+            let Some(p) = closing else {
+                return Ok((
+                    SignedOut {
+                        closed_profile_id: None,
+                    },
+                    None,
+                ));
+            };
+            let old = {
+                let mut active = state.active.write().await;
+                if active.as_ref().is_some_and(|a| a.profile_id == p.id) {
+                    active.take()
+                } else {
+                    None
+                }
+            };
+            if let Some(old) = old {
+                state.close(old).await;
+            }
+            Ok((
+                SignedOut {
+                    closed_profile_id: Some(p.id),
+                },
+                Some(p.name),
+            ))
         },
-        |_| format!("Signed out {who}"),
+        |(_, closed)| match closed {
+            Some(name) => format!("Signed out {who} and closed {name}"),
+            None => format!("Signed out {who}"),
+        },
     )
     .await
+    .map(|(out, _)| out)
+}
+
+/// Whether profile `p` is bound to sign-in `id` or connects with it now (`usable_sign_in`).
+fn uses_sign_in(
+    state: &AppState,
+    p: &dispatched_core::profiles::Profile,
+    id: &str,
+) -> Result<bool, CommandError> {
+    let dispatched_core::profiles::ProfileAuth::Entra { sign_in_id, tenant } = &p.auth else {
+        return Ok(false);
+    };
+    Ok(sign_in_id == id
+        || state
+            .usable_sign_in(sign_in_id, tenant.as_deref())?
+            .1
+            .is_some_and(|u| u.id == id))
 }
 
 #[cfg(test)]
@@ -427,6 +536,105 @@ mod tests {
         assert_eq!(
             sign_out(&s, &ev, "oid-1").await.unwrap_err().kind,
             "not_found"
+        );
+    }
+
+    const PROMPT: &str = "https://microsoft.com/devicelogin";
+
+    fn prompt_url(s: &AppState) -> Option<String> {
+        s.last_prompt_url
+            .lock()
+            .unwrap()
+            .as_deref()
+            .map(str::to_string)
+    }
+
+    #[test]
+    fn a_sign_in_s_prompt_url_is_kept_while_it_waits_and_cleared_after() {
+        let s = state();
+        {
+            let waiting = PromptUrl::new(&s);
+            waiting.remember(PROMPT);
+            assert_eq!(prompt_url(&s).as_deref(), Some(PROMPT));
+        }
+        assert_eq!(prompt_url(&s), None);
+    }
+
+    #[test]
+    fn an_older_sign_in_ending_leaves_a_newer_one_s_prompt_url() {
+        let s = state();
+        let first = PromptUrl::new(&s);
+        first.remember(PROMPT);
+        // The device-code page is the same URL every time: the newer sign-in's is still its own.
+        let second = PromptUrl::new(&s);
+        second.remember(PROMPT);
+        drop(first);
+        assert_eq!(prompt_url(&s).as_deref(), Some(PROMPT));
+        drop(second);
+        assert_eq!(prompt_url(&s), None);
+    }
+
+    #[test]
+    fn only_https_prompt_urls_are_kept_or_opened() {
+        let s = state();
+        let waiting = PromptUrl::new(&s);
+        for bad in [
+            "http://login.example",
+            "file:///Applications/Calculator.app",
+            "javascript:alert(1)",
+            "not a url",
+            "/Applications/Calculator.app",
+        ] {
+            waiting.remember(bad);
+            assert_eq!(prompt_url(&s), None, "{bad}");
+        }
+        *s.last_prompt_url.lock().unwrap() = Some(std::sync::Arc::from("file:///etc/hosts"));
+        assert_eq!(open_sign_in_page(&s).unwrap_err().kind, "invalid");
+    }
+
+    #[tokio::test]
+    async fn signing_out_closes_the_connection_that_uses_the_sign_in() {
+        use crate::ops::test_util::{remember_guest_sign_in, remember_sign_in};
+        let s = state();
+        let ev = crate::events::Recorder::default();
+        let home = remember_sign_in(&s, "oid-1", "tenant-1", true);
+        s.store.set_current_sign_in(Some(&home.id)).unwrap();
+        remember_guest_sign_in(&s, &home, "oid-1g", "tenant-guest", true);
+        remember_sign_in(&s, "oid-x", "tenant-x", true);
+        // Saved with the home sign-in, asking for the guest tenant: connects with the guest sign-in.
+        let p = dispatched_core::profiles::Profile::entra(
+            "Guest NS",
+            "g.servicebus.windows.net",
+            "oid-1",
+            Some("tenant-guest"),
+        );
+        s.store.insert(&p).unwrap();
+        crate::ops::connection::connect(&s, &ev, &p.id)
+            .await
+            .unwrap();
+
+        // Another sign-in: the connection stays.
+        let out = sign_out(&s, &ev, "oid-x").await.unwrap();
+        assert_eq!(out.closed_profile_id, None);
+        assert_eq!(s.active().await.unwrap().profile_id, p.id);
+
+        // The sign-in it connects with: closed, and the result names the profile.
+        let out = sign_out(&s, &ev, "oid-1g").await.unwrap();
+        assert_eq!(out.closed_profile_id.as_deref(), Some(p.id.as_str()));
+        assert_eq!(s.active().await.unwrap_err().kind, "not_connected");
+
+        // Now it connects with the sign-in it was saved with; signing that out closes it too.
+        crate::ops::connection::connect(&s, &ev, &p.id)
+            .await
+            .unwrap();
+        let out = sign_out(&s, &ev, "oid-1").await.unwrap();
+        assert_eq!(out.closed_profile_id.as_deref(), Some(p.id.as_str()));
+        assert_eq!(s.active().await.unwrap_err().kind, "not_connected");
+        let log = serde_json::to_string(&*ev.activity.lock().unwrap()).unwrap();
+        assert!(log.contains("Signed out oid-x@x.io\""), "{log}");
+        assert!(
+            log.contains("Signed out oid-1@x.io and closed Guest NS"),
+            "{log}"
         );
     }
 

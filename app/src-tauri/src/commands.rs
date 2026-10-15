@@ -92,23 +92,17 @@ pub async fn copy_entity_connection_string(
     profile_id: String,
     entity: String,
 ) -> Result<(), CommandError> {
-    use tauri_plugin_clipboard_manager::ClipboardExt;
-    let clip = app.clone();
     ops::profiles::copy_entity_connection_string(
         &state,
         &TauriEvents(app),
         &profile_id,
         &entity,
-        move |text| {
-            clip.clipboard()
-                .write_text(text)
-                .map_err(|e| CommandError::new("io", format!("Couldn't write the clipboard: {e}")))
-        },
+        crate::clipboard::write_secret_text,
     )
     .await
 }
 
-use crate::ops::account::{AccountView, SignInView, StoredSignIn};
+use crate::ops::account::{AccountView, SignInView, SignedOut, StoredSignIn};
 use crate::ops::browse::{PeekPageView, PeekRequest};
 use crate::ops::connection::ConnectionView;
 use crate::ops::dashboard::DashboardView;
@@ -152,7 +146,7 @@ pub async fn sign_out(
     app: AppHandle,
     state: State<'_, AppState>,
     id: String,
-) -> Result<(), CommandError> {
+) -> Result<SignedOut, CommandError> {
     ops::account::sign_out(&state, &TauriEvents(app), &id).await
 }
 

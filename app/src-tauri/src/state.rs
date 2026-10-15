@@ -40,7 +40,8 @@ pub struct AppState {
     /// Running and finished jobs (exports).
     pub jobs: Arc<crate::jobs::Jobs>,
     /// The URL of the sign-in prompt shown last, while a sign-in waits for it.
-    pub last_prompt_url: std::sync::Mutex<Option<String>>,
+    /// Shared, so a finishing sign-in can tell its own URL from a newer one's (`ops::account::PromptUrl`).
+    pub last_prompt_url: std::sync::Mutex<Option<Arc<str>>>,
 }
 
 impl AppState {
