@@ -1,6 +1,6 @@
-import { Check } from "lucide-react";
-import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { useDiscoveredNamespaces, useTenants, type DiscoveredNamespace, type EngineError, type TenantView } from "@/engine";
+import { ChevronRight } from "lucide-react";
+import { useEffect, useId, useMemo, useState, type KeyboardEvent } from "react";
+import { useAccount, useDiscoveredNamespaces, useTenants, type DiscoveredNamespace, type EngineError, type TenantView } from "@/engine";
 import { Button, EmptyState, Field, Input, Problem, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Skeleton, cn } from "@/ui";
 import { sentence } from "./profileErrors";
 import { SignInProgress, useSignInFlow } from "./SignInPanel";
@@ -8,16 +8,24 @@ import { SignInProgress, useSignInFlow } from "./SignInPanel";
 /** More namespaces than this get a filter box. */
 export const FILTER_THRESHOLD = 8;
 
-const tenantLabel = (t: TenantView) => {
+/** The Select value for "the account's home tenant" when the tenant list does not name it. */
+const HOME_VALUE = "__home__";
+
+export const tenantLabel = (t: TenantView) => {
   const name = t.display_name ?? t.default_domain ?? t.tenant_id;
   return t.home ? `${name} (home)` : name;
 };
 
 const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
-const meta = (ns: DiscoveredNamespace) => [ns.subscription_name, ns.location, ns.tier].filter(Boolean).join(" · ");
+const matches = (ns: DiscoveredNamespace, q: string) =>
+  [ns.name, ns.subscription_name, ns.location, ns.tier].some((v) => v?.toLowerCase().includes(q));
 
-const matches = (ns: DiscoveredNamespace, q: string) => `${ns.name} ${meta(ns)}`.toLowerCase().includes(q);
+const label = (ns: DiscoveredNamespace) => [ns.name, ns.subscription_name, ns.location, ns.tier].filter(Boolean).join(", ");
+
+/** The list's columns: name, subscription (takes what is left and truncates), region, tier. Regions and tiers
+ *  are short and line up in their own columns. */
+const COLUMNS = "grid-cols-[minmax(0,38%)_minmax(0,1fr)_68px_56px]";
 
 /** A single-select list: arrow keys move, Enter or Space picks, a click picks. */
 function NamespaceList({
@@ -31,17 +39,14 @@ function NamespaceList({
   const uid = useId();
   const [active, setActive] = useState(0);
   const [focused, setFocused] = useState(false);
-  const box = useRef<HTMLDivElement>(null);
   const last = items.length - 1;
   const at = Math.min(active, last);
   const optionId = (i: number) => `${uid}-opt-${i}`;
 
   // Keep the keyboard position visible in a list that scrolls.
   useEffect(() => {
-    document.getElementById(optionId(at))?.scrollIntoView?.({ block: "nearest" });
-    // optionId is derived from uid
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [at]);
+    document.getElementById(`${uid}-opt-${at}`)?.scrollIntoView?.({ block: "nearest" });
+  }, [at, uid]);
 
   const onKeyDown = (e: KeyboardEvent) => {
     const move = (i: number) => {
@@ -58,9 +63,10 @@ function NamespaceList({
     }
   };
 
+  // The row under the keyboard carries the 1px ring, and only for keyboard focus (`:focus-visible`), so a
+  // click does not leave a ring behind; the list itself shows none.
   return (
     <div
-      ref={box}
       role="listbox"
       tabIndex={0}
       aria-labelledby={labelledBy}
@@ -72,7 +78,7 @@ function NamespaceList({
         if (i >= 0) setActive(i);
       }}
       onBlur={() => setFocused(false)}
-      className="max-h-[216px] overflow-y-auto rounded-ctl border border-line bg-field focus-visible:outline focus-visible:outline-1 focus-visible:outline-fg focus-visible:-outline-offset-1"
+      className="group max-h-[216px] overflow-y-auto rounded-ctl border border-line bg-field outline-none"
     >
       {items.map((ns, i) => {
         const selected = ns.host === selectedHost;
@@ -82,27 +88,23 @@ function NamespaceList({
             id={optionId(i)}
             role="option"
             aria-selected={selected}
+            aria-label={label(ns)}
             onClick={() => {
               setActive(i);
               onPick(ns);
             }}
+            // 26px is the comfortable row (DESIGN.md spacing.row-comfortable); `h-row` follows the compact density.
             className={cn(
-              "flex h-[26px] cursor-default items-center gap-2 px-2",
+              "grid h-[26px] cursor-default items-center gap-2 px-2",
+              COLUMNS,
               selected ? "bg-selection" : "hover:bg-hover",
-              focused && i === at && "outline outline-1 -outline-offset-1 outline-fg",
+              i === at && "group-focus-visible:outline group-focus-visible:outline-1 group-focus-visible:-outline-offset-1 group-focus-visible:outline-fg",
             )}
           >
-            <span className="max-w-[60%] shrink-0 truncate text-12 text-fg">{ns.name}</span>
-            <span className="flex min-w-0 flex-1 text-11 text-muted">
-              <span className="min-w-0 truncate">{ns.subscription_name}</span>
-              <span className="shrink-0 whitespace-pre">{[ns.location, ns.tier].filter(Boolean).map((x) => ` · ${x}`).join("")}</span>
-            </span>
-            {ns.local_auth_disabled && (
-              <span className="shrink-0 text-11 text-muted" title="Shared access keys are turned off. Sign in with Entra ID.">
-                Entra only
-              </span>
-            )}
-            <Check aria-hidden="true" className={cn("size-3.5 shrink-0", selected ? "text-fg" : "invisible")} />
+            <span className="truncate text-12 text-fg">{ns.name}</span>
+            <span className="truncate text-11 text-muted">{ns.subscription_name}</span>
+            <span className="truncate text-right text-11 tabular-nums text-muted">{ns.location}</span>
+            <span className="truncate text-right text-11 tabular-nums text-muted">{ns.tier}</span>
           </div>
         );
       })}
@@ -112,7 +114,8 @@ function NamespaceList({
 
 const tenantName = (t: TenantView | undefined, id: string) => t?.display_name ?? t?.default_domain ?? id;
 
-/** A tenant that asks for multi-factor sign-in: sign in to it here, then list it again. */
+/** A tenant that asks for multi-factor sign-in: sign in to it here, then list it again. This is not a
+ *  failure, so it is a neutral message, not an error. */
 function TenantSignIn({ name, tenantId, message, onSignedIn }: {
   name: string;
   tenantId: string;
@@ -122,45 +125,53 @@ function TenantSignIn({ name, tenantId, message, onSignedIn }: {
   const flow = useSignInFlow(onSignedIn);
   if (flow.pending) return <SignInProgress flow={flow} />;
   return (
-    <Problem
-      title={`${name} needs its own sign-in`}
-      body={sentence(message)}
-      detail={flow.failure?.message}
-      action={
-        <>
-          <Button onClick={() => flow.start(false, tenantId)}>Sign in to {name}</Button>
-          <Button variant="quiet" onClick={() => flow.start(true, tenantId)}>Use a device code instead</Button>
-        </>
-      }
-    />
+    <>
+      <EmptyState
+        className="px-0 py-1"
+        title={`${name} needs its own sign-in`}
+        body={sentence(message)}
+        action={
+          <>
+            <Button onClick={() => flow.start(false, tenantId)}>Sign in to {name}</Button>
+            <Button variant="quiet" onClick={() => flow.start(true, tenantId)}>Use a device code instead</Button>
+          </>
+        }
+      />
+      {flow.failure && <Problem title="Sign-in failed" body={sentence(flow.failure.message)} />}
+    </>
   );
 }
 
 /** The tenant and the Service Bus namespaces the signed-in account can see, to pick one instead of typing it.
- *  `onPick` gets the namespace and the tenant to save it under (`null` is the home tenant). */
+ *  It stays mounted (`hidden`) while a pick is shown as a summary, so the tenant and list are as they were. */
 export function NamespacePicker({
-  selectedHost, onPick, onTenant,
+  selectedHost, onPick, onTenant, hidden,
 }: {
   /** The host the form holds now, to mark its row. */
   selectedHost: string;
-  onPick: (ns: DiscoveredNamespace, tenantId: string | null) => void;
+  /** `tenantId` is the tenant to save the namespace under (`null`: the home tenant); `tenantLabel` names it. */
+  onPick: (ns: DiscoveredNamespace, tenantId: string | null, tenantLabel: string) => void;
   /** The tenant being browsed changed (`null` is the home tenant). */
   onTenant: (tenantId: string | null) => void;
+  hidden?: boolean;
 }) {
   const labelId = useId();
   const [tenantId, setTenantId] = useState<string | null>(null); // null: the home tenant
   const [filter, setFilter] = useState("");
-  // A new picker (another account) starts at the home tenant.
-  useEffect(() => onTenant(null), [onTenant]);
+  const account = useAccount();
   const tenants = useTenants();
   const found = useDiscoveredNamespaces(tenantId);
-  const home = tenants.data?.find((t) => t.home);
+  // The list marks the home tenant; if it does not, the one that is the sign-in's own tenant is home, else "Home tenant".
+  const home = tenants.data?.find((t) => t.home) ?? tenants.data?.find((t) => t.tenant_id === account.data?.tenant_id);
+  const homeLabel = home ? tenantLabel({ ...home, home: true }) : "Home tenant";
   const q = filter.trim().toLowerCase();
   const all = found.data?.namespaces;
   const shown = useMemo(() => (all ? all.filter((n) => matches(n, q)) : []), [all, q]);
+  const browsed = tenantId === null ? undefined : tenants.data?.find((t) => t.tenant_id === tenantId);
+  const browsedLabel = browsed ? tenantLabel(browsed) : homeLabel;
 
   return (
-    <div className="flex flex-col gap-3">
+    <div hidden={hidden} className="flex flex-col gap-3">
       {tenants.isPending ? (
         <div className="flex flex-col gap-1">
           <span className="text-12 font-semibold text-muted">Tenant</span>
@@ -172,9 +183,9 @@ export function NamespacePicker({
         <Field label="Tenant">
           {(ids) => (
             <Select
-              value={tenantId ?? home?.tenant_id ?? tenants.data[0]?.tenant_id ?? ""}
+              value={tenantId ?? home?.tenant_id ?? HOME_VALUE}
               onValueChange={(v) => {
-                const next = v === home?.tenant_id ? null : v;
+                const next = v === HOME_VALUE || v === home?.tenant_id ? null : v;
                 setTenantId(next);
                 onTenant(next);
                 setFilter("");
@@ -182,8 +193,9 @@ export function NamespacePicker({
             >
               <SelectTrigger {...ids}><SelectValue /></SelectTrigger>
               <SelectContent>
+                {!home && <SelectItem value={HOME_VALUE}>Home tenant</SelectItem>}
                 {tenants.data.map((t) => (
-                  <SelectItem key={t.tenant_id} value={t.tenant_id}>{tenantLabel(t)}</SelectItem>
+                  <SelectItem key={t.tenant_id} value={t.tenant_id}>{t.tenant_id === home?.tenant_id ? homeLabel : tenantLabel(t)}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
@@ -226,7 +238,7 @@ export function NamespacePicker({
           (found.error as EngineError).kind === "mfa_required" ? (
             <TenantSignIn
               key={tenantId}
-              name={tenantName(tenants.data?.find((t) => t.tenant_id === tenantId), tenantId ?? "")}
+              name={tenantName(browsed, tenantId ?? "")}
               tenantId={tenantId ?? ""}
               message={(found.error as EngineError).message}
               onSignedIn={() => void found.refetch()}
@@ -241,7 +253,7 @@ export function NamespacePicker({
         ) : found.data.namespaces.length === 0 ? (
           <EmptyState
             className="px-0 py-1"
-            title="No Service Bus namespaces in this tenant."
+            title="No Service Bus namespaces in this tenant"
             body="You need Reader access on a subscription to see its namespaces."
           />
         ) : shown.length === 0 ? (
@@ -252,16 +264,17 @@ export function NamespacePicker({
             items={shown}
             selectedHost={selectedHost}
             labelledBy={labelId}
-            onPick={(ns) => onPick(ns, tenantId)}
+            onPick={(ns) => onPick(ns, tenantId, browsedLabel)}
           />
         )}
 
         {found.data && found.data.skipped.length > 0 && (
-          <details className="text-11 text-muted">
-            <summary className="w-fit cursor-default select-none rounded-ctl focus-visible:outline focus-visible:outline-1 focus-visible:outline-fg focus-visible:outline-offset-1">
+          <details className="group text-11 text-muted">
+            <summary className="flex w-fit cursor-default select-none list-none items-center gap-1 rounded-ctl focus-visible:outline focus-visible:outline-1 focus-visible:outline-fg focus-visible:outline-offset-1 [&::-webkit-details-marker]:hidden">
+              <ChevronRight aria-hidden="true" className="size-3 shrink-0 group-open:rotate-90" />
               {count(found.data.skipped.length, "subscription", "subscriptions")} couldn't be listed
             </summary>
-            <ul className="m-0 flex list-none flex-col gap-0.5 pl-0 pt-1">
+            <ul className="m-0 flex list-none flex-col gap-0.5 pl-4 pt-1">
               {found.data.skipped.map((s) => (
                 <li key={s.subscription_id}>
                   <span className="text-fg">{s.subscription_name}</span>: {sentence(s.reason)}

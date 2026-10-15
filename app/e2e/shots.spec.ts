@@ -250,6 +250,20 @@ export const shots: {
     viewportOnly: true,
   },
   {
+    name: "profile-entra-picked",
+    path: "/?scenario=empty",
+    ready: (p) => p.getByRole("heading", { name: "Add a connection" }),
+    prepare: async (page) => {
+      await page.getByRole("button", { name: "Sign in with Entra ID" }).click();
+      const sheet = page.getByRole("dialog", { name: "Add connection" });
+      await sheet.getByRole("button", { name: "Sign in with Entra ID" }).click();
+      await sheet.getByRole("option", { name: /sb-finance-events/ }).click();
+      await sheet.getByRole("group", { name: "Selected namespace" }).waitFor();
+    },
+    holds: (p) => p.getByRole("dialog", { name: "Add connection" }),
+    viewportOnly: true,
+  },
+  {
     name: "profile-entra-mfa",
     path: "/?scenario=empty",
     ready: (p) => p.getByRole("heading", { name: "Add a connection" }),

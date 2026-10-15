@@ -124,7 +124,7 @@ describe("ProfileSheet", () => {
     expect(await within(sheet).findByText(/Signed in as ops@contoso.example/)).toBeInTheDocument();
     await user.type(within(sheet).getByLabelText("Name"), "Ops");
     await user.click(await within(sheet).findByRole("option", { name: /sb-logistics-prod/ }));
-    expect(within(sheet).getByLabelText("Namespace")).toHaveValue("sb-logistics-prod.servicebus.windows.net");
+    expect(within(sheet).getByRole("group", { name: "Selected namespace" })).toHaveTextContent("sb-logistics-prod.servicebus.windows.net");
     await user.click(within(sheet).getByRole("button", { name: "Save" }));
     expect(await screen.findByRole("button", { name: /Connection: Ops/ })).toBeInTheDocument();
   });
@@ -357,6 +357,14 @@ describe("Entra discovery in the Add connection sheet", () => {
     expect(await within(o.sheet).findByText(/Signed in as ops@contoso.example/)).toBeInTheDocument();
     return o;
   }
+  type U = ReturnType<typeof userEvent.setup>;
+  const cells = (row: HTMLElement) => Array.from(row.children).map((c) => c.textContent);
+  const summary = (sheet: HTMLElement) => within(sheet).getByRole("group", { name: "Selected namespace" });
+  const showManual = (user: U, sheet: HTMLElement) => user.click(within(sheet).getByRole("button", { name: "Enter a namespace manually" }));
+  async function chooseTenant(user: U, sheet: HTMLElement, name: string) {
+    await user.click(within(sheet).getByRole("combobox", { name: "Tenant" }));
+    await user.click(await screen.findByRole("option", { name }));
+  }
 
   it("keeps the typed fields before sign-in and lists tenants and namespaces right after it, without another click", async () => {
     const { user, sheet, mock } = await openEntra();
@@ -368,7 +376,7 @@ describe("Entra discovery in the Add connection sheet", () => {
     expect(mock.calls.filter((c) => c.cmd === "discover_namespaces")).toHaveLength(1);
   });
 
-  it("lists the tenants with the home tenant first and its namespaces", async () => {
+  it("lists the tenants with the home tenant first, and the namespaces in fixed columns", async () => {
     const { user, sheet } = await signedIn();
     const tenant = await within(sheet).findByRole("combobox", { name: "Tenant" });
     expect(tenant).toHaveTextContent("Horizon Tech (home)");
@@ -378,71 +386,16 @@ describe("Entra discovery in the Add connection sheet", () => {
     await user.keyboard("{Escape}");
     const list = await within(sheet).findByRole("listbox", { name: "Namespaces" });
     const rows = within(list).getAllByRole("option");
-    expect(rows.map((r) => r.textContent)).toEqual([
-      expect.stringMatching(/^sb-finance-eventsFinance shared · northeurope · StandardEntra only$/),
-      expect.stringMatching(/^sb-logistics-devLogistics dev · westeurope · Standard$/),
-      expect.stringMatching(/^sb-logistics-prodLogistics prod · westeurope · Premium$/),
-      expect.stringMatching(/^sb-partner-gatewayPartner integrations · northeurope · Standard$/),
+    expect(rows.map(cells)).toEqual([
+      ["sb-finance-events", "Finance shared", "northeurope", "Standard"],
+      ["sb-logistics-dev", "Logistics dev", "westeurope", "Standard"],
+      ["sb-logistics-prod", "Logistics prod", "westeurope", "Premium"],
+      ["sb-partner-gateway", "Partner integrations", "northeurope", "Standard"],
     ]);
+    expect(rows[2]).toHaveAccessibleName("sb-logistics-prod, Logistics prod, westeurope, Premium");
+    expect(within(list).queryByText("Entra only")).not.toBeInTheDocument();
     expect(within(sheet).queryByRole("textbox", { name: "Filter namespaces" })).not.toBeInTheDocument(); // 4 rows need no filter
     expect(within(sheet).queryByLabelText("Namespace")).not.toBeInTheDocument(); // typed fields wait behind the toggle
-  });
-
-  it("picking a namespace fills Namespace, Tenant and an empty Name, and shows what was filled", async () => {
-    const { user, sheet, mock } = await signedIn();
-    await user.click(await within(sheet).findByRole("option", { name: /sb-logistics-prod/ }));
-    expect(within(sheet).getByLabelText("Namespace")).toHaveValue("sb-logistics-prod.servicebus.windows.net");
-    expect(within(sheet).getByLabelText("Tenant ID")).toHaveValue(""); // home tenant
-    expect(within(sheet).getByLabelText("Name")).toHaveValue("sb-logistics-prod");
-    expect(within(sheet).getByRole("option", { name: /sb-logistics-prod/ })).toHaveAttribute("aria-selected", "true");
-    // A typed name is kept when another namespace is picked.
-    await user.clear(within(sheet).getByLabelText("Name"));
-    await user.type(within(sheet).getByLabelText("Name"), "Prod logistics");
-    await user.click(within(sheet).getByRole("option", { name: /sb-partner-gateway/ }));
-    expect(within(sheet).getByLabelText("Name")).toHaveValue("Prod logistics");
-    expect(within(sheet).getByLabelText("Namespace")).toHaveValue("sb-partner-gateway.servicebus.windows.net");
-    await user.click(within(sheet).getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(mock.calls.some((c) => c.cmd === "profile_save")).toBe(true));
-    const draft = (mock.calls.find((c) => c.cmd === "profile_save")!.args as { draft: { auth: unknown } }).draft;
-    expect(draft.auth).toEqual({ kind: "entra", namespace: "sb-partner-gateway.servicebus.windows.net", tenant: null });
-  });
-
-  it("marks Entra-only namespaces and says why", async () => {
-    const { sheet } = await signedIn();
-    const row = await within(sheet).findByRole("option", { name: /sb-finance-events/ });
-    const note = within(row).getByText("Entra only");
-    expect(note).toHaveAttribute("title", expect.stringMatching(/Shared access keys are turned off/));
-    expect(within(sheet).getByRole("option", { name: /sb-logistics-dev/ })).not.toHaveTextContent("Entra only");
-  });
-
-  it("selects with the keyboard: arrows move, Enter picks, and Enter does not save the form", async () => {
-    const { user, sheet, mock } = await signedIn();
-    const list = await within(sheet).findByRole("listbox", { name: "Namespaces" });
-    list.focus();
-    await user.keyboard("{ArrowDown}{ArrowDown}");
-    expect(list).toHaveAttribute("aria-activedescendant", within(list).getAllByRole("option")[2].id);
-    await user.keyboard("{ArrowUp}{Enter}");
-    expect(within(sheet).getByLabelText("Namespace")).toHaveValue("sb-logistics-dev.servicebus.windows.net");
-    expect(mock.calls.some((c) => c.cmd === "profile_save")).toBe(false);
-    list.focus();
-    await user.keyboard("{End}{ }");
-    expect(within(sheet).getByLabelText("Namespace")).toHaveValue("sb-partner-gateway.servicebus.windows.net");
-    await user.keyboard("{Home}{Enter}");
-    expect(within(sheet).getByLabelText("Namespace")).toHaveValue("sb-finance-events.servicebus.windows.net");
-  });
-
-  it("filters when there are more than eight namespaces", async () => {
-    const { user, sheet } = await signedIn("many-namespaces");
-    const filter = await within(sheet).findByRole("textbox", { name: "Filter namespaces" });
-    expect(within(sheet).getAllByRole("option")).toHaveLength(12);
-    await user.type(filter, "team-0");
-    expect(within(sheet).getAllByRole("option")).toHaveLength(8);
-    await user.clear(filter);
-    await user.type(filter, "partner");
-    expect(within(sheet).getAllByRole("option")).toHaveLength(1);
-    await user.type(filter, "zzz");
-    expect(within(sheet).queryByRole("option")).not.toBeInTheDocument();
-    expect(within(sheet).getByText(/No namespaces match/)).toBeInTheDocument();
   });
 
   it("shows the tenant picker as soon as the account is signed in, before the namespaces arrive", async () => {
@@ -466,33 +419,146 @@ describe("Entra discovery in the Add connection sheet", () => {
     expect(await within(sheet).findByRole("listbox", { name: "Namespaces" })).toBeInTheDocument();
   });
 
-  it("offers to sign in to a tenant that needs multi-factor sign-in, then lists its namespaces", async () => {
+  it("picking a namespace collapses to a summary and fills the form; Change brings the list back", async () => {
+    const { user, sheet, mock } = await signedIn();
+    await user.click(await within(sheet).findByRole("option", { name: /sb-logistics-prod/ }));
+    const sum = summary(sheet);
+    expect(within(sum).getByText("sb-logistics-prod.servicebus.windows.net")).toHaveClass("font-mono");
+    expect(sum).toHaveTextContent("Horizon Tech (home)");
+    expect(within(sheet).queryByRole("listbox")).not.toBeInTheDocument();
+    expect(within(sheet).queryByLabelText("Namespace")).not.toBeInTheDocument(); // no raw inputs
+    expect(within(sheet).getByLabelText("Name")).toHaveValue("sb-logistics-prod");
+    // The typed fields hold what was picked, mono, with the home tenant empty.
+    await showManual(user, sheet);
+    expect(within(sheet).getByLabelText("Namespace")).toHaveValue("sb-logistics-prod.servicebus.windows.net");
+    expect(within(sheet).getByLabelText("Namespace")).toHaveClass("font-mono");
+    expect(within(sheet).getByLabelText("Tenant ID")).toHaveValue("");
+    expect(within(sheet).getByLabelText("Tenant ID")).toHaveAttribute("placeholder", "Home tenant");
+    // Change shows the list again with the pick marked; a typed name is kept when another is picked.
+    await user.clear(within(sheet).getByLabelText("Name"));
+    await user.type(within(sheet).getByLabelText("Name"), "Prod logistics");
+    await user.click(within(sheet).getByRole("button", { name: "Change" }));
+    expect(within(await within(sheet).findByRole("listbox", { name: "Namespaces" })).getByRole("option", { name: /sb-logistics-prod/ })).toHaveAttribute("aria-selected", "true");
+    await user.click(within(sheet).getByRole("option", { name: /sb-partner-gateway/ }));
+    expect(summary(sheet)).toHaveTextContent("sb-partner-gateway.servicebus.windows.net");
+    expect(within(sheet).getByLabelText("Name")).toHaveValue("Prod logistics");
+    await user.click(within(sheet).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(mock.calls.some((c) => c.cmd === "profile_save")).toBe(true));
+    const draft = (mock.calls.find((c) => c.cmd === "profile_save")!.args as { draft: { auth: unknown } }).draft;
+    expect(draft.auth).toEqual({ kind: "entra", namespace: "sb-partner-gateway.servicebus.windows.net", tenant: null });
+  });
+
+  it("notes in the summary when shared access keys are off", async () => {
+    const { user, sheet } = await signedIn();
+    await user.click(await within(sheet).findByRole("option", { name: /sb-finance-events/ }));
+    expect(summary(sheet)).toHaveTextContent("Shared access keys are off for this namespace. Entra ID only.");
+    await user.click(within(sheet).getByRole("button", { name: "Change" }));
+    await user.click(await within(sheet).findByRole("option", { name: /sb-logistics-dev/ }));
+    expect(summary(sheet)).not.toHaveTextContent(/Shared access keys/);
+  });
+
+  it("selects with the keyboard: arrows move, Enter picks, and Enter does not save the form", async () => {
+    const { user, sheet, mock } = await signedIn();
+    const list = await within(sheet).findByRole("listbox", { name: "Namespaces" });
+    list.focus();
+    await user.keyboard("{ArrowDown}{ArrowDown}");
+    expect(list).toHaveAttribute("aria-activedescendant", within(list).getAllByRole("option")[2].id);
+    await user.keyboard("{ArrowUp}{Enter}");
+    expect(summary(sheet)).toHaveTextContent("sb-logistics-dev.servicebus.windows.net");
+    expect(mock.calls.some((c) => c.cmd === "profile_save")).toBe(false);
+    await user.click(within(sheet).getByRole("button", { name: "Change" }));
+    const again = await within(sheet).findByRole("listbox", { name: "Namespaces" });
+    again.focus();
+    await user.keyboard("{End}{ }");
+    expect(summary(sheet)).toHaveTextContent("sb-partner-gateway.servicebus.windows.net");
+    await user.click(within(sheet).getByRole("button", { name: "Change" }));
+    (await within(sheet).findByRole("listbox", { name: "Namespaces" })).focus();
+    await user.keyboard("{Home}{Enter}");
+    expect(summary(sheet)).toHaveTextContent("sb-finance-events.servicebus.windows.net");
+  });
+
+  it("shows the keyboard position only as a row ring, not a ring around the whole list", async () => {
+    const { sheet } = await signedIn();
+    const list = await within(sheet).findByRole("listbox", { name: "Namespaces" });
+    expect(list.className).toContain("outline-none");
+    expect(list.className).not.toMatch(/focus-visible:outline/);
+    expect(within(list).getAllByRole("option")[0].className).toContain("group-focus-visible:outline");
+  });
+
+  it("filters when there are more than eight namespaces", async () => {
+    const { user, sheet } = await signedIn("many-namespaces");
+    const filter = await within(sheet).findByRole("textbox", { name: "Filter namespaces" });
+    expect(within(sheet).getAllByRole("option")).toHaveLength(12);
+    await user.type(filter, "team-0");
+    expect(within(sheet).getAllByRole("option")).toHaveLength(8);
+    await user.clear(filter);
+    await user.type(filter, "partner");
+    expect(within(sheet).getAllByRole("option")).toHaveLength(1);
+    await user.type(filter, "zzz");
+    expect(within(sheet).queryByRole("option")).not.toBeInTheDocument();
+    expect(within(sheet).getByText(/No namespaces match/)).toBeInTheDocument();
+  });
+
+  it("offers to sign in to a tenant that needs multi-factor sign-in, then lists its namespaces, without resetting anything", async () => {
     const { user, sheet, mock } = await signedIn();
     await within(sheet).findByRole("listbox", { name: "Namespaces" });
-    await user.click(within(sheet).getByRole("combobox", { name: "Tenant" }));
-    await user.click(await screen.findByRole("option", { name: "Northwind Traders" }));
-    expect(await within(sheet).findByText("Northwind Traders needs its own sign-in")).toBeInTheDocument();
+    await user.type(within(sheet).getByLabelText("Name"), "Keep me");
+    await chooseTenant(user, sheet, "Northwind Traders");
+    const heading = await within(sheet).findByRole("heading", { name: "Northwind Traders needs its own sign-in" });
+    // Not a failure: no amber error icon.
+    expect(heading.querySelector("svg")).toBeNull();
     expect(within(sheet).getByText(/requires multi-factor sign-in/)).toBeInTheDocument();
     expect(within(sheet).queryByRole("listbox")).not.toBeInTheDocument();
     await user.click(within(sheet).getByRole("button", { name: "Sign in to Northwind Traders" }));
     expect(mock.calls.at(-1)).toMatchObject({ cmd: "sign_in", args: { tenant: "tenant-guest", deviceCode: false } });
     const list = await within(sheet).findByRole("listbox", { name: "Namespaces" });
-    expect(within(list).getAllByRole("option").map((o) => o.textContent)).toEqual([
-      "nw-ordersNorthwind production · westeurope · Premium",
-      "nw-telemetryNorthwind shared · uksouth · Standard",
+    expect(within(list).getAllByRole("option").map(cells)).toEqual([
+      ["nw-orders", "Northwind production", "westeurope", "Premium"],
+      ["nw-telemetry", "Northwind shared", "uksouth", "Standard"],
     ]);
+    // The picker did not remount: still on that tenant, the account line and the typed name are as they were.
     expect(within(sheet).getByRole("combobox", { name: "Tenant" })).toHaveTextContent("Northwind Traders");
-    // Picking one files it under that tenant.
+    expect(within(sheet).getByText(/Signed in as ops@contoso.example/)).toBeInTheDocument();
+    expect(within(sheet).getByLabelText("Name")).toHaveValue("Keep me");
+    // Picking one files it under that tenant, and the profile binds to that tenant's own sign-in.
     await user.click(within(list).getByRole("option", { name: /nw-orders/ }));
+    expect(summary(sheet)).toHaveTextContent("nw-orders.servicebus.windows.net");
+    expect(summary(sheet)).toHaveTextContent("Northwind Traders");
+    await showManual(user, sheet);
     expect(within(sheet).getByLabelText("Tenant ID")).toHaveValue("tenant-guest");
-    expect(within(sheet).getByLabelText("Namespace")).toHaveValue("nw-orders.servicebus.windows.net");
+    await user.click(within(sheet).getByRole("button", { name: "Save" }));
+    await waitFor(async () => {
+      const saved = (await mock.invoke<Profile[]>("profiles_list")).find((p) => p.name === "Keep me");
+      expect(saved?.auth).toEqual({ kind: "entra", sign_in_id: "oid-guest", tenant: "tenant-guest" });
+    });
   });
 
-  it("can sign in to the tenant with a device code, and cancelling returns to the problem", async () => {
+  it("keeps the home sign-in current after signing in to a tenant, so other profiles are not 'a different account'", async () => {
+    const user = userEvent.setup();
+    const { mock } = renderShell("default");
+    await mock.invoke("sign_in", { tenant: null, deviceCode: false });
+    await user.click(await screen.findByRole("button", { name: /Connection: Choose a connection/ }));
+    await user.click(await screen.findByRole("menuitem", { name: "Add connection…" }));
+    const sheet = await screen.findByRole("dialog", { name: "Add connection" });
+    await user.click(within(sheet).getByRole("radio", { name: "Entra ID" }));
+    await within(sheet).findByRole("listbox", { name: "Namespaces" });
+    await chooseTenant(user, sheet, "Northwind Traders");
+    await user.click(await within(sheet).findByRole("button", { name: "Sign in to Northwind Traders" }));
+    await within(sheet).findByRole("listbox", { name: "Namespaces" });
+    expect(await mock.invoke("account_current")).toMatchObject({ id: "oid-1", tenant_id: "tenant-1" });
+    await user.click(within(sheet).getByRole("button", { name: "Cancel" }));
+    await user.click(await screen.findByRole("button", { name: /Connection: Choose a connection/ }));
+    await user.click(await screen.findByRole("menuitem", { name: "Manage connections…" }));
+    await user.click(within(await screen.findByRole("dialog", { name: "Connections" })).getByRole("button", { name: "Edit Logistics dev" }));
+    const edit = await screen.findByRole("dialog", { name: "Edit Logistics dev" });
+    expect(within(edit).getByText(/Signed in as ops@contoso.example/)).toBeInTheDocument();
+    expect(within(edit).queryByText(/different account/)).not.toBeInTheDocument();
+  });
+
+  it("can sign in to the tenant with a device code, and cancelling returns to the message", async () => {
     const { user, sheet, mock } = await signedIn();
     await within(sheet).findByRole("listbox", { name: "Namespaces" });
-    await user.click(within(sheet).getByRole("combobox", { name: "Tenant" }));
-    await user.click(await screen.findByRole("option", { name: "Northwind Traders" }));
+    await chooseTenant(user, sheet, "Northwind Traders");
     await user.click(await within(sheet).findByRole("button", { name: "Use a device code instead" }));
     expect(mock.calls.at(-1)).toMatchObject({ cmd: "sign_in", args: { tenant: "tenant-guest", deviceCode: true } });
     expect(await within(sheet).findByText("QX4T-9KLM")).toBeInTheDocument();
@@ -501,28 +567,62 @@ describe("Entra discovery in the Add connection sheet", () => {
     expect(within(sheet).queryByText(/cancelled/i)).not.toBeInTheDocument();
   });
 
-  it("offers the manual fields for a tenant that needs multi-factor sign-in, with its id filled in", async () => {
+  it("changing the tenant drops a picked namespace and its tenant, but never typed text", async () => {
     const { user, sheet } = await signedIn();
-    await within(sheet).findByRole("listbox", { name: "Namespaces" });
-    await user.click(within(sheet).getByRole("combobox", { name: "Tenant" }));
-    await user.click(await screen.findByRole("option", { name: "Northwind Traders" }));
-    await user.click(await within(sheet).findByRole("button", { name: "Enter a namespace manually" }));
-    expect(within(sheet).getByLabelText("Tenant ID")).toHaveValue("tenant-guest");
+    await user.click(await within(sheet).findByRole("option", { name: /sb-logistics-prod/ }));
+    await user.click(within(sheet).getByRole("button", { name: "Change" }));
+    await chooseTenant(user, sheet, "Northwind Traders");
+    expect(within(sheet).queryByRole("group", { name: "Selected namespace" })).not.toBeInTheDocument();
+    await showManual(user, sheet);
     expect(within(sheet).getByLabelText("Namespace")).toHaveValue("");
-    // Back to the home tenant: the list returns.
-    await user.click(within(sheet).getByRole("combobox", { name: "Tenant" }));
-    await user.click(await screen.findByRole("option", { name: "Horizon Tech (home)" }));
-    expect(await within(sheet).findByRole("listbox", { name: "Namespaces" })).toBeInTheDocument();
+    expect(within(sheet).getByLabelText("Tenant ID")).toHaveValue("tenant-guest"); // the browsed tenant, offered for typing
+    // Typed text survives a tenant change.
+    await user.type(within(sheet).getByLabelText("Namespace"), "sb-typed");
+    await chooseTenant(user, sheet, "Horizon Tech (home)");
+    expect(within(sheet).getByLabelText("Namespace")).toHaveValue("sb-typed");
+    expect(within(sheet).getByLabelText("Tenant ID")).toHaveValue("tenant-guest");
   });
 
-  it("keeps manual entry one click away and starts the typed fields empty", async () => {
+  it("selects the sign-in's own tenant, or 'Home tenant', when the list does not mark a home tenant", async () => {
+    const user = userEvent.setup();
+    const { mock } = renderShell("empty");
+    const invoke = mock.invoke.bind(mock);
+    let tenants = [
+      { tenant_id: "tenant-guest", display_name: "Northwind Traders", default_domain: null, home: false },
+      { tenant_id: "tenant-1", display_name: "Horizon Tech", default_domain: null, home: false },
+    ];
+    mock.invoke = (async (cmd: string, args?: Record<string, unknown>) => (cmd === "list_tenants" ? tenants : invoke(cmd, args))) as typeof mock.invoke;
+    await user.click(await screen.findByRole("button", { name: "Sign in with Entra ID" }));
+    const sheet = await screen.findByRole("dialog", { name: "Add connection" });
+    await user.click(within(sheet).getByRole("button", { name: "Sign in with Entra ID" }));
+    // The account's own tenant (tenant-1) is the home one, and is labelled as such.
+    expect(await within(sheet).findByRole("combobox", { name: "Tenant" })).toHaveTextContent("Horizon Tech (home)");
+    await user.click(within(sheet).getByRole("button", { name: "Use another account" }));
+    // A list that names neither: "Home tenant" is the first option and is selected.
+    tenants = [{ tenant_id: "tenant-guest", display_name: "Northwind Traders", default_domain: null, home: false }];
+    await within(sheet).findByText(/Signed in as dev@fabrikam.example/);
+    const select = await within(sheet).findByRole("combobox", { name: "Tenant" });
+    await waitFor(() => expect(select).toHaveTextContent("Home tenant"));
+    await user.click(select);
+    expect((await screen.findAllByRole("option")).map((o) => o.textContent)).toEqual(["Home tenant", "Northwind Traders"]);
+  });
+
+  it("keeps manual entry one click away, as a toggle that can hide the fields again", async () => {
     const { user, sheet, mock } = await signedIn();
     await within(sheet).findByRole("listbox", { name: "Namespaces" });
-    await user.click(within(sheet).getByRole("button", { name: "Enter a namespace manually" }));
-    expect(within(sheet).queryByRole("button", { name: "Enter a namespace manually" })).not.toBeInTheDocument();
+    const toggle = within(sheet).getByRole("button", { name: "Enter a namespace manually" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(toggle.querySelector("svg")).not.toHaveClass("rotate-90");
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(toggle.querySelector("svg")).toHaveClass("rotate-90");
     expect(within(sheet).getByLabelText("Namespace")).toHaveValue("");
     await user.type(within(sheet).getByLabelText("Name"), "Typed");
     await user.type(within(sheet).getByLabelText("Namespace"), "sb-typed");
+    await user.click(toggle);
+    expect(within(sheet).queryByLabelText("Namespace")).not.toBeInTheDocument();
+    await user.click(toggle);
+    expect(within(sheet).getByLabelText("Namespace")).toHaveValue("sb-typed"); // hiding does not lose it
     await user.click(within(sheet).getByRole("button", { name: "Save" }));
     await waitFor(() => expect(mock.calls.some((c) => c.cmd === "profile_save")).toBe(true));
   });
@@ -538,7 +638,7 @@ describe("Entra discovery in the Add connection sheet", () => {
 
   it("says when a tenant has no namespaces and what access is needed", async () => {
     const { sheet } = await signedIn("no-namespaces");
-    expect(await within(sheet).findByText("No Service Bus namespaces in this tenant.")).toBeInTheDocument();
+    expect(await within(sheet).findByText("No Service Bus namespaces in this tenant")).toBeInTheDocument();
     expect(within(sheet).getByText(/You need Reader access on a subscription/)).toBeInTheDocument();
     expect(within(sheet).queryByText(/couldn't be listed/)).not.toBeInTheDocument();
   });
@@ -566,10 +666,12 @@ describe("Entra discovery in the Add connection sheet", () => {
 
   it("names the subscriptions that could not be listed, with the reasons one click away", async () => {
     const { user, sheet } = await signedIn();
-    const summary = await within(sheet).findByText("1 subscription couldn't be listed");
+    const summaryEl = (await within(sheet).findByText("1 subscription couldn't be listed")).closest("summary")!;
+    expect(summaryEl.querySelector("svg")).not.toHaveClass("rotate-90"); // the chevron, not the native marker
+    expect(summaryEl.className).toContain("list-none");
     expect(within(sheet).getByText(/you need Reader on this subscription/i)).not.toBeVisible(); // closed until asked for
-    await user.click(summary);
-    expect(within(sheet).getByText(/you need Reader on this subscription/i)).toBeInTheDocument();
+    await user.click(summaryEl);
+    expect(within(sheet).getByText(/you need Reader on this subscription/i)).toBeVisible();
     expect(within(sheet).getByText("Legacy sandbox")).toBeInTheDocument();
   });
 

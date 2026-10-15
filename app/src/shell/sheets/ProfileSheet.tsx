@@ -1,12 +1,12 @@
-import { CircleAlert, CircleCheck } from "lucide-react";
-import { useEffect, useId, useState } from "react";
+import { ChevronRight, CircleAlert, CircleCheck } from "lucide-react";
+import { useEffect, useId, useRef, useState } from "react";
 import {
   useAccount, useDeleteProfile, useProfiles, useSaveProfile, useTestProfile,
   type Check, type DiscoveredNamespace, type EngineError, type Profile, type ProfileDraft, type Transport,
 } from "@/engine";
 import {
   Button, Field, Input, LabelSwatch, Segmented, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Sheet, Textarea,
-  labelColors,
+  cn, labelColors,
 } from "@/ui";
 import { useShell } from "../context";
 import { placeError, sentence, type Errors } from "./profileErrors";
@@ -102,10 +102,43 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
   const account = useAccount();
   // Signed in, a new Entra connection picks its namespace from a list; the typed fields stay one click away.
   const picker = !editing && f.auth === "entra" && !!account.data;
+  // The typed Namespace and Tenant fields: always there without a picker, else behind a toggle.
   const [manual, setManual] = useState(false);
+  const showManual = !picker || manual;
+  // What came from the list (not from typing), and whether the list shows instead of the summary of it.
+  const [picked, setPicked] = useState<{ ns: DiscoveredNamespace; tenantId: string | null; tenantLabel: string } | null>(null);
+  const [choosing, setChoosing] = useState(true);
   const [browsedTenant, setBrowsedTenant] = useState<string | null>(null);
-  const showManual = !picker || manual || f.namespace.trim() !== "";
   const set = <K extends keyof Form>(k: K, v: Form[K]) => setF((x) => ({ ...x, [k]: v }));
+  // Typing in the Namespace or Tenant field makes the values typed ones: they are no longer "what was picked".
+  const typed = (k: "namespace" | "tenant", v: string) => {
+    set(k, v);
+    setManual(true);
+    setPicked(null);
+    setChoosing(true);
+  };
+  /** Forget a pick (never typed text): the Tenant select and the saved tenant must agree. */
+  const dropPick = () => {
+    setF((x) => ({ ...x, namespace: "", tenant: "" }));
+    setPicked(null);
+    setChoosing(true);
+  };
+  const browse = (tenantId: string | null) => {
+    setBrowsedTenant(tenantId);
+    if (picked && picked.tenantId !== tenantId) dropPick();
+  };
+  // Another account starts a new pick.
+  const accountId = account.data?.id;
+  const lastAccount = useRef(accountId);
+  const hasPick = useRef(false);
+  hasPick.current = picked !== null;
+  useEffect(() => {
+    if (lastAccount.current === accountId) return;
+    lastAccount.current = accountId;
+    setBrowsedTenant(null);
+    setChoosing(true);
+    if (hasPick.current) dropPick();
+  }, [accountId]);
   const dirty = editing && changed(f, saved);
   const hasProxy = f.proxy.trim() !== "";
   const transport: Transport = hasProxy ? "websockets" : f.transport; // a proxy carries AMQP over WebSockets
@@ -126,10 +159,11 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
     return e;
   }
 
-  function pick(ns: DiscoveredNamespace, tenantId: string | null) {
+  function pick(ns: DiscoveredNamespace, tenantId: string | null, tenantLabel: string) {
     setF((x) => ({ ...x, namespace: ns.host, tenant: tenantId ?? "", name: x.name.trim() ? x.name : ns.name }));
     setErrors((e) => ({ ...e, namespace: undefined, name: undefined }));
-    setManual(true);
+    setPicked({ ns, tenantId, tenantLabel });
+    setChoosing(false);
   }
 
   async function onSave() {
@@ -309,25 +343,39 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
               )}
             </div>
             {picker && (
-              <NamespacePicker
-                key={account.data?.id}
-                selectedHost={f.namespace.trim().toLowerCase()}
-                onPick={pick}
-                onTenant={setBrowsedTenant}
-              />
+              <>
+                <NamespacePicker
+                  key={accountId}
+                  hidden={!!picked && !choosing}
+                  selectedHost={f.namespace.trim().toLowerCase()}
+                  onPick={pick}
+                  onTenant={browse}
+                />
+                {picked && !choosing && (
+                  <div role="group" aria-label="Selected namespace" className="flex flex-col gap-1">
+                    <div className="flex h-[26px] items-center gap-2 rounded-ctl border border-line bg-field pl-2 pr-0.5">
+                      <span className="min-w-0 flex-1 truncate font-mono text-11 text-fg" title={picked.ns.host} data-selectable>{picked.ns.host}</span>
+                      <span className="shrink-0 text-11 text-muted">{picked.tenantLabel}</span>
+                      <Button size="sm" variant="quiet" onClick={() => setChoosing(true)}>Change</Button>
+                    </div>
+                    {picked.ns.local_auth_disabled && <p className="m-0 text-11 text-muted">Shared access keys are off for this namespace. Entra ID only.</p>}
+                  </div>
+                )}
+              </>
             )}
-            {showManual ? (
+            {showManual && (
               <>
                 <Field label="Namespace" hint="The namespace name, like sb-orders, or its full host." error={errors.namespace}>
-                  {(ids) => <Input {...ids} value={f.namespace} onChange={(e) => set("namespace", e.target.value)} placeholder="sb-orders" />}
+                  {(ids) => <Input {...ids} mono value={f.namespace} onChange={(e) => typed("namespace", e.target.value)} placeholder="sb-orders" />}
                 </Field>
-                <Field label={picker ? "Tenant ID" : "Tenant"} hint="Only if the namespace is in another tenant than your account's home tenant.">
-                  {(ids) => <Input {...ids} value={f.tenant} onChange={(e) => set("tenant", e.target.value)} placeholder="contoso.onmicrosoft.com" />}
+                <Field label={picker ? "Tenant ID" : "Tenant"} hint="Leave empty for your home tenant. Otherwise the ID of the namespace's tenant.">
+                  {(ids) => <Input {...ids} mono value={f.tenant} onChange={(e) => typed("tenant", e.target.value)} placeholder="Home tenant" />}
                 </Field>
               </>
-            ) : (
+            )}
+            {picker && (
               <div className="flex flex-col items-start gap-1">
-                {errors.namespace && (
+                {!showManual && errors.namespace && (
                   <p className="m-0 flex items-start gap-1.5 text-12">
                     <CircleAlert aria-hidden="true" className="mt-px size-3.5 shrink-0 text-accent" />
                     <span>{errors.namespace}</span>
@@ -337,12 +385,16 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
                   size="sm"
                   variant="quiet"
                   className="-ml-1.5"
+                  aria-expanded={manual}
                   onClick={() => {
-                    // The tenant being browsed is the one the typed namespace most likely belongs to.
-                    setF((x) => ({ ...x, tenant: browsedTenant ?? x.tenant }));
-                    setManual(true);
+                    if (!manual) {
+                      // The tenant being browsed is the one a typed namespace most likely belongs to.
+                      setF((x) => ({ ...x, tenant: x.tenant || (browsedTenant ?? "") }));
+                    }
+                    setManual(!manual);
                   }}
                 >
+                  <ChevronRight aria-hidden="true" className={cn("size-3!", manual && "rotate-90")} />
                   Enter a namespace manually
                 </Button>
               </div>

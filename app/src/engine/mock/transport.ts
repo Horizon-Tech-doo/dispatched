@@ -26,8 +26,9 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
   let profiles: Profile[] = scenario === "empty" || scenario === "no-namespaces" || scenario === "discovery-error" || scenario === "many-namespaces" ? [] : structuredClone(fx.profiles);
   let active: Profile | null = null;
   let account: AccountView | null = null;
-  /** Guest tenants the user has signed in to interactively (their MFA is satisfied). */
-  const signedInTenants = new Set<string>();
+  /** Guest tenants the user has signed in to interactively (their MFA is satisfied). Each is its own sign-in
+   *  (another id, its own tenant) that is saved beside the home one and never becomes the current account. */
+  const signedInTenants = new Map<string, string>();
   let cancelSignIn: (() => void) | null = null;
 
   const emit = (event: string, payload: unknown) => listeners.get(event)?.forEach((cb) => cb(payload));
@@ -64,7 +65,7 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
           id: existing?.id ?? `p-${Math.random().toString(36).slice(2, 8)}`,
           name: d.name.trim(),
           host: d.auth.kind === "entra" ? (d.auth.namespace.includes(".") ? d.auth.namespace : `${d.auth.namespace}.servicebus.windows.net`) : existing?.host ?? hostFromConnectionString(d.auth.connection_string),
-          auth: d.auth.kind === "entra" ? { kind: "entra", sign_in_id: account?.id ?? "oid-1", tenant: d.auth.tenant ?? null } : { kind: "connection-string" },
+          auth: d.auth.kind === "entra" ? { kind: "entra", sign_in_id: (d.auth.tenant && signedInTenants.get(d.auth.tenant)) || (account?.id ?? "oid-1"), tenant: d.auth.tenant ?? null } : { kind: "connection-string" },
           emulator: false,
           production: d.production,
           color: d.color ?? null,
@@ -125,7 +126,7 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
         // Signing in to one tenant satisfies its MFA and leaves the account as it is.
         const tenant = (args.tenant as string | null) || null;
         if (account && tenant) {
-          signedInTenants.add(tenant);
+          signedInTenants.set(tenant, `oid-${tenant.replace(/^tenant-/, "")}`);
           activity(`Signed in as ${account.user_principal}`, started);
           return account;
         }
