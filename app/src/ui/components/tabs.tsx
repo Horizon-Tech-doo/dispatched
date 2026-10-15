@@ -61,7 +61,7 @@ export function TabsTrigger({ className, ...props }: ComponentProps<typeof TabsP
   return (
     <TabsPrimitive.Trigger
       className={cn(
-        "flex shrink-0 items-center gap-1.5 whitespace-nowrap text-12 text-muted outline-none hover:text-fg data-[state=active]:text-fg",
+        "flex shrink-0 items-center gap-1.5 whitespace-nowrap text-12 text-muted hover:text-fg data-[state=active]:text-fg",
         variant === "strip"
           ? "border-r border-t-2 border-line border-t-transparent px-3 data-[state=active]:border-t-fg data-[state=active]:bg-content"
           : "border-b-2 border-b-transparent px-2 data-[state=active]:border-b-fg",

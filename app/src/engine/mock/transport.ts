@@ -81,7 +81,7 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
         activity(`Tested ${p.name}: management ok, messaging ok`, started);
         return {
           host: p.host, emulator: false, transport: p.transport, auth: "SAS key reader",
-          management: { status: "ok", detail: "listed 4 queue(s) (Manage)" },
+          management: { status: "ok", detail: "listed 4 queues (Manage)" },
           messaging: { status: "ok", detail: "peeked customs-docs (Listen)" },
         };
       }
@@ -107,7 +107,10 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
           activity("Sign-in cancelled", started, e);
           throw e;
         }
-        account = { id: "oid-1", user_principal: "ops@contoso.example", display_name: "Ops", tenant_id: "tenant-1" };
+        // Signing in again while signed in picks the other fixture account.
+        account = account?.id === "oid-1"
+          ? { id: "oid-2", user_principal: "dev@fabrikam.example", display_name: "Dev", tenant_id: "tenant-2" }
+          : { id: "oid-1", user_principal: "ops@contoso.example", display_name: "Ops", tenant_id: "tenant-1" };
         activity(`Signed in as ${account.user_principal}`, started);
         return account;
       }

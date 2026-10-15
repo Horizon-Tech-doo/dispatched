@@ -25,7 +25,7 @@ export function Segmented<T extends string>({
           key={o.value}
           value={o.value}
           className={cn(
-            "rounded-[2px] px-2 text-12 text-muted outline-none hover:text-fg",
+            "rounded-[2px] px-2 text-12 text-muted hover:text-fg",
             "data-[state=on]:bg-selection data-[state=on]:text-fg focus-visible:outline focus-visible:outline-1 focus-visible:-outline-offset-1 focus-visible:outline-fg",
           )}
         >

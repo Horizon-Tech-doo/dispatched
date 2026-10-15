@@ -129,6 +129,15 @@ fn failed(e: &Error) -> Check {
 /// Longest one probe call may take before its check is reported as timed out.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// "1 queue", "4 queues".
+fn count(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
+}
+
 /// Bound one probe call so a single hang cannot stall the whole report.
 async fn bounded<T>(what: &str, fut: impl Future<Output = Result<T>>) -> Result<T> {
     match tokio::time::timeout(CHECK_TIMEOUT, fut).await {
@@ -149,7 +158,7 @@ pub async fn test_connection(
     let listed = bounded("listing queues", probe.list_queue_names()).await;
     let management = match &listed {
         Ok(names) => Check::Ok {
-            detail: format!("listed {} queue(s) (Manage)", names.len()),
+            detail: format!("listed {} (Manage)", count(names.len(), "queue")),
         },
         Err(e) => failed(e),
     };
@@ -174,7 +183,7 @@ pub async fn test_connection(
         },
         Some(e) => match bounded("peeking", probe.peek_one(&e)).await {
             Ok(n) => Check::Ok {
-                detail: format!("peeked {e} ({n} message(s) visible; Listen)"),
+                detail: format!("peeked {e} ({} visible; Listen)", count(n, "message")),
             },
             Err(err) => failed(&err),
         },
@@ -293,6 +302,13 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn counts_are_pluralised() {
+        assert_eq!(count(0, "queue"), "0 queues");
+        assert_eq!(count(1, "queue"), "1 queue");
+        assert_eq!(count(4, "message"), "4 messages");
+    }
+
     #[tokio::test]
     async fn full_rights_probe_first_queue() {
         let f = Fake {
@@ -306,8 +322,12 @@ mod tests {
             peeked: Default::default(),
         };
         let r = test_connection(&f, None).await;
-        assert!(matches!(r.management, Check::Ok { .. }));
-        assert!(matches!(&r.messaging, Check::Ok { detail } if detail.contains("orders")));
+        assert!(
+            matches!(&r.management, Check::Ok { detail } if detail == "listed 1 queue (Manage)")
+        );
+        assert!(
+            matches!(&r.messaging, Check::Ok { detail } if detail == "peeked orders (1 message visible; Listen)")
+        );
         assert_eq!(r.auth, "SAS key Root");
     }
 

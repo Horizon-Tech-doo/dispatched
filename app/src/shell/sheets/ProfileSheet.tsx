@@ -10,6 +10,7 @@ import {
 } from "@/ui";
 import { shortHost } from "../ConnectionSelector";
 import { useShell } from "../context";
+import { placeError, sentence, type Errors } from "./profileErrors";
 import { SignInPanel } from "./SignInPanel";
 
 type AuthKind = "connection-string" | "entra";
@@ -28,8 +29,6 @@ interface Form {
   pins: string;
 }
 
-type Errors = Partial<Record<"name" | "connectionString" | "namespace" | "proxy" | "pins" | "general", string>>;
-
 function initial(p: Profile | undefined, auth: AuthKind | undefined): Form {
   return {
     name: p?.name ?? "",
@@ -46,36 +45,26 @@ function initial(p: Profile | undefined, auth: AuthKind | undefined): Form {
   };
 }
 
-const sentence = (m: string) => m.charAt(0).toUpperCase() + m.slice(1);
-
-/** Put a server error under the field it is about. */
-function placeError(e: EngineError): Errors {
-  const m = sentence(e.message);
-  if (e.kind === "invalid") {
-    if (/already exists|needs a name/i.test(m)) return { name: m };
-    if (/connection string|Endpoint=|SharedAccess/i.test(m)) return { connectionString: m };
-    if (/namespace/i.test(m)) return { namespace: m };
-    if (/proxy/i.test(m)) return { proxy: m };
-    if (/pinned|entity/i.test(m)) return { pins: m };
-  }
-  return { general: m };
-}
-
 function CheckLine({ label, c }: { label: string; c: Check }) {
+  const headline = c.status === "ok" ? `${label} works` : c.status === "failed" ? `${label} failed: ${sentence(c.message)}` : `${label} not tested`;
+  const detail = c.status === "ok" ? c.detail : c.status === "skipped" ? sentence(c.reason) : null;
   return (
     <li className="flex items-start gap-1.5 text-12">
       {c.status === "failed" ? (
-        <CircleAlert aria-hidden="true" className="mt-px size-3.5 text-accent" />
+        <CircleAlert aria-hidden="true" className="mt-px size-3.5 shrink-0 text-accent" />
       ) : (
-        <CircleCheck aria-hidden="true" className="mt-px size-3.5 text-icon" />
+        <CircleCheck aria-hidden="true" className="mt-px size-3.5 shrink-0 text-icon" />
       )}
-      <span>
-        <span className="font-semibold">{label}: </span>
-        {c.status === "ok" ? c.detail : c.status === "failed" ? c.message : <span className="text-muted">{c.reason}</span>}
+      <span className="flex min-w-0 flex-col">
+        <span className="font-semibold">{headline}</span>
+        {detail && <span className="text-muted">{detail}</span>}
       </span>
     </li>
   );
 }
+
+/** The fields a test would not see: anything that differs from the saved profile. */
+const changed = (a: Form, b: Form) => (Object.keys(a) as (keyof Form)[]).some((k) => k !== "replaceSecret" && a[k] !== b[k]);
 
 /** Add or edit a connection. An edit waits for the saved list so it never starts from an empty form. */
 export function ProfileSheet({ profileId, initialAuth }: { profileId: string | null; initialAuth?: AuthKind }) {
@@ -94,7 +83,8 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
   const { closeSheet, conn } = useShell();
   const editing = !!profile;
   const formId = useId();
-  const [f, setF] = useState<Form>(() => initial(profile, initialAuth));
+  const [saved] = useState<Form>(() => initial(profile, initialAuth));
+  const [f, setF] = useState<Form>(saved);
   const [errors, setErrors] = useState<Errors>({});
   const [confirmDelete, setConfirmDelete] = useState(false);
   const save = useSaveProfile();
@@ -102,6 +92,14 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
   const test = useTestProfile();
   const account = useAccount();
   const set = <K extends keyof Form>(k: K, v: Form[K]) => setF((x) => ({ ...x, [k]: v }));
+  const dirty = editing && changed(f, saved);
+  const hasProxy = f.proxy.trim() !== "";
+  const transport: Transport = hasProxy ? "websockets" : f.transport; // a proxy carries AMQP over WebSockets
+  const secretMissing =
+    editing && profile.auth.kind === "connection-string" && conn.status === "failed" && conn.profileId === profile.id &&
+    conn.error?.kind === "invalid" && /no stored connection string/.test(conn.error.message);
+  const otherAccount =
+    editing && profile.auth.kind === "entra" && account.data != null && account.data.id !== profile.auth.sign_in_id;
 
   function validate(): Errors {
     const e: Errors = {};
@@ -109,7 +107,7 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
     if (f.auth === "connection-string" && (!editing || f.replaceSecret) && !f.connectionString.trim())
       e.connectionString = "Paste the namespace's connection string.";
     if (f.auth === "entra" && !f.namespace.trim()) e.namespace = "Enter the namespace name, like sb-orders, or its full host.";
-    if (f.auth === "entra" && !editing && !account.data) e.general = "Sign in with Entra ID first.";
+    if (f.auth === "entra" && !editing && !account.data) e.signIn = "Sign in with Entra ID first.";
     return e;
   }
 
@@ -126,15 +124,16 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
           : { kind: "connection-string", connection_string: f.replaceSecret || !editing ? f.connectionString.trim() : null },
       production: f.production,
       color: f.color === "none" ? null : f.color,
-      transport: f.transport,
+      transport,
       proxy: f.proxy.trim() || null,
       pinned_entities: f.pins.split("\n").map((s) => s.trim()).filter(Boolean),
     };
     try {
-      const saved = await save.mutateAsync(draft);
+      const result = await save.mutateAsync(draft);
       setF((x) => ({ ...x, connectionString: "" }));
+      save.reset(); // drops the draft, and the connection string in it, from the mutation state
       closeSheet();
-      if (!editing || saved.id === conn.profileId) void conn.connect(saved.id);
+      if (!editing || result.id === conn.profileId) void conn.connect(result.id);
     } catch (err) {
       setErrors(placeError(err as EngineError));
     }
@@ -143,8 +142,9 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
   async function onDelete() {
     if (!profile) return;
     try {
-      await del.mutateAsync(profile.id);
+      // Leave the connection first, so a failed delete is visible and the sheet closes on its own terms.
       if (conn.profileId === profile.id) await conn.disconnect();
+      await del.mutateAsync(profile.id);
       closeSheet();
     } catch (err) {
       setConfirmDelete(false);
@@ -160,30 +160,39 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
       title={title}
       description={editing ? undefined : "Saved on this computer. Secrets go to the system keychain."}
       footer={
-        confirmDelete && profile ? (
-          <div className="flex w-full flex-col gap-2">
-            <p className="m-0 text-12">
-              Delete {profile.name}?{" "}
-              {profile.auth.kind === "connection-string" ? "Its saved connection string is removed from the keychain too." : "Your Entra sign-in stays."}
-            </p>
-            <div className="flex justify-end gap-2">
-              <Button variant="quiet" onClick={() => setConfirmDelete(false)}>Keep</Button>
-              <Button variant="danger" onClick={() => void onDelete()} disabled={del.isPending}>Delete {profile.name}</Button>
-            </div>
-          </div>
-        ) : (
-          <>
-            {editing && <Button variant="quiet" onClick={() => setConfirmDelete(true)}>Delete…</Button>}
-            {editing && (
-              <Button onClick={() => test.mutate(profile.id)} disabled={test.isPending}>
-                {test.isPending ? "Testing…" : "Test connection"}
-              </Button>
-            )}
-            <div className="flex-1" />
-            <Button variant="quiet" onClick={closeSheet}>Cancel</Button>
-            <Button variant="primary" type="submit" form={formId} disabled={save.isPending}>{save.isPending ? "Saving…" : "Save"}</Button>
-          </>
-        )
+        <div className="flex w-full flex-col gap-2">
+          {confirmDelete && profile ? (
+            <>
+              <p className="m-0 text-12">
+                Delete {profile.name}?{" "}
+                {profile.auth.kind === "connection-string" ? "Its saved connection string is removed from the keychain too." : "Your Entra sign-in stays."}
+              </p>
+              <div className="flex justify-end gap-2">
+                <Button variant="quiet" onClick={() => setConfirmDelete(false)}>Keep</Button>
+                <Button variant="danger" onClick={() => void onDelete()} disabled={del.isPending}>Delete {profile.name}</Button>
+              </div>
+            </>
+          ) : (
+            <>
+              {dirty && <p id={`${formId}-test-hint`} className="m-0 text-11 text-muted">Save to test these changes.</p>}
+              <div className="flex gap-2">
+                {editing && <Button variant="quiet" onClick={() => setConfirmDelete(true)}>Delete…</Button>}
+                {editing && (
+                  <Button
+                    onClick={() => test.mutate(profile.id)}
+                    disabled={test.isPending || dirty}
+                    aria-describedby={dirty ? `${formId}-test-hint` : undefined}
+                  >
+                    {test.isPending ? "Testing…" : "Test connection"}
+                  </Button>
+                )}
+                <div className="flex-1" />
+                <Button variant="quiet" onClick={closeSheet}>Cancel</Button>
+                <Button variant="primary" type="submit" form={formId} disabled={save.isPending}>{save.isPending ? "Saving…" : "Save"}</Button>
+              </div>
+            </>
+          )}
+        </div>
       }
     >
       <form
@@ -205,9 +214,11 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
           {(ids) => <Input {...ids} value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="Logistics production" />}
         </Field>
 
-        {!editing && (
-          <div className="flex flex-col gap-1">
-            <span className="text-12 font-semibold text-muted">Sign-in method</span>
+        <div className="flex flex-col gap-1">
+          <span className="text-12 font-semibold text-muted">Sign-in method</span>
+          {editing ? (
+            <span className="text-12 text-fg">{f.auth === "entra" ? "Entra ID" : "Connection string"}</span>
+          ) : (
             <div>
               <Segmented
                 label="Sign-in method"
@@ -216,14 +227,22 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
                 options={[{ value: "connection-string", label: "Connection string" }, { value: "entra", label: "Entra ID" }]}
               />
             </div>
-          </div>
-        )}
+          )}
+        </div>
 
         {f.auth === "connection-string" ? (
           editing && !f.replaceSecret ? (
-            <div className="flex items-center justify-between gap-2 text-12">
-              <span className="text-muted">Stored in the system keychain.</span>
-              <Button size="sm" onClick={() => set("replaceSecret", true)}>Replace</Button>
+            <div className="flex flex-col gap-1">
+              <span className="text-12 font-semibold text-muted">Connection string</span>
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex min-w-0 flex-col">
+                  <span className="truncate font-mono text-11 text-fg">{profile.host}</span>
+                  <span className="text-11 text-muted">
+                    {secretMissing ? "No connection string is stored. Paste it again." : "Stored in the system keychain."}
+                  </span>
+                </div>
+                <Button size="sm" onClick={() => set("replaceSecret", true)}>{secretMissing ? "Paste" : "Replace"}</Button>
+              </div>
             </div>
           ) : (
             <div className="flex flex-col gap-1.5">
@@ -233,7 +252,15 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
                 error={errors.connectionString}
               >
                 {(ids) => (
-                  <Input {...ids} type="password" mono value={f.connectionString} onChange={(e) => set("connectionString", e.target.value)} placeholder="Endpoint=sb://…" />
+                  <Input
+                    {...ids}
+                    type="password"
+                    autoComplete="new-password"
+                    mono
+                    value={f.connectionString}
+                    onChange={(e) => set("connectionString", e.target.value)}
+                    placeholder="Endpoint=sb://…"
+                  />
                 )}
               </Field>
               {editing && (
@@ -247,7 +274,18 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
           )
         ) : (
           <>
-            {!editing && <SignInPanel />}
+            <div className="flex flex-col gap-1.5">
+              <SignInPanel />
+              {errors.signIn && (
+                <p className="m-0 flex items-start gap-1.5 text-12">
+                  <CircleAlert aria-hidden="true" className="mt-px size-3.5 shrink-0 text-accent" />
+                  <span>{errors.signIn}</span>
+                </p>
+              )}
+              {otherAccount && (
+                <p className="m-0 text-11 text-muted">This connection uses a different account. Sign in with that account to use it.</p>
+              )}
+            </div>
             <Field label="Namespace" hint="The namespace name, like sb-orders, or its full host." error={errors.namespace}>
               {(ids) => <Input {...ids} value={f.namespace} onChange={(e) => set("namespace", e.target.value)} placeholder="sb-orders" />}
             </Field>
@@ -287,17 +325,18 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
           </div>
           <div className="flex flex-col gap-1">
             <span className="text-12 font-semibold text-muted">Transport</span>
-            <Select value={f.transport} onValueChange={(v) => set("transport", v as Transport)}>
-              <SelectTrigger aria-label="Transport"><SelectValue /></SelectTrigger>
+            <Select value={transport} onValueChange={(v) => set("transport", v as Transport)} disabled={hasProxy}>
+              <SelectTrigger aria-label="Transport" aria-describedby={hasProxy ? `${formId}-transport-hint` : undefined}><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="amqp">AMQP</SelectItem>
                 <SelectItem value="websockets">AMQP over WebSockets</SelectItem>
               </SelectContent>
             </Select>
+            {hasProxy && <p id={`${formId}-transport-hint`} className="m-0 text-11 text-muted">A proxy needs AMQP over WebSockets.</p>}
           </div>
         </div>
 
-        <Field label="Proxy" hint="http://host:port. Uses WebSockets. Leave empty to use HTTPS_PROXY from the environment." error={errors.proxy}>
+        <Field label="Proxy" hint="Format http://host:port. Leave empty to use HTTPS_PROXY from the environment." error={errors.proxy}>
           {(ids) => <Input {...ids} mono value={f.proxy} onChange={(e) => set("proxy", e.target.value)} placeholder="http://proxy.corp:8080" />}
         </Field>
         <Field
@@ -309,10 +348,13 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
         </Field>
 
         {test.data && (
-          <ul aria-label="Connection test" className="m-0 flex list-none flex-col gap-1 border-t border-line p-0 pt-3">
-            <CheckLine label="Management" c={test.data.management} />
-            <CheckLine label="Messaging" c={test.data.messaging} />
-          </ul>
+          <div className="flex flex-col gap-1.5 border-t border-line pt-3">
+            <p className="m-0 text-11 text-muted">Tested with saved settings.</p>
+            <ul aria-label="Connection test" className="m-0 flex list-none flex-col gap-1 p-0">
+              <CheckLine label="Management" c={test.data.management} />
+              <CheckLine label="Messaging" c={test.data.messaging} />
+            </ul>
+          </div>
         )}
         {test.error && (
           <p className="m-0 flex items-start gap-1.5 border-t border-line pt-3 text-12">

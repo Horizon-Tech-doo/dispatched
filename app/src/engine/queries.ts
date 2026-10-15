@@ -59,6 +59,8 @@ export function useSaveProfile() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (draft: ProfileDraft) => commands.profileSave(draft),
+    // The draft can carry a connection string: do not keep it in the mutation cache after the call.
+    gcTime: 0,
     // Pinned entities can change what the tree lists.
     onSuccess: () => Promise.all([qc.invalidateQueries({ queryKey: keys.profiles }), qc.invalidateQueries({ queryKey: ["entities"] })]),
   });

@@ -27,10 +27,12 @@ describe("tokens", () => {
 });
 
 describe("label colours", () => {
-  it("are distinguishable on the side surface (3:1) in both themes", () => {
+  it("are distinguishable (3:1) on the side, field, content and chrome surfaces in both themes", () => {
     for (const [name, c] of Object.entries(labelColors)) {
       for (const theme of ["dark", "light"] as const) {
-        expect(contrastRatio(c[theme], themes[theme].side), `${name} ${theme}`).toBeGreaterThanOrEqual(3);
+        for (const surface of ["side", "field", "content", "chrome"] as const) {
+          expect(contrastRatio(c[theme], themes[theme][surface]), `${name} ${theme} on ${surface}`).toBeGreaterThanOrEqual(3);
+        }
       }
     }
   });

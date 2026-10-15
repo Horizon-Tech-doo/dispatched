@@ -256,6 +256,37 @@ export const shots: {
     viewportOnly: true,
   },
   {
+    name: "profile-edit-changed",
+    path: "/?scenario=default",
+    ready: (p) => p.getByRole("list", { name: "Saved connections" }),
+    prepare: async (page) => {
+      await page.getByRole("button", { name: "Connection: Choose a connection" }).click();
+      await page.getByRole("menuitem", { name: "Manage connections…" }).click();
+      await page.getByRole("dialog", { name: "Connections" }).getByRole("button", { name: "Edit Logistics", exact: true }).click();
+      const sheet = page.getByRole("dialog", { name: "Edit Logistics", exact: true });
+      await sheet.getByLabel("Proxy").fill("http://proxy.corp:8080");
+      await sheet.getByText("Save to test these changes.").waitFor();
+    },
+    holds: (p) => p.getByRole("dialog", { name: "Edit Logistics", exact: true }),
+    viewportOnly: true,
+  },
+  {
+    name: "profile-edit-entra",
+    path: "/?scenario=default",
+    ready: (p) => p.getByRole("list", { name: "Saved connections" }),
+    prepare: async (page) => {
+      await page.getByRole("button", { name: "Connection: Choose a connection" }).click();
+      await page.getByRole("menuitem", { name: "Manage connections…" }).click();
+      await page.getByRole("dialog", { name: "Connections" }).getByRole("button", { name: "Edit Logistics dev", exact: true }).click();
+      const sheet = page.getByRole("dialog", { name: "Edit Logistics dev", exact: true });
+      await sheet.getByRole("button", { name: "Sign in with Entra ID" }).click();
+      await sheet.getByRole("button", { name: "Use another account" }).click();
+      await sheet.getByText(/This connection uses a different account/).waitFor();
+    },
+    holds: (p) => p.getByRole("dialog", { name: "Edit Logistics dev", exact: true }),
+    viewportOnly: true,
+  },
+  {
     name: "profiles",
     path: "/?scenario=default",
     ready: (p) => p.getByRole("list", { name: "Saved connections" }),
