@@ -51,7 +51,7 @@ M1 is split in three. M1a (core and CLI browse) shipped on 2026-10-14. M1b sets 
 - `app/src/engine/` — typed wrappers for the Tauri commands and the TanStack Query hooks. The only place that calls `invoke` or listens to Tauri events.
 - `app/src/dev/` — the component catalogue, excluded from production builds.
 - `app/src-tauri/src/commands/` — thin command wrappers over `dispatched-core`. No business logic in the app crate.
-- `crates/dispatched-core` gains a settings table in `dispatched.db` (section 7).
+- `crates/dispatched-core` exposes its existing `settings` table in `dispatched.db` for app state (section 7).
 
 ## 5. Design system
 
@@ -185,19 +185,19 @@ New Tauri commands, each a thin wrapper over `dispatched-core`:
 | Area | Commands |
 |---|---|
 | Profiles | `profiles_list`, `profile_save`, `profile_delete`, `profile_test` |
-| Sign-in | `sign_in_start`, `sign_in_status` |
+| Sign-in | `account_current`, `sign_in` (runs until the browser or device-code flow finishes, emitting a prompt event), `sign_in_cancel` |
 | Connection | `connect(profile_id)`, `disconnect` |
 | Tree | `list_entities` (queues and topics with counts), `list_subscriptions(topic)` |
 | Settings | `settings_get`, `settings_set` |
 
-- `dispatched-core` gains a `settings` table (key, JSON value) in `dispatched.db` via a migration, with get and set by key. Shell state is stored per profile id.
+- `dispatched-core` already has a `settings` table (key, value) in `dispatched.db`; it gains public get and set for app keys (stored under an `app.` prefix so they cannot collide with internal keys). Shell state is stored per profile id. No schema change.
 - Errors cross the boundary as the existing `CommandError { kind, message }`.
 - Activity and job events use two Tauri event channels with typed payloads mirrored in `app/src/engine/`.
 - The existing M0 commands (`connect_connection_string`, `list_queues`, `peek`) are replaced; `peek` stays available for M1c.
 
 ## 8. Testing
 
-- **Rust:** command tests, including that `profiles_list` and `profile_save` responses never contain a secret; error-kind mapping; settings store against an in-memory DB; migration from the M1a schema.
+- **Rust:** command tests, including that `profiles_list` and `profile_save` responses never contain a secret; error-kind mapping; app settings against an in-memory DB, including that app keys cannot reach internal keys.
 - **Frontend unit (Vitest, Testing Library):** keyboard behaviour of Tree, Tabs and palette; theme and density switching; the token contrast test; the `ui/` import-boundary lint as a CI step.
 - **Shell flows (Playwright):** against the Vite build with Tauri IPC mocked: connect, browse, open tabs, palette, profile sheets, error and empty states, both themes. Runs in CI.
 - **Live check** recorded in `docs/live-verification-m1b.md`: the emulator; one real namespace read-only with a SAS profile and an Entra profile; a namespace with many entities to confirm the tree stays smooth.
