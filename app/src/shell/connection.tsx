@@ -37,6 +37,7 @@ export function useConnectionController() {
   const disconnect = useCallback(async () => {
     await commands.disconnect().catch(() => {});
     qc.removeQueries({ queryKey: ["entities"] });
+    qc.removeQueries({ queryKey: ["subscriptions"] });
     setS(idle);
     void commands.settingsSet("last_profile", null).catch(() => {});
   }, [qc]);

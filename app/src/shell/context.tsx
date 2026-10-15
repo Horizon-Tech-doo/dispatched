@@ -32,7 +32,12 @@ export function ShellProvider({ children }: { children: ReactNode }) {
   const [prefs, setPrefs] = usePrefs();
   useTheme(prefs.theme, prefs.density);
   const conn = useConnectionController();
-  const [shell, dispatch, shellLoaded] = useProfileShell(conn.status === "connected" ? conn.profileId : null);
+  // The profile whose shell state is live: set when a connection succeeds, cleared on disconnect, and
+  // unchanged while the same profile reconnects, so a reconnect keeps (and does not reload) its state.
+  const [shellProfileId, setShellProfileId] = useState<string | null>(null);
+  if (conn.status === "connected" && conn.profileId !== shellProfileId) setShellProfileId(conn.profileId);
+  else if (conn.status === "idle" && shellProfileId !== null) setShellProfileId(null);
+  const [shell, dispatch, shellLoaded] = useProfileShell(shellProfileId);
   const [sheet, setSheet] = useState<SheetState>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const qc = useQueryClient();

@@ -1,6 +1,7 @@
 import { useProfiles } from "@/engine";
 import { Button, EmptyState, ProdBadge, SkeletonRows } from "@/ui";
 import { shortHost } from "./ConnectionSelector";
+import { describeConnectError } from "./connectError";
 import { useShell } from "./context";
 
 export function Welcome() {
@@ -8,7 +9,17 @@ export function Welcome() {
   const profiles = useProfiles();
   const failed = conn.status === "failed" ? profiles.data?.find((p) => p.id === conn.profileId) : undefined;
 
-  if (profiles.isPending) return <div className="w-[360px] p-6"><SkeletonRows rows={4} /></div>;
+  if (profiles.isPending) {
+    return (
+      <div className="flex h-full w-full justify-center">
+        <div className="w-[480px] max-w-full px-4 py-16" aria-busy="true">
+          <SkeletonRows rows={4} />
+        </div>
+      </div>
+    );
+  }
+  const edit = () => failed && openSheet({ kind: "profile", profileId: failed.id });
+  const failure = failed ? describeConnectError(conn.error, failed) : null;
 
   return (
     <div className="flex h-full w-full justify-center overflow-y-auto">
@@ -17,11 +28,20 @@ export function Welcome() {
           <EmptyState
             tone="error"
             title={`Couldn't connect to ${failed.name}`}
-            body={conn.error?.message}
+            body={<span title={conn.error?.message}>{failure?.message}</span>}
             action={
               <div className="flex gap-2">
-                <Button onClick={conn.retry}>Try again</Button>
-                <Button variant="quiet" onClick={() => openSheet({ kind: "profile", profileId: failed.id })}>Edit connection</Button>
+                {failure?.retryable ? (
+                  <>
+                    <Button onClick={conn.retry}>Try again</Button>
+                    <Button variant="quiet" onClick={edit}>Edit connection</Button>
+                  </>
+                ) : (
+                  <>
+                    <Button onClick={edit}>Edit connection</Button>
+                    <Button variant="quiet" onClick={conn.retry}>Try again</Button>
+                  </>
+                )}
               </div>
             }
           />

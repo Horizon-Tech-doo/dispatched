@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { useCallback, useEffect, useReducer, useState, type Dispatch } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState, type Dispatch } from "react";
 import { commands, keys, useSetting } from "@/engine";
 import type { Density, ThemePref } from "@/ui";
 
@@ -27,13 +27,14 @@ export function usePrefs(): [Prefs, (patch: Partial<Prefs>) => void] {
   const q = useSetting("ui");
   const qc = useQueryClient();
   const prefs = parsePrefs(q.data);
+  // Read the latest value from the cache so two quick updates compose instead of the second overwriting the first.
   const update = useCallback(
     (patch: Partial<Prefs>) => {
-      const next = { ...prefs, ...patch };
+      const next = { ...parsePrefs(qc.getQueryData(keys.setting("ui"))), ...patch };
       qc.setQueryData(keys.setting("ui"), next);
       void commands.settingsSet("ui", next).catch(() => {});
     },
-    [prefs, qc],
+    [qc],
   );
   return [prefs, update];
 }
@@ -54,7 +55,7 @@ export const emptyShell: ProfileShell = {
   activeTab: null,
   expanded: ["group:queues", "group:topics"],
   selected: null,
-  layout: { treeSize: 20, drawerOpen: true, drawerSize: 18, drawerTab: "activity" },
+  layout: { treeSize: 18, drawerOpen: true, drawerSize: 18, drawerTab: "activity" },
 };
 
 export function parseProfileShell(v: unknown): ProfileShell {
@@ -133,28 +134,47 @@ export function shellReducer(s: ProfileShell, a: ShellAction): ProfileShell {
   }
 }
 
-/** Shell state for a profile, loaded from and saved (debounced) to settings. */
+/** Shell state for a profile, loaded from and saved (debounced) to settings.
+ *  The id must stay stable while the same profile reconnects; changing it flushes the pending save and reloads. */
 export function useProfileShell(profileId: string | null): [ProfileShell, Dispatch<ShellAction>, boolean] {
   const [state, dispatch] = useReducer(shellReducer, emptyShell);
   const [loadedFor, setLoadedFor] = useState<string | null>(null);
+  const loaded = useRef<ProfileShell | null>(null); // the state as loaded, so it is not written straight back
+  const pending = useRef<{ profileId: string; state: ProfileShell } | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  const flush = useCallback(() => {
+    clearTimeout(timer.current);
+    const p = pending.current;
+    pending.current = null;
+    if (p) void commands.settingsSet(`shell:${p.profileId}`, p.state).catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (!profileId) return;
     let live = true;
+    const apply = (s: ProfileShell) => {
+      if (!live) return;
+      loaded.current = s;
+      dispatch({ type: "reset", state: s });
+      setLoadedFor(profileId);
+    };
     commands
       .settingsGet(`shell:${profileId}`)
-      .then((v) => live && (dispatch({ type: "reset", state: parseProfileShell(v) }), setLoadedFor(profileId)))
-      .catch(() => live && (dispatch({ type: "reset", state: emptyShell }), setLoadedFor(profileId)));
+      .then((v) => apply(parseProfileShell(v)))
+      .catch(() => apply(emptyShell));
     return () => {
       live = false;
+      flush();
     };
-  }, [profileId]);
+  }, [profileId, flush]);
 
   useEffect(() => {
-    if (!profileId || loadedFor !== profileId) return;
-    const t = setTimeout(() => void commands.settingsSet(`shell:${profileId}`, state).catch(() => {}), 300);
-    return () => clearTimeout(t);
-  }, [state, profileId, loadedFor]);
+    if (!profileId || loadedFor !== profileId || state === loaded.current) return;
+    pending.current = { profileId, state };
+    clearTimeout(timer.current);
+    timer.current = setTimeout(flush, 300);
+  }, [state, profileId, loadedFor, flush]);
 
   return [state, dispatch, loadedFor === profileId];
 }

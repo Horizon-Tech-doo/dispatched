@@ -37,6 +37,8 @@ export function Shell({ tree, workspace, drawer }: { tree?: ReactNode; workspace
               </PanelGroup>
             </Panel>
           </PanelGroup>
+        ) : conn.status === "connected" ? (
+          <div className="h-full w-full bg-content" /> // shell state for this connection is still loading
         ) : (
           <Welcome />
         )}

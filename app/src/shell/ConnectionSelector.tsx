@@ -15,12 +15,14 @@ export function ConnectionSelector() {
     conn.status === "connecting" && current ? `Connecting to ${current.name}…`
     : conn.status === "connected" && current ? current.name
     : "Choose a connection";
+  const description =
+    conn.status === "connected" && current ? `${current.name}, ${shortHost(current.host)}${current.production ? ", production" : ""}` : label;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <button
           type="button"
-          aria-label={`Connection: ${label}`}
+          aria-label={`Connection: ${description}`}
           className="flex h-[26px] max-w-[420px] items-center gap-2 rounded-ctl border border-line bg-field px-2 text-12 hover:bg-hover"
         >
           <span className="truncate font-semibold">{label}</span>
@@ -33,16 +35,25 @@ export function ConnectionSelector() {
         <DropdownMenuLabel>Connections</DropdownMenuLabel>
         {profiles.map((p) => (
           <DropdownMenuItem key={p.id} onSelect={() => void conn.connect(p.id)}>
-            <span className="w-3.5">{p.id === conn.profileId && conn.status === "connected" && <Check />}</span>
+            <span aria-hidden="true" className="w-3.5">{p.id === conn.profileId && conn.status === "connected" && <Check />}</span>
             <span className="truncate">{p.name}</span>
             <span className="truncate text-faint">{shortHost(p.host)}</span>
             {p.production && <ProdBadge className="ml-auto" />}
           </DropdownMenuItem>
         ))}
         {profiles.length > 0 && <DropdownMenuSeparator />}
-        <DropdownMenuItem onSelect={() => openSheet({ kind: "profile", profileId: null })}>Add connection…</DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => openSheet({ kind: "profiles" })}>Manage connections…</DropdownMenuItem>
-        {conn.status === "connected" && <DropdownMenuItem onSelect={() => void conn.disconnect()}>Disconnect</DropdownMenuItem>}
+        <DropdownMenuItem onSelect={() => openSheet({ kind: "profile", profileId: null })}>
+          <span aria-hidden="true" className="w-3.5" />
+          Add connection…
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => openSheet({ kind: "profiles" })}>
+          <span aria-hidden="true" className="w-3.5" />
+          Manage connections…
+        </DropdownMenuItem>
+        {conn.status === "connected" && <DropdownMenuItem onSelect={() => void conn.disconnect()}>
+            <span aria-hidden="true" className="w-3.5" />
+            Disconnect
+          </DropdownMenuItem>}
       </DropdownMenuContent>
     </DropdownMenu>
   );

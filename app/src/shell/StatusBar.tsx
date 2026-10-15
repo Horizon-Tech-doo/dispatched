@@ -15,13 +15,12 @@ export function StatusBar() {
   const state =
     conn.status === "connecting" ? "Connecting…"
     : lost ? "Connection lost"
-    : conn.status === "connected" ? "Connected"
-    : conn.status === "failed" ? "Not connected"
+    : conn.status === "connected" ? "Peek only, nothing locked"
     : "Not connected";
   return (
     <footer className="flex h-[22px] shrink-0 items-center gap-4 border-t border-line bg-chrome px-3 text-11 text-muted">
       {conn.view && <span>{conn.view.transport === "websockets" ? "AMQP over WebSockets" : "AMQP"}</span>}
-      <span className="flex items-center gap-1.5">
+      <span role="status" className="flex items-center gap-1.5">
         {lost && <CircleAlert aria-hidden="true" className="size-3 text-accent" />}
         <span className={lost ? "text-fg" : undefined}>{state}</span>
         {lost && <Button size="sm" variant="quiet" onClick={conn.retry}>Reconnect</Button>}

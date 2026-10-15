@@ -9,9 +9,9 @@ describe("Shell", () => {
     const list = await screen.findByRole("list", { name: "Saved connections" });
     await userEvent.click(within(list).getByRole("button", { name: /Logistics\b.*sb-logistics-prod/ }));
     const bar = screen.getByRole("banner");
-    await waitFor(() => expect(within(bar).getByRole("button", { name: /Connection: Logistics/ })).toBeInTheDocument());
+    await waitFor(() => expect(within(bar).getByRole("button", { name: "Connection: Logistics, sb-logistics-prod, production" })).toBeInTheDocument());
     expect(within(bar).getByText("PROD")).toBeInTheDocument();
-    expect(within(screen.getByRole("contentinfo")).getByText("Connected")).toBeInTheDocument();
+    expect(within(screen.getByRole("contentinfo")).getByText("Peek only, nothing locked")).toBeInTheDocument();
   });
 
   it("reconnects to the last profile on start", async () => {
@@ -29,7 +29,7 @@ describe("Shell", () => {
   it("missing secret shows the fix", async () => {
     renderShell("missing-secret", { last_profile: "p-logistics" });
     expect(await screen.findByRole("heading", { name: "Couldn't connect to Logistics" })).toBeInTheDocument();
-    expect(screen.getByText(/no stored connection string/)).toBeInTheDocument();
+    expect(screen.getByText(/isn't in the system keychain/)).toHaveAttribute("title", expect.stringContaining("no stored connection string"));
     expect(screen.getByRole("button", { name: "Edit connection" })).toBeInTheDocument();
   });
 });
