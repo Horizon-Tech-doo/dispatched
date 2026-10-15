@@ -96,15 +96,15 @@ function TreeDemo({ density }: { density: Density }) {
             {entity.kind && (
               <span className="shrink-0 text-icon"><EntityGlyph kind={entity.kind} /></span>
             )}
-            <span className={entity.group ? "truncate text-muted" : entity.kind === "namespace" ? "truncate font-semibold" : "truncate"}>
+            <span className={entity.group ? "truncate font-semibold text-muted" : entity.kind === "namespace" ? "truncate font-semibold" : "truncate"}>
               {entity.label}
             </span>
-            {entity.prod && <ProdBadge className="ml-auto" />}
-            {entity.group && <CountBadge value={entity.children?.length ?? 0} className="ml-auto" />}
+            {entity.prod && <span className="ml-auto shrink-0 text-11 font-semibold tracking-[0.04em] text-accent">PROD</span>}
+            {entity.group && <CountBadge value={entity.children?.length ?? 0} className="ml-auto text-12" />}
             {entity.active != null && (
               <span className="ml-auto flex shrink-0 items-baseline gap-1.5">
-                <CountBadge value={entity.active} />
-                <CountBadge value={entity.dead} attention className="min-w-6 text-right" />
+                <CountBadge value={entity.active} className="text-12" />
+                {!!entity.dead && <CountBadge value={entity.dead} attention className="text-12" />}
               </span>
             )}
           </>

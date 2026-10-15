@@ -97,4 +97,22 @@ describe("Tree", () => {
     await userEvent.keyboard("tr");
     expect(selected()).toHaveAccessibleName("tracking-sync");
   });
+
+  it("treats j and k as letters while a type-ahead is in progress", async () => {
+    render(<Harness />);
+    screen.getByRole("tree").focus();
+    await userEvent.keyboard("tracking");
+    expect(selected()).toHaveAccessibleName("tracking-sync");
+  });
+
+  it("clicking a chevron toggles without selecting or activating", async () => {
+    const onToggle = vi.fn();
+    const onActivate = vi.fn();
+    render(<Harness onToggle={onToggle} onActivate={onActivate} />);
+    const chevron = screen.getByRole("treeitem", { name: "shipment-events" }).firstElementChild as HTMLElement;
+    await userEvent.dblClick(chevron);
+    expect(onToggle).toHaveBeenCalledWith("shipment-events", true);
+    expect(onActivate).not.toHaveBeenCalled();
+    expect(selected()).toHaveAccessibleName("queues");
+  });
 });

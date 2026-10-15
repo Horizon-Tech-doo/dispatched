@@ -67,14 +67,18 @@ export function Tree<N extends TreeNode>(props: TreeProps<N>) {
   function onKeyDown(e: KeyboardEvent<HTMLDivElement>) {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     const cur = nodes[index];
+    // Mid-word, j/k are letters: only a first key navigates.
+    const typing = typeahead.current.text !== "" && Date.now() - typeahead.current.at < TYPEAHEAD_MS;
     switch (e.key) {
       case "ArrowDown":
       case "j":
+        if (typing) break;
         e.preventDefault();
         select(index < 0 ? 0 : index + 1);
         return;
       case "ArrowUp":
       case "k":
+        if (typing) break;
         e.preventDefault();
         select(index < 0 ? 0 : index - 1);
         return;
@@ -155,6 +159,7 @@ export function Tree<N extends TreeNode>(props: TreeProps<N>) {
             >
               <span
                 className="grid w-3.5 shrink-0 place-items-center text-faint"
+                onDoubleClick={(e) => e.stopPropagation()}
                 onClick={(e) => {
                   if (!n.expandable) return;
                   e.stopPropagation();
