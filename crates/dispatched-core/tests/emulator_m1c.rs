@@ -106,8 +106,9 @@ async fn m1c_tail_sequences_sessions_details() {
     let sq = EntityPath::queue("sessions-q");
     let listing = explorer.list_sessions(&sq).await.unwrap();
     eprintln!(
-        "GATE-NOTE m1c sessions: from_broker={} scanned={} count={}",
-        listing.from_broker,
+        "GATE-NOTE m1c sessions: broker={:?} ids={} scanned={} count={}",
+        listing.broker,
+        listing.sessions.iter().filter(|s| s.in_broker).count(),
         listing.scanned,
         listing.sessions.len()
     );

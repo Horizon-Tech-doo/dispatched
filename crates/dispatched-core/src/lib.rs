@@ -28,8 +28,8 @@ pub use export::{
 };
 pub use filter::{BodyFilter, FilterField, FilterIssue, FilterSpec, MessageFilter, PropertyFilter};
 pub use messaging::{
-    MessageBody, MessageDetail, MessageState, MessageSummary, PeekOptions, PeekPage, PeekedMessage,
-    PropValue, SessionListing, SessionSummary,
+    BrokerList, MessageBody, MessageDetail, MessageState, MessageSummary, PeekOptions, PeekPage,
+    PeekedMessage, PropValue, SessionListing, SessionSummary,
 };
 pub use mgmt::{
     CorrelationProperty, EntityCounts, EntityDetails, EntityKind, EntityProperty, ManagementClient,

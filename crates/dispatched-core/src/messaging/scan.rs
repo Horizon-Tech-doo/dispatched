@@ -1122,6 +1122,84 @@ mod tests {
         assert!(page.exhausted);
     }
 
+    /// A source that takes `session-id` but ignores it and returns the whole entity, as the
+    /// emulator does. It never refuses, so no fallback is triggered.
+    struct IgnoresSession {
+        messages: Vec<PeekedMessage>,
+        session_calls: u32,
+        plain_calls: u32,
+    }
+
+    #[async_trait]
+    impl PeekSource for IgnoresSession {
+        async fn peek_batch(
+            &mut self,
+            _a: &str,
+            from: i64,
+            max: u32,
+        ) -> Result<Vec<PeekedMessage>> {
+            self.plain_calls += 1;
+            Ok(self
+                .messages
+                .iter()
+                .filter(|m| m.sequence_number >= from)
+                .take(max as usize)
+                .cloned()
+                .collect())
+        }
+        async fn peek_session_batch(
+            &mut self,
+            _a: &str,
+            _s: &str,
+            from: i64,
+            max: u32,
+        ) -> Result<Vec<PeekedMessage>> {
+            self.session_calls += 1;
+            Ok(self
+                .messages
+                .iter()
+                .filter(|m| m.sequence_number >= from)
+                .take(max as usize)
+                .cloned()
+                .collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_source_that_ignores_the_session_still_yields_only_that_session() {
+        let mut src = IgnoresSession {
+            messages: sessions(10),
+            session_calls: 0,
+            plain_calls: 0,
+        };
+        let page = scan_messages(&mut src, "q", PeekView::Active, &in_session("even"))
+            .await
+            .unwrap();
+        assert_eq!(seq_numbers(&page), [2, 4, 6, 8, 10]);
+        assert!(
+            page.messages
+                .iter()
+                .all(|m| m.session_id.as_deref() == Some("even"))
+        );
+        assert_eq!(src.plain_calls, 0, "never fell back");
+        assert_eq!(page.scanned, 10, "the whole entity was examined");
+
+        let opts = PeekOptions {
+            max: 3,
+            ..in_session("odd")
+        };
+        let tail = peek_tail(&mut src, "q", PeekView::Active, &opts)
+            .await
+            .unwrap();
+        assert_eq!(seq_numbers(&tail), [5, 7, 9]);
+        assert!(
+            tail.messages
+                .iter()
+                .all(|m| m.session_id.as_deref() == Some("odd"))
+        );
+        assert_eq!(src.plain_calls, 0, "never fell back");
+    }
+
     #[tokio::test]
     async fn last_sequence_finds_the_end_of_sparse_sequences() {
         for list in [
