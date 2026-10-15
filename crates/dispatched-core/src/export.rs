@@ -1,9 +1,14 @@
 //! Stable JSON shape for messages leaving Dispatched (CLI output, files).
 
-use crate::messaging::{MessageBody, PeekedMessage};
+use crate::messaging::{MessageBody, PeekPage, PeekedMessage};
 use crate::{Error, Result};
+use horizon_azure_kit::safety::CancellationToken;
 use serde::Serialize;
-use std::io::Write;
+use std::fs::File;
+use std::future::Future;
+use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Schema identifier written into every exported message.
 pub const EXPORT_SCHEMA: &str = "dispatched.message/v1";
@@ -58,10 +63,247 @@ impl ExportFormat {
     }
 }
 
+/// The largest number of matches requested in one export page.
+pub const EXPORT_PAGE: u32 = 1000;
+
+/// How a paged read ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Continuation {
+    /// The end of the entity was reached.
+    End,
+    /// Stopped early; continue from this sequence number.
+    More(i64),
+    /// The scan made no progress, so the end of the entity was not confirmed.
+    Stalled,
+    /// Everything asked for was read; no continuation is known or needed.
+    Done,
+}
+
+/// How `page` ended.
+pub fn continuation(page: &PeekPage) -> Continuation {
+    if page.exhausted {
+        Continuation::End
+    } else {
+        page.next_sequence
+            .map_or(Continuation::Stalled, Continuation::More)
+    }
+}
+
+/// Totals of [`stream_pages`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Streamed {
+    /// Messages handed to the sink.
+    pub written: u64,
+    /// Messages examined.
+    pub scanned: u64,
+    /// How it ended.
+    pub end: Continuation,
+}
+
+/// Read pages until `top` messages (all when `None`) or the end, handing each page to `sink`
+/// as it arrives. Each page's `next_sequence` feeds the next request; a page that does not
+/// move forward ends the read as `Stalled`. Checks `cancel` before every page.
+pub async fn stream_pages<F, Fut>(
+    top: Option<u64>,
+    from_seq: i64,
+    cancel: Option<&CancellationToken>,
+    mut fetch: F,
+    mut sink: impl FnMut(Vec<PeekedMessage>, u64) -> Result<()>,
+) -> Result<Streamed>
+where
+    F: FnMut(i64, u32) -> Fut,
+    Fut: Future<Output = Result<PeekPage>>,
+{
+    let (mut written, mut scanned, mut from) = (0u64, 0u64, from_seq);
+    let end = loop {
+        if cancel.is_some_and(CancellationToken::is_cancelled) {
+            return Err(Error::Cancelled);
+        }
+        let remaining = top.map_or(u64::from(EXPORT_PAGE), |t| t.saturating_sub(written));
+        let page = fetch(from, remaining.min(u64::from(EXPORT_PAGE)) as u32).await?;
+        scanned += u64::from(page.scanned);
+        let end = continuation(&page);
+        let mut messages = page.messages;
+        if let Some(t) = top {
+            messages.truncate(t.saturating_sub(written) as usize);
+        }
+        written += messages.len() as u64;
+        sink(messages, scanned)?;
+        let full = top.is_some_and(|t| written >= t);
+        match end {
+            Continuation::More(n) if !full => {
+                if n <= from {
+                    // A page must move forward; never loop on one position.
+                    break Continuation::Stalled;
+                }
+                from = n;
+            }
+            // Asked-for count reached: complete, even if the last page made no progress past it.
+            Continuation::Stalled if full => break Continuation::Done,
+            other => break other,
+        }
+    };
+    Ok(Streamed {
+        written,
+        scanned,
+        end,
+    })
+}
+
 fn io(e: impl std::fmt::Display) -> Error {
     Error::Io(format!(
-        "cannot write export: {e} \u{2014} check the output path, permissions and free space"
+        "cannot write export: {e}; check the output path, permissions and free space"
     ))
+}
+
+fn exists(path: &Path) -> Error {
+    Error::Invalid(format!(
+        "{} already exists; choose another file or allow replacing it",
+        path.display()
+    ))
+}
+
+/// A target that is not a regular file (a device or FIFO) is written directly and is never an
+/// "existing file" that needs permission to replace. The CLI's `check_output` uses this too.
+pub fn is_special(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| !m.is_file() && !m.is_dir())
+}
+
+fn temp_path(path: &Path) -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "export".into());
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    path.with_file_name(format!(".{name}.dispatched-tmp-{}-{n}", std::process::id()))
+}
+
+/// An export file written page by page. Regular files are written to a sibling temp file
+/// that `finish` syncs and puts in place atomically: with `overwrite` it is renamed over the
+/// target; without, a hard link creates the target only if it is still absent (falling back
+/// to a check and a rename where hard links are unsupported). Dropping an unfinished export
+/// removes the temp file; an existing target is never touched by a failed or cancelled export.
+pub struct FileExport {
+    target: PathBuf,
+    tmp: Option<PathBuf>,
+    out: Option<BufWriter<File>>,
+    format: ExportFormat,
+    overwrite: bool,
+    written: u64,
+}
+
+impl FileExport {
+    /// Start an export to `path`. Fails at once when a regular file is there and
+    /// `overwrite` is off.
+    pub fn create(path: &Path, format: ExportFormat, overwrite: bool) -> Result<Self> {
+        if is_special(path) {
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .map_err(io)?;
+            return Ok(Self {
+                target: path.into(),
+                tmp: None,
+                out: Some(BufWriter::new(file)),
+                format,
+                overwrite,
+                written: 0,
+            });
+        }
+        if !overwrite && path.exists() {
+            return Err(exists(path));
+        }
+        let tmp = temp_path(path);
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map_err(io)?;
+        Ok(Self {
+            target: path.into(),
+            tmp: Some(tmp),
+            out: Some(BufWriter::new(file)),
+            format,
+            overwrite,
+            written: 0,
+        })
+    }
+
+    /// Messages written so far.
+    pub fn written(&self) -> u64 {
+        self.written
+    }
+
+    /// Append `messages`.
+    pub fn write(&mut self, messages: &[PeekedMessage]) -> Result<()> {
+        let w = self.out.as_mut().expect("open until finish");
+        for m in messages {
+            let item = ExportedMessage::new(m);
+            match self.format {
+                ExportFormat::Ndjson => {
+                    serde_json::to_writer(&mut *w, &item).map_err(io)?;
+                    w.write_all(b"\n").map_err(io)?;
+                }
+                ExportFormat::Json => {
+                    w.write_all(if self.written == 0 { b"[\n" } else { b",\n" })
+                        .map_err(io)?;
+                    let pretty = serde_json::to_string_pretty(&item).map_err(io)?;
+                    for (i, line) in pretty.lines().enumerate() {
+                        if i > 0 {
+                            w.write_all(b"\n").map_err(io)?;
+                        }
+                        w.write_all(b"  ").map_err(io)?;
+                        w.write_all(line.as_bytes()).map_err(io)?;
+                    }
+                }
+            }
+            self.written += 1;
+        }
+        Ok(())
+    }
+
+    /// Close the document, flush, sync and put the file in place. Returns the message count.
+    pub fn finish(mut self) -> Result<u64> {
+        let mut w = self.out.take().expect("open until finish");
+        if self.format == ExportFormat::Json {
+            w.write_all(if self.written == 0 { b"[]\n" } else { b"\n]\n" })
+                .map_err(io)?;
+        }
+        w.flush().map_err(io)?;
+        let file = w.into_inner().map_err(|e| io(e.into_error()))?;
+        let Some(tmp) = self.tmp.clone() else {
+            return Ok(self.written);
+        };
+        file.sync_all().map_err(io)?;
+        drop(file);
+        if self.overwrite {
+            std::fs::rename(&tmp, &self.target).map_err(io)?;
+            self.tmp = None;
+            return Ok(self.written);
+        }
+        match std::fs::hard_link(&tmp, &self.target) {
+            // Drop removes the temp name; the target keeps the data.
+            Ok(()) => Ok(self.written),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(exists(&self.target)),
+            Err(_) => {
+                if self.target.exists() {
+                    return Err(exists(&self.target));
+                }
+                std::fs::rename(&tmp, &self.target).map_err(io)?;
+                self.tmp = None;
+                Ok(self.written)
+            }
+        }
+    }
+}
+
+impl Drop for FileExport {
+    fn drop(&mut self) {
+        if let Some(tmp) = self.tmp.take() {
+            let _ = std::fs::remove_file(tmp);
+        }
+    }
 }
 
 /// Write `messages` to `w`. Returns the number written.
@@ -93,6 +335,8 @@ mod tests {
     use crate::messaging::{MessageState, test_message};
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD;
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
     use time::OffsetDateTime;
     use time::format_description::well_known::Rfc3339;
 
@@ -231,5 +475,400 @@ mod tests {
             matches!(err, Error::Io(ref m) if m.contains("disk full") && m.contains("free space")),
             "{err}"
         );
+    }
+
+    // --- paged reads ---
+
+    /// A fake service: hands out the queued pages and records each request.
+    struct Fake {
+        pages: RefCell<VecDeque<PeekPage>>,
+        requests: RefCell<Vec<(i64, u32)>>,
+    }
+
+    impl Fake {
+        fn new(pages: Vec<PeekPage>) -> Self {
+            Self {
+                pages: RefCell::new(pages.into()),
+                requests: RefCell::new(Vec::new()),
+            }
+        }
+        async fn fetch(&self, from: i64, max: u32) -> Result<PeekPage> {
+            self.requests.borrow_mut().push((from, max));
+            Ok(self
+                .pages
+                .borrow_mut()
+                .pop_front()
+                .expect("unexpected request"))
+        }
+    }
+
+    fn page(seqs: &[i64], scanned: u32, next: Option<i64>, exhausted: bool) -> PeekPage {
+        PeekPage {
+            messages: seqs.iter().map(|s| test_message(*s)).collect(),
+            scanned,
+            next_sequence: next,
+            exhausted,
+        }
+    }
+
+    #[test]
+    fn continuation_tells_end_more_and_stalled_apart() {
+        assert_eq!(continuation(&page(&[], 0, None, true)), Continuation::End);
+        assert_eq!(
+            continuation(&page(&[1], 1, Some(2), false)),
+            Continuation::More(2)
+        );
+        // No progress: next_sequence None, not exhausted.
+        assert_eq!(
+            continuation(&page(&[], 0, None, false)),
+            Continuation::Stalled
+        );
+    }
+
+    #[tokio::test]
+    async fn export_pages_until_the_entity_is_exhausted() {
+        let fake = Fake::new(vec![
+            page(&[1, 2], 5, Some(6), false),
+            page(&[8], 3, Some(9), false),
+            page(&[], 0, None, true),
+        ]);
+        let mut got: Vec<PeekedMessage> = Vec::new();
+        let s = stream_pages(
+            Some(10),
+            0,
+            None,
+            |f, m| fake.fetch(f, m),
+            |m, _| {
+                got.extend(m);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        let seqs: Vec<i64> = got.iter().map(|m| m.sequence_number).collect();
+        assert_eq!(seqs, vec![1, 2, 8]);
+        assert_eq!(s.scanned, 8);
+        assert_eq!(s.end, Continuation::End);
+        // Each page's next_sequence feeds the next request; max is what remains.
+        assert_eq!(*fake.requests.borrow(), vec![(0, 10), (6, 8), (9, 7)]);
+    }
+
+    #[tokio::test]
+    async fn export_stops_at_top_and_reports_where_to_continue() {
+        let fake = Fake::new(vec![page(&[1, 2, 3], 3, Some(4), false)]);
+        let mut got: Vec<PeekedMessage> = Vec::new();
+        let s = stream_pages(
+            Some(3),
+            0,
+            None,
+            |f, m| fake.fetch(f, m),
+            |m, _| {
+                got.extend(m);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(got.len(), 3);
+        assert_eq!(s.end, Continuation::More(4));
+        assert_eq!(fake.requests.borrow().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn export_caps_page_size_and_truncates_to_top() {
+        let fake = Fake::new(vec![page(&[1, 2, 3], 3, Some(4), true)]);
+        let mut got: Vec<PeekedMessage> = Vec::new();
+        stream_pages(
+            Some(2),
+            5,
+            None,
+            |f, m| fake.fetch(f, m),
+            |m, _| {
+                got.extend(m);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(got.len(), 2);
+        let fake = Fake::new(vec![page(&[], 0, None, true)]);
+        stream_pages(Some(5_000), 0, None, |f, m| fake.fetch(f, m), |_, _| Ok(()))
+            .await
+            .unwrap();
+        assert_eq!(*fake.requests.borrow(), vec![(0, EXPORT_PAGE)]);
+    }
+
+    #[tokio::test]
+    async fn export_without_progress_is_stalled_not_end() {
+        let fake = Fake::new(vec![
+            page(&[1], 1, Some(2), false),
+            page(&[], 0, None, false),
+        ]);
+        let mut got: Vec<PeekedMessage> = Vec::new();
+        let s = stream_pages(
+            Some(10),
+            0,
+            None,
+            |f, m| fake.fetch(f, m),
+            |m, _| {
+                got.extend(m);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(s.end, Continuation::Stalled);
+    }
+
+    #[tokio::test]
+    async fn export_never_loops_on_a_page_that_does_not_advance() {
+        // next_sequence equal to the request position would loop forever.
+        let fake = Fake::new(vec![page(&[], 4, Some(0), false)]);
+        let mut got: Vec<PeekedMessage> = Vec::new();
+        let s = stream_pages(
+            Some(10),
+            0,
+            None,
+            |f, m| fake.fetch(f, m),
+            |m, _| {
+                got.extend(m);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(s.end, Continuation::Stalled);
+        assert_eq!(fake.requests.borrow().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn export_propagates_errors_from_a_page() {
+        let mut got: Vec<PeekedMessage> = Vec::new();
+        let r = stream_pages(
+            Some(10),
+            0,
+            None,
+            |_, _| async { Err::<PeekPage, _>(Error::Network("boom".into())) },
+            |m, _| {
+                got.extend(m);
+                Ok(())
+            },
+        )
+        .await;
+        assert!(r.is_err());
+    }
+
+    #[tokio::test]
+    async fn short_export_is_stalled_but_a_full_one_is_not() {
+        // Fewer than top and no progress: end not confirmed.
+        let fake = Fake::new(vec![page(&[1], 1, None, false)]);
+        let mut got: Vec<PeekedMessage> = Vec::new();
+        let s = stream_pages(
+            Some(3),
+            0,
+            None,
+            |f, m| fake.fetch(f, m),
+            |m, _| {
+                got.extend(m);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(s.end, Continuation::Stalled);
+        // top reached: complete even though the last page made no progress.
+        let fake = Fake::new(vec![page(&[1, 2, 3], 3, None, false)]);
+        let mut got: Vec<PeekedMessage> = Vec::new();
+        let s = stream_pages(
+            Some(3),
+            0,
+            None,
+            |f, m| fake.fetch(f, m),
+            |m, _| {
+                got.extend(m);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(s.end, Continuation::Done);
+    }
+
+    #[tokio::test]
+    async fn unbounded_stream_reads_to_the_end_and_cancel_stops_it() {
+        let pages = vec![page(&[1, 2], 2, Some(3), false), page(&[3], 1, None, true)];
+        let fake = Fake::new(pages);
+        let mut n = 0;
+        let s = stream_pages(
+            None,
+            0,
+            None,
+            |f, m| fake.fetch(f, m),
+            |msgs, _| {
+                n += msgs.len();
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!((n, s.written, s.end), (3, 3, Continuation::End));
+        let token = CancellationToken::new();
+        token.cancel();
+        let fake = Fake::new(vec![page(&[1], 1, None, true)]);
+        let e = stream_pages(
+            None,
+            0,
+            Some(&token),
+            |f, m| fake.fetch(f, m),
+            |_, _| Ok(()),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(e, Error::Cancelled));
+    }
+
+    // --- export files ---
+
+    #[test]
+    fn streamed_json_is_byte_identical_to_the_one_shot_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        for count in [0usize, 1, 2, 5] {
+            let msgs: Vec<PeekedMessage> = two().into_iter().cycle().take(count).collect();
+            let mut expected = Vec::new();
+            write_messages(&mut expected, &msgs, ExportFormat::Json).unwrap();
+            let path = dir.path().join(format!("out-{count}.json"));
+            let mut f = FileExport::create(&path, ExportFormat::Json, false).unwrap();
+            for chunk in msgs.chunks(2) {
+                f.write(chunk).unwrap();
+            }
+            assert_eq!(f.finish().unwrap(), count as u64);
+            assert_eq!(std::fs::read(&path).unwrap(), expected, "{count} messages");
+        }
+    }
+
+    #[test]
+    fn ndjson_file_matches_the_one_shot_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.ndjson");
+        let mut f = FileExport::create(&path, ExportFormat::Ndjson, false).unwrap();
+        f.write(&two()).unwrap();
+        f.finish().unwrap();
+        let mut expected = Vec::new();
+        write_messages(&mut expected, &two(), ExportFormat::Ndjson).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), expected);
+    }
+
+    fn names(dir: &std::path::Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn existing_file_is_refused_without_overwrite_and_replaced_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.json");
+        std::fs::write(&path, "old").unwrap();
+        let e = FileExport::create(&path, ExportFormat::Json, false)
+            .err()
+            .unwrap();
+        assert!(e.to_string().contains("already exists"), "{e}");
+        let mut f = FileExport::create(&path, ExportFormat::Json, true).unwrap();
+        f.write(&two()).unwrap();
+        f.finish().unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().starts_with('['));
+        assert_eq!(names(dir.path()), ["x.json"]);
+    }
+
+    #[test]
+    fn an_unfinished_export_leaves_nothing_behind_and_the_original_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keep.json");
+        std::fs::write(&path, "original").unwrap();
+        {
+            let mut f = FileExport::create(&path, ExportFormat::Json, true).unwrap();
+            f.write(&two()).unwrap();
+            // dropped without finish (cancelled or failed)
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
+        assert_eq!(names(dir.path()), ["keep.json"]);
+    }
+
+    #[test]
+    fn a_target_that_appears_during_the_write_is_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("race.json");
+        let mut f = FileExport::create(&path, ExportFormat::Json, false).unwrap();
+        f.write(&two()).unwrap();
+        std::fs::write(&path, "someone else").unwrap();
+        assert!(
+            f.finish()
+                .unwrap_err()
+                .to_string()
+                .contains("already exists")
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "someone else");
+        assert_eq!(names(dir.path()), ["race.json"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn devices_are_written_directly() {
+        let mut f = FileExport::create(
+            std::path::Path::new("/dev/null"),
+            ExportFormat::Ndjson,
+            false,
+        )
+        .unwrap();
+        f.write(&two()).unwrap();
+        assert_eq!(f.finish().unwrap(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_is_written_directly() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe");
+        match std::process::Command::new("mkfifo").arg(&fifo).status() {
+            Ok(s) if s.success() => {}
+            _ => {
+                eprintln!("skipping: mkfifo is not available");
+                return;
+            }
+        }
+        assert!(is_special(&fifo));
+        let reader = {
+            let fifo = fifo.clone();
+            std::thread::spawn(move || std::fs::read_to_string(fifo).unwrap())
+        };
+        // No overwrite, and no temp file or rename: the FIFO itself is written.
+        let mut f = FileExport::create(&fifo, ExportFormat::Ndjson, false).unwrap();
+        f.write(&two()).unwrap();
+        assert_eq!(f.finish().unwrap(), 2);
+        let got = reader.join().unwrap();
+        assert_eq!(got.lines().count(), 2, "{got}");
+        assert_eq!(names(dir.path()), ["pipe"]);
+        assert!(
+            !std::fs::metadata(&fifo).unwrap().is_file(),
+            "the FIFO must not be replaced by a regular file"
+        );
+    }
+
+    #[test]
+    fn io_errors_name_the_fix_without_an_em_dash() {
+        let e = FileExport::create(
+            std::path::Path::new("/nonexistent-dir/x.json"),
+            ExportFormat::Json,
+            false,
+        )
+        .err()
+        .unwrap();
+        let text = e.to_string();
+        assert!(text.contains("check the output path"), "{text}");
+        assert!(!text.contains('\u{2014}'));
     }
 }

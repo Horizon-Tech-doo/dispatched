@@ -4,17 +4,14 @@ use crate::Format;
 use crate::context::Ctx;
 use crate::output::{ellipsize, sanitize, table};
 use crate::resolve::{Selection, needs_sign_in, resolve};
-use anyhow::Context as _;
 use clap::Args;
 use dispatched_core::messaging::DEFAULT_SCAN_LIMIT;
 pub use dispatched_core::namespace::known_entities;
 use dispatched_core::{
-    EntityCounts, EntityPath, Explorer, ExportFormat, ExportedMessage, MessageBody, MessageFilter,
-    Namespace, PeekOptions, PeekPage, PeekView, PeekedMessage, QueueInfo, SubscriptionInfo,
-    TopicInfo, write_messages,
+    Continuation, EntityCounts, EntityPath, Explorer, ExportFormat, ExportedMessage, FileExport,
+    MessageBody, MessageFilter, Namespace, PeekOptions, PeekPage, PeekView, PeekedMessage,
+    QueueInfo, SubscriptionInfo, TopicInfo, continuation, stream_pages, write_messages,
 };
-use std::future::Future;
-use std::io::Write;
 use time::format_description::well_known::Rfc3339;
 
 /// The namespace the user selected. The sign-in (a keychain read) is only
@@ -200,31 +197,6 @@ impl Query {
 // ---------------------------------------------------------------------------
 // Where a scan ended
 // ---------------------------------------------------------------------------
-
-/// How a scan ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Continuation {
-    /// The end of the entity was reached.
-    End,
-    /// Stopped early; continue from this sequence number.
-    More(i64),
-    /// The scan made no progress, so the end of the entity was NOT confirmed.
-    Stalled,
-    /// `export` collected everything asked for (`--top`); no continuation is known
-    /// and none is needed.
-    Done,
-}
-
-pub fn continuation(page: &PeekPage) -> Continuation {
-    if page.exhausted {
-        Continuation::End
-    } else {
-        match page.next_sequence {
-            Some(n) => Continuation::More(n),
-            None => Continuation::Stalled,
-        }
-    }
-}
 
 /// What to tell the user (on stderr) about how a scan ended.
 pub struct ScanSummary {
@@ -632,59 +604,6 @@ pub async fn peek(
 // export
 // ---------------------------------------------------------------------------
 
-/// The largest number of matches requested in one export page.
-const EXPORT_PAGE: u32 = 1000;
-
-/// Messages gathered over one or more pages.
-pub struct Collected {
-    pub messages: Vec<PeekedMessage>,
-    pub scanned: u64,
-    pub end: Continuation,
-}
-
-/// Page until `top` matches are collected or the entity is exhausted. Each
-/// page's `next_sequence` feeds the next request. `fetch(from, max)` returns one page.
-pub async fn collect_pages<F, Fut>(
-    top: u32,
-    from_seq: i64,
-    mut fetch: F,
-) -> anyhow::Result<Collected>
-where
-    F: FnMut(i64, u32) -> Fut,
-    Fut: Future<Output = dispatched_core::Result<PeekPage>>,
-{
-    let top = top as usize;
-    let mut messages: Vec<PeekedMessage> = Vec::new();
-    let mut scanned = 0u64;
-    let mut from = from_seq;
-    let end = loop {
-        let remaining = (top - messages.len()) as u32;
-        let page = fetch(from, remaining.min(EXPORT_PAGE)).await?;
-        scanned += u64::from(page.scanned);
-        let end = continuation(&page);
-        messages.extend(page.messages);
-        messages.truncate(top);
-        match end {
-            Continuation::More(n) if messages.len() < top => {
-                if n <= from {
-                    // A page must move forward; never loop on one position.
-                    break Continuation::Stalled;
-                }
-                from = n;
-            }
-            // Asked-for count reached: complete, even if the last page made no
-            // progress past it.
-            Continuation::Stalled if messages.len() >= top => break Continuation::Done,
-            other => break other,
-        }
-    };
-    Ok(Collected {
-        messages,
-        scanned,
-        end,
-    })
-}
-
 /// `--format` for `export`: JSON unless NDJSON is asked for.
 pub fn export_format(format: Option<Format>) -> anyhow::Result<ExportFormat> {
     match format {
@@ -700,127 +619,14 @@ fn exists_message(path: &str) -> String {
     format!("{path} exists; pass --force to overwrite it, or choose another --out")
 }
 
-/// An existing target that is not a regular file (a device such as
-/// `/dev/null` or `/dev/stdout`, a FIFO): it is written to directly, and
-/// "overwrite" does not apply to it.
-fn is_special_target(path: &std::path::Path) -> bool {
-    std::fs::metadata(path).is_ok_and(|m| !m.is_file() && !m.is_dir())
-}
-
 /// Fail early (before any network work) when `path` exists and `force` is off.
 /// Devices and pipes are not "existing files" and never need `--force`.
 pub fn check_output(path: &str, force: bool) -> anyhow::Result<()> {
     let p = std::path::Path::new(path);
-    if path != "-" && !force && p.exists() && !is_special_target(p) {
+    if path != "-" && !force && p.exists() && !dispatched_core::export::is_special(p) {
         anyhow::bail!(exists_message(path));
     }
     Ok(())
-}
-
-/// Removes the temporary file on drop unless disarmed.
-struct TempFile(Option<std::path::PathBuf>);
-
-impl TempFile {
-    fn disarm(&mut self) {
-        self.0 = None;
-    }
-}
-
-impl Drop for TempFile {
-    fn drop(&mut self) {
-        if let Some(p) = self.0.take() {
-            let _ = std::fs::remove_file(p);
-        }
-    }
-}
-
-fn temp_path(path: &std::path::Path) -> std::path::PathBuf {
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "export".into());
-    path.with_file_name(format!(".{name}.dispatched-tmp-{}", std::process::id()))
-}
-
-/// Produce `path` atomically: `write` fills a sibling temp file, which is
-/// flushed and synced, then put in place. With `force` it is renamed over the
-/// target. Without it, a hard link creates the target only if absent
-/// (atomic; fails with `AlreadyExists`), and the temp file is then removed;
-/// where hard links are unsupported it falls back to an existence check
-/// followed by a rename. On any error the temp file is removed and an
-/// existing target is left untouched. An existing non-regular target (device,
-/// FIFO) is written directly, without a temp file, rename or `--force`.
-pub fn write_atomic(
-    path: &std::path::Path,
-    force: bool,
-    write: impl FnOnce(&mut dyn Write) -> anyhow::Result<()>,
-) -> anyhow::Result<()> {
-    let shown = path.display();
-    if is_special_target(path) {
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .open(path)
-            .with_context(|| format!("cannot write {shown}; check the path and permissions"))?;
-        let mut w = std::io::BufWriter::new(file);
-        write(&mut w)?;
-        return w.flush().with_context(|| format!("cannot write {shown}"));
-    }
-    let exists = || anyhow::anyhow!(exists_message(&path.to_string_lossy()));
-    let tmp = temp_path(path);
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&tmp)
-        .with_context(|| format!("cannot write {shown}; check the path and permissions"))?;
-    let mut guard = TempFile(Some(tmp.clone()));
-    let mut w = std::io::BufWriter::new(file);
-    write(&mut w)?;
-    w.flush().with_context(|| format!("cannot write {shown}"))?;
-    let file = w
-        .into_inner()
-        .map_err(|e| e.into_error())
-        .with_context(|| format!("cannot write {shown}"))?;
-    file.sync_all()
-        .with_context(|| format!("cannot sync {shown}"))?;
-    drop(file);
-    if force {
-        std::fs::rename(&tmp, path).with_context(|| format!("cannot replace {shown}"))?;
-        guard.disarm();
-        return Ok(());
-    }
-    match std::fs::hard_link(&tmp, path) {
-        // The temp name is dropped (guard) and the target keeps the data.
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(exists()),
-        Err(_) => {
-            // No hard links here: best-effort check, then rename.
-            if path.exists() {
-                return Err(exists());
-            }
-            std::fs::rename(&tmp, path).with_context(|| format!("cannot write {shown}"))?;
-            guard.disarm();
-            Ok(())
-        }
-    }
-}
-
-/// Write the export to `path` (`-` is stdout), atomically for regular files
-/// (see [`write_atomic`]).
-pub fn write_output(
-    path: &str,
-    force: bool,
-    messages: &[PeekedMessage],
-    format: ExportFormat,
-) -> anyhow::Result<usize> {
-    if path == "-" {
-        return Ok(write_messages(std::io::stdout().lock(), messages, format)?);
-    }
-    let mut n = 0;
-    write_atomic(std::path::Path::new(path), force, |w| {
-        n = write_messages(w, messages, format)?;
-        Ok(())
-    })?;
-    Ok(n)
 }
 
 /// An export whose scan stopped without progress is incomplete: the file is
@@ -846,14 +652,29 @@ pub async fn export(
     check_output(out, force)?;
     let q = Query::open(ctx, sel, args)?;
     let qr = &q;
-    let collected = collect_pages(top, q.from_seq, |from, max| {
+    let fetch = |from, max| {
         let opts = qr.options(max, from);
         async move { qr.explorer.peek(&qr.entity, qr.view, &opts).await }
-    })
-    .await;
+    };
+    let result = if out == "-" {
+        let mut all = Vec::new();
+        let s = stream_pages(Some(u64::from(top)), q.from_seq, None, fetch, |m, _| {
+            all.extend(m);
+            Ok(())
+        })
+        .await;
+        s.and_then(|s| write_messages(std::io::stdout().lock(), &all, format).map(|_| s))
+    } else {
+        let mut file = FileExport::create(std::path::Path::new(out), format, force)?;
+        let s = stream_pages(Some(u64::from(top)), q.from_seq, None, fetch, |m, _| {
+            file.write(&m)
+        })
+        .await;
+        s.and_then(|s| file.finish().map(|_| s))
+    };
     q.explorer.close().await;
-    let collected = collected?;
-    let n = write_output(out, force, &collected.messages, format)?;
+    let s = result?;
+    let n = s.written as usize;
     let dest = if out == "-" {
         "stdout".to_string()
     } else {
@@ -861,21 +682,20 @@ pub async fn export(
     };
     eprintln!("Exported {n} message(s) to {dest}");
     print_notes(&scan_notes(&ScanSummary {
-        scanned: collected.scanned,
+        scanned: s.scanned,
         matched: n,
         top,
         scan_limit: None,
-        end: collected.end,
+        end: s.end,
     }));
-    check_complete(collected.end, n)
+    check_complete(s.end, n)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use dispatched_core::{MessageState, PropValue};
-    use std::cell::RefCell;
-    use std::collections::{BTreeMap, VecDeque};
+    use std::collections::BTreeMap;
 
     fn msg(seq: i64) -> PeekedMessage {
         PeekedMessage {
@@ -1004,20 +824,6 @@ mod tests {
 
     // --- how a scan ended ---
 
-    #[test]
-    fn continuation_tells_end_more_and_stalled_apart() {
-        assert_eq!(continuation(&page(&[], 0, None, true)), Continuation::End);
-        assert_eq!(
-            continuation(&page(&[1], 1, Some(2), false)),
-            Continuation::More(2)
-        );
-        // No progress: next_sequence None, not exhausted.
-        assert_eq!(
-            continuation(&page(&[], 0, None, false)),
-            Continuation::Stalled
-        );
-    }
-
     fn summary(scanned: u64, matched: usize, limit: Option<u32>, end: Continuation) -> ScanSummary {
         ScanSummary {
             scanned,
@@ -1139,97 +945,6 @@ mod tests {
         assert_eq!(null["exhausted"], true);
     }
 
-    // --- export paging ---
-
-    /// A fake service: hands out the queued pages and records each request.
-    struct Fake {
-        pages: RefCell<VecDeque<PeekPage>>,
-        requests: RefCell<Vec<(i64, u32)>>,
-    }
-
-    impl Fake {
-        fn new(pages: Vec<PeekPage>) -> Self {
-            Self {
-                pages: RefCell::new(pages.into()),
-                requests: RefCell::new(Vec::new()),
-            }
-        }
-        async fn fetch(&self, from: i64, max: u32) -> dispatched_core::Result<PeekPage> {
-            self.requests.borrow_mut().push((from, max));
-            Ok(self
-                .pages
-                .borrow_mut()
-                .pop_front()
-                .expect("unexpected request"))
-        }
-    }
-
-    #[tokio::test]
-    async fn export_pages_until_the_entity_is_exhausted() {
-        let fake = Fake::new(vec![
-            page(&[1, 2], 5, Some(6), false),
-            page(&[8], 3, Some(9), false),
-            page(&[], 0, None, true),
-        ]);
-        let c = collect_pages(10, 0, |f, m| fake.fetch(f, m)).await.unwrap();
-        let seqs: Vec<i64> = c.messages.iter().map(|m| m.sequence_number).collect();
-        assert_eq!(seqs, vec![1, 2, 8]);
-        assert_eq!(c.scanned, 8);
-        assert_eq!(c.end, Continuation::End);
-        // Each page's next_sequence feeds the next request; max is what remains.
-        assert_eq!(*fake.requests.borrow(), vec![(0, 10), (6, 8), (9, 7)]);
-    }
-
-    #[tokio::test]
-    async fn export_stops_at_top_and_reports_where_to_continue() {
-        let fake = Fake::new(vec![page(&[1, 2, 3], 3, Some(4), false)]);
-        let c = collect_pages(3, 0, |f, m| fake.fetch(f, m)).await.unwrap();
-        assert_eq!(c.messages.len(), 3);
-        assert_eq!(c.end, Continuation::More(4));
-        assert_eq!(fake.requests.borrow().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn export_caps_page_size_and_truncates_to_top() {
-        let fake = Fake::new(vec![page(&[1, 2, 3], 3, Some(4), true)]);
-        let c = collect_pages(2, 5, |f, m| fake.fetch(f, m)).await.unwrap();
-        assert_eq!(c.messages.len(), 2);
-        let fake = Fake::new(vec![page(&[], 0, None, true)]);
-        collect_pages(5_000, 0, |f, m| fake.fetch(f, m))
-            .await
-            .unwrap();
-        assert_eq!(*fake.requests.borrow(), vec![(0, EXPORT_PAGE)]);
-    }
-
-    #[tokio::test]
-    async fn export_without_progress_is_stalled_not_end() {
-        let fake = Fake::new(vec![
-            page(&[1], 1, Some(2), false),
-            page(&[], 0, None, false),
-        ]);
-        let c = collect_pages(10, 0, |f, m| fake.fetch(f, m)).await.unwrap();
-        assert_eq!(c.messages.len(), 1);
-        assert_eq!(c.end, Continuation::Stalled);
-    }
-
-    #[tokio::test]
-    async fn export_never_loops_on_a_page_that_does_not_advance() {
-        // next_sequence equal to the request position would loop forever.
-        let fake = Fake::new(vec![page(&[], 4, Some(0), false)]);
-        let c = collect_pages(10, 0, |f, m| fake.fetch(f, m)).await.unwrap();
-        assert_eq!(c.end, Continuation::Stalled);
-        assert_eq!(fake.requests.borrow().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn export_propagates_errors_from_a_page() {
-        let r = collect_pages(10, 0, |_, _| async {
-            Err::<PeekPage, _>(dispatched_core::Error::Network("boom".into()))
-        })
-        .await;
-        assert!(r.is_err());
-    }
-
     // --- export output ---
 
     #[test]
@@ -1250,42 +965,14 @@ mod tests {
     #[test]
     fn export_to_dev_null_needs_no_force() {
         check_output("/dev/null", false).unwrap();
-        assert_eq!(
-            write_output("/dev/null", false, &[msg(1), msg(2)], ExportFormat::Ndjson).unwrap(),
-            2
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn export_to_a_fifo_writes_directly() {
-        let dir = tempfile::tempdir().unwrap();
-        let fifo = dir.path().join("pipe");
-        match std::process::Command::new("mkfifo").arg(&fifo).status() {
-            Ok(s) if s.success() => {}
-            _ => {
-                eprintln!("skipping: mkfifo is not available");
-                return;
-            }
-        }
-        let reader = {
-            let fifo = fifo.clone();
-            std::thread::spawn(move || std::fs::read_to_string(fifo).unwrap())
-        };
-        let p = fifo.to_str().unwrap();
-        // No --force, and no temp file or rename: the FIFO itself is written.
-        check_output(p, false).unwrap();
-        assert_eq!(
-            write_output(p, false, &[msg(1), msg(2)], ExportFormat::Ndjson).unwrap(),
-            2
-        );
-        let got = reader.join().unwrap();
-        assert_eq!(got.lines().count(), 2, "{got}");
-        assert_eq!(dir_names(dir.path()), ["pipe"]);
-        assert!(
-            !std::fs::metadata(&fifo).unwrap().is_file(),
-            "the FIFO must not be replaced by a regular file"
-        );
+        let mut f = FileExport::create(
+            std::path::Path::new("/dev/null"),
+            ExportFormat::Ndjson,
+            false,
+        )
+        .unwrap();
+        f.write(&[msg(1), msg(2)]).unwrap();
+        assert_eq!(f.finish().unwrap(), 2);
     }
 
     #[test]
@@ -1296,45 +983,22 @@ mod tests {
         std::fs::write(&path, "keep me").unwrap();
         let e = check_output(p, false).unwrap_err().to_string();
         assert!(e.contains("--force") && e.contains("exists"), "{e}");
-        let e = write_output(p, false, &[msg(1)], ExportFormat::Json)
-            .unwrap_err()
+        let e = FileExport::create(&path, ExportFormat::Json, false)
+            .err()
+            .unwrap()
             .to_string();
-        assert!(e.contains("--force"), "{e}");
+        assert!(e.contains("already exists"), "{e}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep me");
         // stdout is never "existing".
         check_output("-", false).unwrap();
         // --force replaces it.
         check_output(p, true).unwrap();
-        assert_eq!(
-            write_output(p, true, &[msg(1), msg(2)], ExportFormat::Json).unwrap(),
-            2
-        );
+        let mut f = FileExport::create(&path, ExportFormat::Json, true).unwrap();
+        f.write(&[msg(1), msg(2)]).unwrap();
+        assert_eq!(f.finish().unwrap(), 2);
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(v.as_array().unwrap().len(), 2);
-    }
-
-    #[test]
-    fn export_creates_new_files_and_writes_ndjson_byte_faithfully() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("new.ndjson");
-        let p = path.to_str().unwrap();
-        let mut m = msg(1);
-        m.body = MessageBody::Text("a\x1b[31m\u{202e}b".into());
-        write_output(p, false, &[m, msg(2)], ExportFormat::Ndjson).unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(text.lines().count(), 2);
-        // Not sanitised: serde escapes the control characters, the value is intact.
-        assert!(text.contains("\\u001b"));
-        let first: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
-        assert_eq!(first["body"]["value"], "a\x1b[31m\u{202e}b");
-        // An unwritable path says what to check.
-        let bad = dir.path().join("no/such/dir/out.json");
-        let e = format!(
-            "{:#}",
-            write_output(bad.to_str().unwrap(), false, &[], ExportFormat::Json).unwrap_err()
-        );
-        assert!(e.contains("check the path"), "{e}");
     }
 
     // --- ls ---
@@ -1491,109 +1155,14 @@ mod tests {
         assert!(pins_for(&ctx, &cs_sel).unwrap().is_empty());
     }
 
-    fn dir_names(dir: &std::path::Path) -> Vec<String> {
-        let mut v: Vec<String> = std::fs::read_dir(dir)
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        v.sort();
-        v
-    }
-
     #[test]
-    fn failed_write_leaves_the_original_and_no_temp_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("out.json");
-        std::fs::write(&path, "original").unwrap();
-        for force in [false, true] {
-            let err = write_atomic(&path, force, |w| {
-                w.write_all(b"partial")?;
-                anyhow::bail!("disk full")
-            })
-            .unwrap_err();
-            assert!(err.to_string().contains("disk full"));
-            assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
-            assert_eq!(dir_names(dir.path()), ["out.json"]);
-        }
-        // A writer that fails at the I/O level.
-        struct Failing;
-        impl Write for Failing {
-            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
-                Err(std::io::Error::other("no space"))
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let err = write_atomic(&path, true, |w| {
-            std::io::copy(&mut &b"data"[..], &mut Failing)?;
-            w.write_all(b"never")?;
-            Ok(())
-        })
-        .unwrap_err();
-        assert!(err.to_string().contains("no space"), "{err:#}");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
-        assert_eq!(dir_names(dir.path()), ["out.json"]);
-    }
-
-    #[test]
-    fn failed_export_to_a_new_path_leaves_nothing_behind() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("new.json");
-        assert!(write_atomic(&path, false, |_| anyhow::bail!("boom")).is_err());
-        assert!(dir_names(dir.path()).is_empty());
-        // An unwritable (missing) directory fails without creating anything.
-        let missing = dir.path().join("nope/out.json");
-        let e = format!(
-            "{:#}",
-            write_atomic(&missing, true, |_| Ok(())).unwrap_err()
-        );
-        assert!(e.contains("check the path"), "{e}");
-        assert!(dir_names(dir.path()).is_empty());
-    }
-
-    #[test]
-    fn a_target_that_appears_during_the_write_is_not_overwritten() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("out.json");
-        let err = write_atomic(&path, false, |w| {
-            w.write_all(b"ours")?;
-            // Someone else creates the target while we write.
-            std::fs::write(&path, "theirs")?;
-            Ok(())
-        })
-        .unwrap_err();
-        assert!(err.to_string().contains("--force"), "{err}");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs");
-        assert_eq!(dir_names(dir.path()), ["out.json"]);
-    }
-
-    #[test]
-    fn successful_atomic_writes_leave_only_the_target() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("out.json");
-        write_atomic(&path, false, |w| Ok(w.write_all(b"one")?)).unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "one");
-        assert_eq!(dir_names(dir.path()), ["out.json"]);
-        write_atomic(&path, true, |w| Ok(w.write_all(b"two")?)).unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "two");
-        assert_eq!(dir_names(dir.path()), ["out.json"]);
-    }
-
-    #[tokio::test]
-    async fn short_export_is_stalled_but_a_full_one_is_not() {
+    fn an_incomplete_export_fails_but_a_full_one_does_not() {
         // Fewer than --top and no progress: end not confirmed -> non-zero.
-        let fake = Fake::new(vec![page(&[1], 1, None, false)]);
-        let c = collect_pages(3, 0, |f, m| fake.fetch(f, m)).await.unwrap();
-        assert_eq!(c.end, Continuation::Stalled);
-        let e = check_complete(c.end, c.messages.len()).unwrap_err();
+        let e = check_complete(Continuation::Stalled, 1).unwrap_err();
         assert!(e.to_string().contains("export incomplete"), "{e}");
         assert!(e.to_string().contains("1 message(s) were written"));
         // --top reached: complete even though the last page made no progress.
-        let fake = Fake::new(vec![page(&[1, 2, 3], 3, None, false)]);
-        let c = collect_pages(3, 0, |f, m| fake.fetch(f, m)).await.unwrap();
-        assert_eq!(c.end, Continuation::Done);
-        check_complete(c.end, 3).unwrap();
+        check_complete(Continuation::Done, 3).unwrap();
         assert!(scan_notes(&summary(3, 3, None, Continuation::Done)).is_empty());
         // End, More: fine.
         check_complete(Continuation::End, 0).unwrap();
