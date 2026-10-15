@@ -109,10 +109,24 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
   const [picked, setPicked] = useState<{ ns: DiscoveredNamespace; tenantId: string | null; tenantLabel: string } | null>(null);
   const [choosing, setChoosing] = useState(true);
   const [browsedTenant, setBrowsedTenant] = useState<string | null>(null);
+  // Whether the Tenant ID holds text the user typed; until then it follows the tenant being browsed.
+  const [tenantTyped, setTenantTyped] = useState(false);
+  // Where focus goes once the summary or the list has rendered: a pick hides the list, Change hides the summary.
+  const focusNext = useRef<"change" | "list" | null>(null);
+  const changeButton = useRef<HTMLButtonElement>(null);
+  const pickerBox = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const target = focusNext.current;
+    focusNext.current = null;
+    if (target === "change") changeButton.current?.focus();
+    // The list puts its keyboard position on the picked row when it gains focus.
+    else if (target === "list") pickerBox.current?.querySelector<HTMLElement>('[role="listbox"]')?.focus();
+  }, [picked, choosing]);
   const set = <K extends keyof Form>(k: K, v: Form[K]) => setF((x) => ({ ...x, [k]: v }));
   // Typing in the Namespace or Tenant field makes the values typed ones: they are no longer "what was picked".
   const typed = (k: "namespace" | "tenant", v: string) => {
     set(k, v);
+    if (k === "tenant") setTenantTyped(true);
     setManual(true);
     setPicked(null);
     setChoosing(true);
@@ -126,6 +140,8 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
   const browse = (tenantId: string | null) => {
     setBrowsedTenant(tenantId);
     if (picked && picked.tenantId !== tenantId) dropPick();
+    // An open Tenant ID field the user has not typed in follows the browsed tenant (empty for home).
+    if (manual && !tenantTyped && !(picked && picked.tenantId === tenantId)) set("tenant", tenantId ?? "");
   };
   // Another account starts a new pick.
   const accountId = account.data?.id;
@@ -163,7 +179,9 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
     setF((x) => ({ ...x, namespace: ns.host, tenant: tenantId ?? "", name: x.name.trim() ? x.name : ns.name }));
     setErrors((e) => ({ ...e, namespace: undefined, name: undefined }));
     setPicked({ ns, tenantId, tenantLabel });
+    setTenantTyped(false); // the tenant is the picked one now
     setChoosing(false);
+    focusNext.current = "change";
   }
 
   async function onSave() {
@@ -344,19 +362,31 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
             </div>
             {picker && (
               <>
-                <NamespacePicker
-                  key={accountId}
-                  hidden={!!picked && !choosing}
-                  selectedHost={f.namespace.trim().toLowerCase()}
-                  onPick={pick}
-                  onTenant={browse}
-                />
+                <div ref={pickerBox} className="contents">
+                  <NamespacePicker
+                    key={accountId}
+                    hidden={!!picked && !choosing}
+                    selectedHost={f.namespace.trim().toLowerCase()}
+                    onPick={pick}
+                    onTenant={browse}
+                  />
+                </div>
                 {picked && !choosing && (
                   <div role="group" aria-label="Selected namespace" className="flex flex-col gap-1">
                     <div className="flex h-[26px] items-center gap-2 rounded-ctl border border-line bg-field pl-2 pr-0.5">
                       <span className="min-w-0 flex-1 truncate font-mono text-11 text-fg" title={picked.ns.host} data-selectable>{picked.ns.host}</span>
                       <span className="shrink-0 text-11 text-muted">{picked.tenantLabel}</span>
-                      <Button size="sm" variant="quiet" onClick={() => setChoosing(true)}>Change</Button>
+                      <Button
+                        ref={changeButton}
+                        size="sm"
+                        variant="quiet"
+                        onClick={() => {
+                          focusNext.current = "list";
+                          setChoosing(true);
+                        }}
+                      >
+                        Change
+                      </Button>
                     </div>
                     {picked.ns.local_auth_disabled && <p className="m-0 text-11 text-muted">Shared access keys are off for this namespace. Entra ID only.</p>}
                   </div>

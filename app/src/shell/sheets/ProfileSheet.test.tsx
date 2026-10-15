@@ -576,11 +576,56 @@ describe("Entra discovery in the Add connection sheet", () => {
     await showManual(user, sheet);
     expect(within(sheet).getByLabelText("Namespace")).toHaveValue("");
     expect(within(sheet).getByLabelText("Tenant ID")).toHaveValue("tenant-guest"); // the browsed tenant, offered for typing
-    // Typed text survives a tenant change.
+    // Typed text survives a tenant change; the Tenant ID, filled from the browsed tenant, follows it home.
     await user.type(within(sheet).getByLabelText("Namespace"), "sb-typed");
     await chooseTenant(user, sheet, "Horizon Tech (home)");
     expect(within(sheet).getByLabelText("Namespace")).toHaveValue("sb-typed");
-    expect(within(sheet).getByLabelText("Tenant ID")).toHaveValue("tenant-guest");
+    expect(within(sheet).getByLabelText("Tenant ID")).toHaveValue("");
+  });
+
+  it("keeps the Tenant ID on the browsed tenant until it is typed in, then leaves it alone", async () => {
+    const { user, sheet, mock } = await signedIn();
+    await within(sheet).findByRole("listbox", { name: "Namespaces" });
+    await chooseTenant(user, sheet, "Northwind Traders");
+    await showManual(user, sheet);
+    const tenantId = () => within(sheet).getByLabelText("Tenant ID");
+    expect(tenantId()).toHaveValue("tenant-guest");
+    await chooseTenant(user, sheet, "Horizon Tech (home)");
+    expect(tenantId()).toHaveValue("");
+    await chooseTenant(user, sheet, "Northwind Traders");
+    expect(tenantId()).toHaveValue("tenant-guest");
+    // Typed: the select no longer moves it.
+    await user.clear(tenantId());
+    await user.type(tenantId(), "tenant-typed");
+    await chooseTenant(user, sheet, "Horizon Tech (home)");
+    expect(tenantId()).toHaveValue("tenant-typed");
+    await user.type(within(sheet).getByLabelText("Name"), "Typed");
+    await user.type(within(sheet).getByLabelText("Namespace"), "sb-typed");
+    await user.click(within(sheet).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(mock.calls.some((c) => c.cmd === "profile_save")).toBe(true));
+    const draft = (mock.calls.find((c) => c.cmd === "profile_save")!.args as { draft: { auth: unknown } }).draft;
+    expect(draft.auth).toEqual({ kind: "entra", namespace: "sb-typed", tenant: "tenant-typed" });
+  });
+
+  it("moves focus to Change after a pick, and back to the picked row after Change", async () => {
+    const { user, sheet } = await signedIn();
+    // A click picks: focus lands on Change, since the list it was in is gone.
+    await user.click(await within(sheet).findByRole("option", { name: /sb-logistics-dev/ }));
+    expect(within(summary(sheet)).getByRole("button", { name: "Change" })).toHaveFocus();
+    // Change: the list has focus, its keyboard position on the picked row.
+    await user.keyboard("{Enter}");
+    const list = await within(sheet).findByRole("listbox", { name: "Namespaces" });
+    expect(list).toHaveFocus();
+    const picked = within(list).getByRole("option", { name: /sb-logistics-dev/ });
+    expect(list).toHaveAttribute("aria-activedescendant", picked.id);
+    // Enter picks from the keyboard and focus is on Change again.
+    await user.keyboard("{ArrowDown}{Enter}");
+    expect(summary(sheet)).toHaveTextContent("sb-logistics-prod.servicebus.windows.net");
+    expect(within(summary(sheet)).getByRole("button", { name: "Change" })).toHaveFocus();
+    await user.click(within(summary(sheet)).getByRole("button", { name: "Change" }));
+    const again = await within(sheet).findByRole("listbox", { name: "Namespaces" });
+    expect(again).toHaveFocus();
+    expect(again).toHaveAttribute("aria-activedescendant", within(again).getByRole("option", { name: /sb-logistics-prod/ }).id);
   });
 
   it("selects the sign-in's own tenant, or 'Home tenant', when the list does not mark a home tenant", async () => {
