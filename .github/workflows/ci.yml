@@ -48,7 +48,7 @@ jobs:
       # The Tauri crate embeds app/dist at compile time, so build the frontend first.
       - run: npm ci && npm run build
         working-directory: dispatched/app
-      - run: cargo clippy -p dispatched-app --locked -- -D warnings && cargo test -p dispatched-app --locked
+      - run: cargo clippy -p dispatched-app --all-targets --locked -- -D warnings && cargo test -p dispatched-app --locked
   emulator:
     runs-on: ubuntu-latest
     steps:
