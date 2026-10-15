@@ -5,6 +5,10 @@ import { splitSubscription, subTabsFor, useEntityInfo, validSubTab } from "./sub
 
 const KIND_LINE = { queue: "Queue", topic: "Topic", subscription: "Subscription" } as const;
 
+/** A sub-tab count's reserved width: room for "99,999" in tabular numerals (five digit-wide ch plus a
+ *  narrower comma), so counts up to that size, and the placeholder before them, never move the row. */
+const COUNT_SLOT = "min-w-[6ch] tabular-nums";
+
 export function EntityView({ tab }: { tab: OpenTab }) {
   const { dispatch } = useShell();
   const info = useEntityInfo(tab);
@@ -41,10 +45,10 @@ export function EntityView({ tab }: { tab: OpenTab }) {
               <TabsTrigger key={d.id} value={d.id}>
                 <span>{d.label}</span>
                 {c ? (
-                  <CountBadge value={c.value} quality={info.counts ?? undefined} attention={c.attention} className="min-w-[3ch]" />
+                  <CountBadge value={c.value} quality={info.counts ?? undefined} attention={c.attention} className={COUNT_SLOT} />
                 ) : (
                   // Hold the count's place while it loads, so the row does not shift when it arrives.
-                  d.count && info.status === "loading" && <span aria-hidden="true" data-count-placeholder className="min-w-[3ch]" />
+                  d.count && info.status === "loading" && <span aria-hidden="true" data-count-placeholder className={COUNT_SLOT} />
                 )}
               </TabsTrigger>
             );

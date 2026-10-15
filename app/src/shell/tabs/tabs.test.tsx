@@ -49,11 +49,11 @@ describe("entity tabs", () => {
     const views = await screen.findByRole("tablist", { name: "Entity views" });
     const messages = within(views).getByRole("tab", { name: /Messages/ });
     await waitFor(() => expect(messages.querySelector("[data-count-placeholder]")).not.toBeNull());
-    expect(messages.querySelector("[data-count-placeholder]")).toHaveClass("min-w-[3ch]");
+    expect(messages.querySelector("[data-count-placeholder]")).toHaveClass("min-w-[6ch]");
     // Tabs without a count reserve nothing.
     expect(within(views).getByRole("tab", { name: "Overview" }).querySelector("[data-count-placeholder]")).toBeNull();
     await act(async () => release());
-    await waitFor(() => expect(within(messages).getByText("2,906")).toHaveClass("min-w-[3ch]"));
+    await waitFor(() => expect(within(messages).getByText("2,906")).toHaveClass("min-w-[6ch]"));
     expect(messages.querySelector("[data-count-placeholder]")).toBeNull();
   });
 
