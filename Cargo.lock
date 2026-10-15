@@ -1144,6 +1144,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "dirs",
  "fe2o3-amqp",
  "fe2o3-amqp-cbs",
  "fe2o3-amqp-management",

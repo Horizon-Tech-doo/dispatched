@@ -134,6 +134,18 @@ impl ProfileStore {
         .map_err(|e| self.row_err(e))
     }
 
+    /// The profile with this id.
+    pub fn get_by_id(&self, id: &str) -> Result<Option<Profile>> {
+        let conn = self.conn.lock().expect("profile db poisoned");
+        conn.query_row(
+            &format!("{SELECT_PROFILE} WHERE id = ?1"),
+            params![id],
+            row_to_profile,
+        )
+        .optional()
+        .map_err(|e| self.row_err(e))
+    }
+
     /// Insert a new profile; the name must be unused (case-insensitive).
     pub fn insert(&self, p: &Profile) -> Result<()> {
         let name = clean_name(&p.name)?;
@@ -260,6 +272,29 @@ impl ProfileStore {
             |r| r.get(0),
         )
         .optional()
+        .map_err(|e| self.err(e))
+    }
+
+    /// An app setting (desktop UI state). App keys live under `app.` so they
+    /// can never read or overwrite the store's own keys.
+    pub fn app_setting(&self, key: &str) -> Result<Option<String>> {
+        self.setting(&app_key(key)?)
+    }
+
+    /// Set or clear (`None`) an app setting.
+    pub fn set_app_setting(&self, key: &str, value: Option<&str>) -> Result<()> {
+        self.set_setting(&app_key(key)?, value)
+    }
+
+    /// Remove every app setting whose key starts with `prefix`. Returns how many.
+    pub fn clear_app_settings_with_prefix(&self, prefix: &str) -> Result<usize> {
+        let full = app_key(prefix)?;
+        let conn = self.conn.lock().expect("profile db poisoned");
+        // substr instead of LIKE: `_` and `%` in keys must match literally.
+        conn.execute(
+            "DELETE FROM settings WHERE substr(key, 1, ?2) = ?1",
+            params![full, full.chars().count() as i64],
+        )
         .map_err(|e| self.err(e))
     }
 
@@ -482,6 +517,23 @@ fn transport_text(t: Transport) -> &'static str {
         Transport::Amqp => "amqp",
         Transport::WebSockets => "websockets",
     }
+}
+
+const APP_KEY_PREFIX: &str = "app.";
+const APP_KEY_MAX: usize = 200;
+
+fn app_key(key: &str) -> Result<String> {
+    let ok = !key.is_empty()
+        && key.len() <= APP_KEY_MAX
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'));
+    if !ok {
+        return Err(Error::Invalid(format!(
+            "invalid setting key (use 1-{APP_KEY_MAX} letters, digits, `.`, `_`, `:` or `-`)"
+        )));
+    }
+    Ok(format!("{APP_KEY_PREFIX}{key}"))
 }
 
 fn db_err(path: &Path, e: impl std::fmt::Display) -> Error {
@@ -836,5 +888,75 @@ mod tests {
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].name, "other");
         assert!(store.default_profile().unwrap().is_none());
+    }
+
+    fn entra_profile(store: &ProfileStore, name: &str) -> Profile {
+        let p = Profile::entra(name, "myns.servicebus.windows.net", "sign-in-1", None);
+        store.insert(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn get_by_id_finds_and_misses() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        let p = entra_profile(&store, "Logistics");
+        assert_eq!(store.get_by_id(&p.id).unwrap().unwrap().name, "Logistics");
+        assert!(store.get_by_id("nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn app_settings_round_trip_and_clear() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        assert!(store.app_setting("ui").unwrap().is_none());
+        store
+            .set_app_setting("ui", Some(r#"{"theme":"dark"}"#))
+            .unwrap();
+        assert_eq!(
+            store.app_setting("ui").unwrap().as_deref(),
+            Some(r#"{"theme":"dark"}"#)
+        );
+        store.set_app_setting("ui", None).unwrap();
+        assert!(store.app_setting("ui").unwrap().is_none());
+    }
+
+    #[test]
+    fn app_keys_cannot_reach_internal_keys() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        let p = entra_profile(&store, "Logistics");
+        store.set_default(Some("Logistics")).unwrap();
+        // The internal key is invisible through the app API...
+        assert!(store.app_setting("default_profile").unwrap().is_none());
+        // ...and writing the same name through it does not touch the internal one.
+        store.set_app_setting("default_profile", Some("x")).unwrap();
+        assert_eq!(store.default_profile().unwrap().unwrap().id, p.id);
+    }
+
+    #[test]
+    fn invalid_app_keys_are_rejected() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        for bad in ["", "has space", "semi;colon", &"k".repeat(201)] {
+            let e = store.set_app_setting(bad, Some("1")).unwrap_err();
+            assert!(e.to_string().contains("setting key"), "{bad}: {e}");
+        }
+    }
+
+    #[test]
+    fn clear_app_settings_with_prefix_only_removes_matching() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        store.set_app_setting("shell:a_1", Some("1")).unwrap();
+        store.set_app_setting("shell:a_1.extra", Some("2")).unwrap();
+        store.set_app_setting("shell:ab1", Some("3")).unwrap();
+        store.set_app_setting("ui", Some("4")).unwrap();
+        // `_` must not act as a wildcard.
+        assert_eq!(
+            store.clear_app_settings_with_prefix("shell:a_1").unwrap(),
+            2
+        );
+        assert!(store.app_setting("shell:a_1").unwrap().is_none());
+        assert_eq!(
+            store.app_setting("shell:ab1").unwrap().as_deref(),
+            Some("3")
+        );
+        assert_eq!(store.app_setting("ui").unwrap().as_deref(), Some("4"));
     }
 }

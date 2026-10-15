@@ -103,6 +103,32 @@ pub fn secret_key(profile_id: &str) -> String {
     format!("dispatched:profile:{profile_id}:connection-string")
 }
 
+/// A bare namespace name expands to the public-cloud host; a dotted input is
+/// taken as the full host. Only hostname characters (letters, digits, `.`,
+/// `-`) are accepted, so a URL, port or path is rejected rather than guessed at.
+pub fn namespace_host(input: &str) -> Result<String> {
+    let input = input.trim().to_ascii_lowercase();
+    let valid = !input.is_empty()
+        && !input.starts_with(['.', '-'])
+        && !input.ends_with(['.', '-'])
+        && !input.contains("..")
+        && input
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
+    if !valid {
+        return Err(Error::Invalid(
+            "invalid namespace: expected a name like `myns` or a host like \
+             `myns.servicebus.windows.net` (letters, digits, `.` and `-` only)"
+                .into(),
+        ));
+    }
+    Ok(if input.contains('.') {
+        input
+    } else {
+        format!("{input}.servicebus.windows.net")
+    })
+}
+
 /// Apply `HTTPS_PROXY` unless the namespace is the emulator or already proxied.
 pub fn with_env_proxy(ns: Namespace) -> Result<Namespace> {
     apply_proxy(ns, ProxyConfig::from_env())
@@ -248,5 +274,28 @@ mod tests {
             .unwrap();
         let ns = apply_proxy(ns, ProxyConfig::parse("http://second:2").ok()).unwrap();
         assert_eq!(ns.proxy().unwrap().host(), "first");
+    }
+
+    #[test]
+    fn namespace_host_expands_names_and_rejects_urls() {
+        assert_eq!(
+            namespace_host("MyNs").unwrap(),
+            "myns.servicebus.windows.net"
+        );
+        assert_eq!(
+            namespace_host(" x.servicebus.chinacloudapi.cn ").unwrap(),
+            "x.servicebus.chinacloudapi.cn"
+        );
+        for bad in [
+            "",
+            "https://x.servicebus.windows.net",
+            "x:5671",
+            ".x",
+            "x..y",
+            "a/b",
+        ] {
+            let e = namespace_host(bad).unwrap_err().to_string();
+            assert!(e.contains("invalid namespace"), "{bad}: {e}");
+        }
     }
 }

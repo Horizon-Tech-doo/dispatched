@@ -3,6 +3,7 @@
 use crate::context::StoreSource;
 use anyhow::{Context, bail};
 use dispatched_core::profiles;
+pub use dispatched_core::profiles::namespace_host;
 use dispatched_core::tokens::EntraSource;
 use dispatched_core::{ConnectionString, Namespace};
 use horizon_azure_kit::auth::{EntraSession, SignIn};
@@ -14,31 +15,6 @@ pub struct Selection<'a> {
     pub connection_string: Option<&'a str>,
     pub namespace: Option<&'a str>,
     pub profile: Option<&'a str>,
-}
-
-/// A bare namespace name expands to the public-cloud host; a dotted input is
-/// taken as the full host. Only hostname characters (letters, digits, `.`,
-/// `-`) are accepted, so a URL, port or path is rejected rather than guessed at.
-pub fn namespace_host(input: &str) -> anyhow::Result<String> {
-    let input = input.trim().to_ascii_lowercase();
-    let valid = !input.is_empty()
-        && !input.starts_with(['.', '-'])
-        && !input.ends_with(['.', '-'])
-        && !input.contains("..")
-        && input
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
-    if !valid {
-        bail!(
-            "invalid namespace: expected a name like `myns` or a host like \
-             `myns.servicebus.windows.net` (letters, digits, `.` and `-` only)"
-        );
-    }
-    Ok(if input.contains('.') {
-        input
-    } else {
-        format!("{input}.servicebus.windows.net")
-    })
 }
 
 pub const ENV_CONNECTION_STRING: &str = "DISPATCHED_CONNECTION_STRING";
