@@ -99,8 +99,8 @@ fn entra_sign_in(state: &AppState, tenant: Option<&str>) -> Result<Option<SignIn
 }
 
 /// The sign-in an edited Entra profile is rebound to, if any: the one `entra_sign_in` resolves for its
-/// tenant, but only when that is the same identity as the sign-in the profile uses now, or the profile
-/// has no working sign-in. An edit never moves a profile to another account.
+/// tenant, but only when that is the same identity as the sign-in the profile uses now, or the profile's
+/// sign-in record is gone. An edit never moves a profile to another account, even when its sign-in expired.
 fn rebind_on_edit(
     state: &AppState,
     existing: &Profile,
@@ -117,8 +117,9 @@ fn rebind_on_edit(
         return Ok(None);
     };
     let (record, usable) = state.usable_sign_in(sign_in_id, stored.as_deref())?;
+    // Another identity's binding stays, live or expired; only a gone record lets the current account in.
     Ok(match usable.or(record) {
-        Some(now) if !same_identity(&now, &resolved) && state.session.is_signed_in(&now)? => None,
+        Some(now) if !same_identity(&now, &resolved) => None,
         _ => Some(resolved),
     })
 }
@@ -510,6 +511,27 @@ mod tests {
         assert!(
             matches!(&e.profile.auth, ProfileAuth::Entra { sign_in_id, .. } if sign_in_id == "guest-oid")
         );
+    }
+
+    #[tokio::test]
+    async fn an_expired_profile_of_another_account_keeps_its_account_on_edit() {
+        use crate::ops::test_util::remember_sign_in;
+        let s = state();
+        // Saved by A, whose token has since gone; B is current now.
+        remember_sign_in(&s, "a-oid", "tenant-a", false);
+        let b = remember_sign_in(&s, "b-oid", "tenant-b", true);
+        s.store.set_current_sign_in(Some(&b.id)).unwrap();
+        let p = Profile::entra("A ns", "sb-ops.servicebus.windows.net", "a-oid", None);
+        s.store.insert(&p).unwrap();
+        let mut edit = entra_draft("A ns renamed", None);
+        edit.id = Some(p.id.clone());
+        let e = save(&s, &Recorder::default(), edit).await.unwrap();
+        assert!(
+            matches!(&e.profile.auth, ProfileAuth::Entra { sign_in_id, .. } if sign_in_id == "a-oid"),
+            "{:?}",
+            e.profile.auth
+        );
+        assert!(!e.bound_sign_in.unwrap().live);
     }
 
     #[tokio::test]

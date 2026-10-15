@@ -169,6 +169,37 @@ impl AppState {
 }
 
 /// Whether two sign-ins are the same person: the same object id, or the same user principal (any case).
+/// An empty user principal, or the kit's "unknown" placeholder, never matches: then only the id counts.
 pub fn same_identity(a: &SignIn, b: &SignIn) -> bool {
-    a.id == b.id || a.user_principal.eq_ignore_ascii_case(&b.user_principal)
+    let known = |upn: &str| !upn.trim().is_empty() && !upn.trim().eq_ignore_ascii_case("unknown");
+    a.id == b.id
+        || (known(&a.user_principal) && a.user_principal.eq_ignore_ascii_case(&b.user_principal))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn si(id: &str, upn: &str) -> SignIn {
+        SignIn {
+            id: id.into(),
+            user_principal: upn.into(),
+            tenant_id: "t".into(),
+            display_name: None,
+            cloud: AzureCloud::Public,
+        }
+    }
+
+    #[test]
+    fn identity_matches_by_id_or_a_real_user_principal_only() {
+        assert!(same_identity(&si("a", "x"), &si("a", "y")));
+        assert!(same_identity(&si("a", "Ops@X.io"), &si("b", "ops@x.io")));
+        for placeholder in ["unknown", "UNKNOWN", "", "  "] {
+            assert!(
+                !same_identity(&si("a", placeholder), &si("b", placeholder)),
+                "{placeholder:?}"
+            );
+            assert!(same_identity(&si("a", placeholder), &si("a", placeholder)));
+        }
+    }
 }

@@ -26,7 +26,9 @@ const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : 
 interface MockSignIn { id: string; user_principal: string; tenant_id: string }
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
-const sameIdentity = (a: MockSignIn, b: MockSignIn) => a.id === b.id || same(a.user_principal, b.user_principal);
+/** As Rust `same_identity`: the id, or a real user principal (never empty or the kit's "unknown"). */
+const knownUpn = (upn: string) => upn.trim() !== "" && !same(upn.trim(), "unknown");
+const sameIdentity = (a: MockSignIn, b: MockSignIn) => a.id === b.id || (knownUpn(a.user_principal) && same(a.user_principal, b.user_principal));
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** As core's `normalize_tenant`: trimmed, a GUID lowercase, null when blank or the sign-in's own tenant. */
@@ -131,7 +133,8 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
           if (existing?.auth.kind === "entra") {
             const u = usable(existing.auth.sign_in_id, existing.auth.tenant);
             const now = u.usable ?? u.bound;
-            if (!resolved || (now && u.usable && !sameIdentity(now, resolved))) bound = u.bound;
+            // Another identity's binding stays, live or expired; only a gone record lets the current account in.
+            if (!resolved || (now && !sameIdentity(now, resolved))) bound = u.bound;
           }
           const id = bound?.id ?? (existing?.auth.kind === "entra" ? existing.auth.sign_in_id : "oid-1");
           auth = { kind: "entra", sign_in_id: id, tenant: normalizeTenant(d.auth.tenant, bound?.tenant_id ?? null) };

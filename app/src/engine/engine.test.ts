@@ -46,6 +46,16 @@ describe("commands over the mock transport", () => {
     expect(tenants.find((t) => t.tenant_id === "tenant-guest")?.sign_in_upn).toBe("ops@contoso.example");
   });
 
+  it("never moves a profile to another account when it is edited, as Rust does", async () => {
+    await commands.signIn(null, false); // ops@contoso.example (oid-1)
+    const p = await commands.profileSave({ name: "Ops ns", auth: { kind: "entra", namespace: "sb-ops" }, production: false, transport: "amqp", pinned_entities: [] });
+    expect(p.auth).toMatchObject({ sign_in_id: "oid-1" });
+    await commands.signIn(null, false); // another account (oid-2) is current now
+    const edited = await commands.profileSave({ id: p.id, name: "Ops ns", auth: { kind: "entra", namespace: "sb-ops" }, production: false, transport: "amqp", pinned_entities: [] });
+    expect(edited.auth).toMatchObject({ sign_in_id: "oid-1" });
+    expect(edited.bound_sign_in).toMatchObject({ id: "oid-1", same_account: false });
+  });
+
   it("lists the fixture namespace after connecting and emits activity", async () => {
     const log: string[] = [];
     await onActivity((e) => log.push(e.action));
