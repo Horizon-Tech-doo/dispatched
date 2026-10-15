@@ -472,6 +472,34 @@ impl ProfileStore {
             .transpose()
     }
 
+    /// Every remembered sign-in whose own tenant is `tenant_id` (ids compare without regard to case),
+    /// ordered by sign-in id. A guest-tenant sign-in is its own record, separate from the home one.
+    /// The caller picks the one whose refresh token still exists.
+    pub fn sign_ins_for_tenant(&self, tenant_id: &str) -> Result<Vec<SignIn>> {
+        let conn = self.conn.lock().expect("profile db poisoned");
+        let mut stmt = conn
+            .prepare("SELECT record FROM sign_ins ORDER BY id")
+            .map_err(|e| self.err(e))?;
+        let records = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| self.err(e))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| self.err(e))?;
+        let mut found = Vec::new();
+        for record in records {
+            let s: SignIn = serde_json::from_str(&record).map_err(|e| self.err(e))?;
+            if s.tenant_id.eq_ignore_ascii_case(tenant_id) {
+                found.push(s);
+            }
+        }
+        Ok(found)
+    }
+
+    /// The first remembered sign-in for `tenant_id`, if any (see [`Self::sign_ins_for_tenant`]).
+    pub fn sign_in_for_tenant(&self, tenant_id: &str) -> Result<Option<SignIn>> {
+        Ok(self.sign_ins_for_tenant(tenant_id)?.into_iter().next())
+    }
+
     /// Forget a sign-in record.
     pub fn remove_sign_in(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock().expect("profile db poisoned");
@@ -914,6 +942,42 @@ mod tests {
             display_name: None,
             cloud: horizon_azure_kit::AzureCloud::Public,
         }
+    }
+
+    #[test]
+    fn sign_ins_are_found_by_their_own_tenant() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        let mut home = sign_in("home-oid");
+        home.tenant_id = "tenant-home".into();
+        let mut guest = sign_in("guest-oid");
+        guest.tenant_id = "TENANT-GUEST".into();
+        let mut guest2 = sign_in("a-guest-oid");
+        guest2.tenant_id = "tenant-guest".into();
+        for s in [&home, &guest, &guest2] {
+            store.save_sign_in(s).unwrap();
+        }
+        assert_eq!(
+            store.sign_in_for_tenant("tenant-home").unwrap().unwrap().id,
+            "home-oid"
+        );
+        // Case-insensitive, and every match comes back in id order.
+        let ids: Vec<_> = store
+            .sign_ins_for_tenant("Tenant-Guest")
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(ids, ["a-guest-oid", "guest-oid"]);
+        assert_eq!(
+            store
+                .sign_in_for_tenant("tenant-guest")
+                .unwrap()
+                .unwrap()
+                .id,
+            "a-guest-oid"
+        );
+        assert!(store.sign_in_for_tenant("nobody").unwrap().is_none());
+        assert!(store.sign_ins_for_tenant("").unwrap().is_empty());
     }
 
     #[test]

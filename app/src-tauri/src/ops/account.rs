@@ -39,16 +39,35 @@ pub(crate) async fn wait_or_cancel(
     }
 }
 
+/// Whether a finished sign-in becomes the current one. Signing in without naming a tenant does, and
+/// so does signing in to the current sign-in's own tenant. Signing in to another tenant is saved but
+/// leaves the home sign-in current, so the account the user works under does not change.
+pub(crate) fn becomes_current(
+    requested: Option<&str>,
+    current: Option<&SignIn>,
+    new: &SignIn,
+) -> bool {
+    let Some(current) = current else { return true };
+    match requested {
+        None => true,
+        Some(t) => {
+            t.eq_ignore_ascii_case("organizations")
+                || new.id == current.id
+                || t.eq_ignore_ascii_case(&current.tenant_id)
+        }
+    }
+}
+
 pub async fn sign_in(
     state: &AppState,
     ev: &dyn Events,
     tenant: Option<String>,
     device_code: bool,
 ) -> Result<AccountView, CommandError> {
-    let tenant = tenant
+    let requested = tenant
         .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
-        .unwrap_or_else(|| "organizations".into());
+        .filter(|t| !t.is_empty());
+    let tenant = requested.clone().unwrap_or_else(|| "organizations".into());
     tracked(
         ev,
         "Sign-in failed",
@@ -82,9 +101,18 @@ pub async fn sign_in(
                 r.map_err(CommandError::from)
             };
             let s = wait_or_cancel(state, login).await?;
+            let current = state.current_sign_in()?;
             state.store.save_sign_in(&s)?;
-            state.store.set_current_sign_in(Some(&s.id))?;
-            Ok(AccountView::from(&s))
+            if becomes_current(requested.as_deref(), current.as_ref(), &s) {
+                state.store.set_current_sign_in(Some(&s.id))?;
+                Ok(AccountView::from(&s))
+            } else {
+                // A tenant's own sign-in: the account stays the one already current.
+                Ok(current
+                    .as_ref()
+                    .map(AccountView::from)
+                    .unwrap_or_else(|| AccountView::from(&s)))
+            }
         },
         |a| format!("Signed in as {}", a.user_principal),
     )
@@ -99,6 +127,41 @@ pub fn cancel(state: &AppState) {
 mod tests {
     use super::*;
     use crate::ops::test_util::state;
+
+    fn si(id: &str, tenant: &str) -> SignIn {
+        SignIn {
+            id: id.into(),
+            user_principal: format!("{id}@x.io"),
+            tenant_id: tenant.into(),
+            display_name: None,
+            cloud: horizon_azure_kit::AzureCloud::Public,
+        }
+    }
+
+    #[test]
+    fn only_a_sign_in_without_a_tenant_or_for_the_home_tenant_becomes_current() {
+        let home = si("home", "tenant-home");
+        let guest = si("guest", "tenant-guest");
+        // Nothing current yet: whatever signs in becomes current.
+        assert!(becomes_current(None, None, &home));
+        assert!(becomes_current(Some("tenant-guest"), None, &guest));
+        // No tenant named, or the default: the account the user picked becomes current.
+        assert!(becomes_current(
+            None,
+            Some(&home),
+            &si("other", "tenant-other")
+        ));
+        assert!(becomes_current(
+            Some("organizations"),
+            Some(&home),
+            &si("other", "x")
+        ));
+        // The home tenant again, in any case, or the same account.
+        assert!(becomes_current(Some("TENANT-HOME"), Some(&home), &home));
+        assert!(becomes_current(Some("whatever"), Some(&home), &home));
+        // Another tenant: saved, but the home sign-in stays current.
+        assert!(!becomes_current(Some("tenant-guest"), Some(&home), &guest));
+    }
 
     #[test]
     fn no_current_account_without_a_sign_in() {

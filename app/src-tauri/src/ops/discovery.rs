@@ -7,6 +7,7 @@ use crate::ops::tree::count;
 use crate::state::AppState;
 use dispatched_core::discovery::{DiscoveredNamespace, SkippedSubscription, discover_namespaces};
 use horizon_azure_kit::arm::{ArmClient, Tenant};
+use horizon_azure_kit::auth::SignIn;
 use horizon_azure_kit::{AzureCloud, KitError};
 use serde::Serialize;
 
@@ -87,7 +88,7 @@ pub fn token_error(e: KitError, guest: bool) -> CommandError {
     }
 }
 
-fn signed_in(state: &AppState) -> Result<horizon_azure_kit::auth::SignIn, CommandError> {
+fn signed_in(state: &AppState) -> Result<SignIn, CommandError> {
     state.current_sign_in()?.ok_or_else(|| {
         CommandError::new(
             "not_signed_in",
@@ -119,6 +120,22 @@ pub async fn list_tenants(
     .await
 }
 
+/// The sign-in to list `tenant` with, and the tenant to ask its token for: the tenant's own sign-in when
+/// one exists and still has its refresh token (no tenant to name, it is that sign-in's home), else the
+/// current sign-in asking for the tenant (which may need multi-factor sign-in).
+pub fn token_source(
+    state: &AppState,
+    current: &SignIn,
+    tenant: Option<&str>,
+) -> Result<(SignIn, Option<String>), CommandError> {
+    if let Some(t) = tenant
+        && let Some(own) = state.sign_in_for_tenant(t)?
+    {
+        return Ok((own, None));
+    }
+    Ok((current.clone(), tenant.map(str::to_string)))
+}
+
 /// Namespaces in one tenant (`None` is the home tenant).
 pub async fn discover(
     state: &AppState,
@@ -134,9 +151,10 @@ pub async fn discover(
         ev,
         &format!("Finding namespaces in {label} failed"),
         async {
+            let (who, ask_for) = token_source(state, &sign_in, tenant.as_deref())?;
             let token = state
                 .session
-                .token_for(&sign_in, tenant.as_deref(), &AzureCloud::Public.arm_scope())
+                .token_for(&who, ask_for.as_deref(), &AzureCloud::Public.arm_scope())
                 .await
                 .map_err(|e| token_error(e, tenant.is_some()))?;
             let found =
@@ -251,6 +269,70 @@ mod tests {
         // The raw token error is not echoed for the interactive case.
         let e = token_error(KitError::NotSignedIn("AADSTS50076 trace abc".into()), true);
         assert!(!e.message.contains("abc"));
+    }
+
+    /// The text the kit produces, copied from `horizon-azure-kit`: `auth::oauth::auth_error` builds
+    /// `NotSignedIn("sign in again ({error}: {first line of error_description})")` for interaction-required
+    /// answers (invalid_grant, interaction_required, AADSTS50076/50079/53003/700082), and
+    /// `EntraSession::token_for` prefixes it with `{user}: `. The app recognises guest-tenant MFA by it.
+    #[test]
+    fn the_kit_s_interaction_required_errors_are_recognised() {
+        let described = [
+            "interaction_required",
+            "invalid_grant",
+        ]
+        .map(|code| {
+            let first_line = "AADSTS50076: Due to a configuration change made by your administrator, you must use multi-factor authentication";
+            // as in auth_error ...
+            let from_oauth = format!("sign in again ({code}: {first_line})");
+            // ... and as wrapped by token_for.
+            format!("ops@contoso.example: {from_oauth}")
+        });
+        for text in described {
+            let e = token_error(KitError::NotSignedIn(text), true);
+            assert_eq!(e.kind, "mfa_required");
+        }
+        // The kit's other NotSignedIn texts are about the account, not the tenant.
+        for text in [
+            "ops@contoso.example signed out",
+            "ops@contoso.example was signed in with a different client; sign in again",
+        ] {
+            assert_eq!(
+                token_error(KitError::NotSignedIn(text.into()), true).kind,
+                "not_signed_in"
+            );
+        }
+        // AuthFailed carries the code in its text when it is not mapped to NotSignedIn.
+        assert_eq!(
+            token_error(
+                KitError::AuthFailed("invalid_request: AADSTS53003: blocked by policy".into()),
+                true
+            )
+            .kind,
+            "mfa_required"
+        );
+        // The wording the app matches stays in the kit's text.
+        assert!(wants_interaction("AADSTS50076"));
+    }
+
+    #[test]
+    fn a_tenant_with_its_own_sign_in_is_listed_with_it() {
+        use crate::ops::test_util::remember_sign_in;
+        let s = state();
+        let home = remember_sign_in(&s, "home-oid", "tenant-home", true);
+        remember_sign_in(&s, "guest-oid", "tenant-guest", true);
+        remember_sign_in(&s, "gone-oid", "tenant-gone", false);
+        // Home: the current sign-in, no tenant named.
+        let (who, ask) = token_source(&s, &home, None).unwrap();
+        assert_eq!((who.id.as_str(), ask), ("home-oid", None));
+        // A tenant with its own sign-in: that sign-in, at its own home tenant.
+        let (who, ask) = token_source(&s, &home, Some("tenant-guest")).unwrap();
+        assert_eq!((who.id.as_str(), ask), ("guest-oid", None));
+        // Its token is gone, or there is none: the current sign-in asks for the tenant.
+        for t in ["tenant-gone", "tenant-never"] {
+            let (who, ask) = token_source(&s, &home, Some(t)).unwrap();
+            assert_eq!((who.id.as_str(), ask.as_deref()), ("home-oid", Some(t)));
+        }
     }
 
     #[tokio::test]

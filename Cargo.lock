@@ -1131,6 +1131,7 @@ dependencies = [
  "dispatched-core",
  "horizon-azure-kit",
  "open",
+ "secrecy",
  "serde",
  "serde_json",
  "tauri",

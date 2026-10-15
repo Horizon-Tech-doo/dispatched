@@ -18,6 +18,34 @@ pub(crate) mod test_util {
     pub const CS: &str = "Endpoint=sb://myns.servicebus.windows.net/;SharedAccessKeyName=reader;SharedAccessKey=c2VjcmV0LWtleQ==";
     pub const SECRET_PART: &str = "c2VjcmV0LWtleQ";
 
+    /// Remember a sign-in made in `tenant` and, when `with_token`, give it a refresh token in the
+    /// (memory) keychain so the session counts it as signed in. Returns it.
+    pub fn remember_sign_in(
+        state: &AppState,
+        id: &str,
+        tenant: &str,
+        with_token: bool,
+    ) -> horizon_azure_kit::auth::SignIn {
+        let s = horizon_azure_kit::auth::SignIn {
+            id: id.into(),
+            user_principal: format!("{id}@x.io"),
+            tenant_id: tenant.into(),
+            display_name: None,
+            cloud: horizon_azure_kit::AzureCloud::Public,
+        };
+        state.store.save_sign_in(&s).unwrap();
+        if with_token {
+            state
+                .secrets
+                .put(
+                    &format!("{}:entra:{id}", dispatched_core::paths::KEY_PREFIX),
+                    &secrecy::SecretString::from("{}".to_string()),
+                )
+                .unwrap();
+        }
+        s
+    }
+
     pub fn state() -> AppState {
         AppState::new(
             ProfileStore::open_in_memory().unwrap(),

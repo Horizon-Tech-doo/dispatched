@@ -111,4 +111,15 @@ impl AppState {
             Ok(None)
         }
     }
+
+    /// A remembered sign-in made in `tenant_id` itself (a guest tenant's own sign-in), if its refresh
+    /// token still exists. The current sign-in is not consulted.
+    pub fn sign_in_for_tenant(&self, tenant_id: &str) -> Result<Option<SignIn>, CommandError> {
+        for s in self.store.sign_ins_for_tenant(tenant_id)? {
+            if self.session.is_signed_in(&s)? {
+                return Ok(Some(s));
+            }
+        }
+        Ok(None)
+    }
 }

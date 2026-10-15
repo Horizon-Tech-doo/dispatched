@@ -9,6 +9,20 @@ pub fn list(state: &AppState) -> Result<Vec<Profile>, CommandError> {
     Ok(state.store.list()?)
 }
 
+/// The sign-in a new Entra profile binds to: the one made in the profile's own tenant when there is one
+/// (a guest tenant), else the current sign-in.
+fn entra_sign_in(
+    state: &AppState,
+    tenant: Option<&str>,
+) -> Result<Option<horizon_azure_kit::auth::SignIn>, CommandError> {
+    if let Some(t) = tenant.map(str::trim).filter(|t| !t.is_empty())
+        && let Some(own) = state.sign_in_for_tenant(t)?
+    {
+        return Ok(Some(own));
+    }
+    state.current_sign_in()
+}
+
 pub async fn save(
     state: &AppState,
     ev: &dyn Events,
@@ -18,8 +32,10 @@ pub async fn save(
         ev,
         "Saving the connection failed",
         async {
-            let sign_in = match draft.auth {
-                dispatched_core::profiles::DraftAuth::Entra { .. } => state.current_sign_in()?,
+            let sign_in = match &draft.auth {
+                dispatched_core::profiles::DraftAuth::Entra { tenant, .. } => {
+                    entra_sign_in(state, tenant.as_deref())?
+                }
                 _ => None,
             };
             Ok(state
@@ -246,6 +262,67 @@ mod tests {
             e.message.contains("Orphan") && e.message.contains("connection string"),
             "{}",
             e.message
+        );
+    }
+
+    fn entra_draft(name: &str, tenant: Option<&str>) -> ProfileDraft {
+        ProfileDraft {
+            auth: DraftAuth::Entra {
+                namespace: "sb-ops".into(),
+                tenant: tenant.map(str::to_string),
+            },
+            ..draft(name, None)
+        }
+    }
+
+    #[tokio::test]
+    async fn an_entra_profile_binds_to_the_sign_in_made_in_its_own_tenant() {
+        use crate::ops::test_util::remember_sign_in;
+        let s = state();
+        let home = remember_sign_in(&s, "home-oid", "tenant-home", true);
+        s.store.set_current_sign_in(Some(&home.id)).unwrap();
+        remember_sign_in(&s, "guest-oid", "tenant-guest", true);
+        let ev = Recorder::default();
+        let guest = save(&s, &ev, entra_draft("Guest ns", Some("tenant-guest")))
+            .await
+            .unwrap();
+        assert_eq!(
+            guest.auth,
+            ProfileAuth::Entra {
+                sign_in_id: "guest-oid".into(),
+                tenant: Some("tenant-guest".into())
+            }
+        );
+        // No tenant, or one with no sign-in of its own: the current (home) sign-in.
+        let plain = save(&s, &ev, entra_draft("Home ns", None)).await.unwrap();
+        assert!(
+            matches!(&plain.auth, ProfileAuth::Entra { sign_in_id, .. } if sign_in_id == "home-oid")
+        );
+        let other = save(&s, &ev, entra_draft("Other ns", Some("tenant-other")))
+            .await
+            .unwrap();
+        assert!(
+            matches!(&other.auth, ProfileAuth::Entra { sign_in_id, tenant }
+            if sign_in_id == "home-oid" && tenant.as_deref() == Some("tenant-other"))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tenant_sign_in_without_its_token_is_not_used_for_a_profile() {
+        use crate::ops::test_util::remember_sign_in;
+        let s = state();
+        let home = remember_sign_in(&s, "home-oid", "tenant-home", true);
+        s.store.set_current_sign_in(Some(&home.id)).unwrap();
+        remember_sign_in(&s, "guest-oid", "tenant-guest", false);
+        let p = save(
+            &s,
+            &Recorder::default(),
+            entra_draft("Guest ns", Some("tenant-guest")),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(&p.auth, ProfileAuth::Entra { sign_in_id, .. } if sign_in_id == "home-oid")
         );
     }
 }
