@@ -107,7 +107,7 @@ impl Explorer {
     async fn count_once(&self, entity: &EntityPath, cap: u32) -> Result<EntityCounts> {
         let mut guard = self.connection().await?;
         let result = count_sub_queues(guard.as_mut().expect("opened"), entity, cap).await;
-        Self::settle(&mut guard, result).await
+        Self::drop_if_broken(&mut guard, result).await
     }
 
     /// Peek `view` of `entity` according to `opts`.
@@ -132,7 +132,7 @@ impl Explorer {
     ) -> Result<PeekPage> {
         let mut guard = self.connection().await?;
         let result = scan_messages(guard.as_mut().expect("opened"), address, view, opts).await;
-        Self::settle(&mut guard, result).await
+        Self::drop_if_broken(&mut guard, result).await
     }
 
     /// The last `opts.max` matches of `view` ("from the end"); see [`peek_tail`]. Locks the
@@ -161,7 +161,7 @@ impl Explorer {
         with_one_retry(|_| async {
             let mut guard = self.connection().await?;
             let result = peek_one(guard.as_mut().expect("opened"), &address, view, sequence).await;
-            Self::settle(&mut guard, result).await
+            Self::drop_if_broken(&mut guard, result).await
         })
         .await
     }
@@ -200,10 +200,8 @@ impl Explorer {
 
     /// Pass `result` through, dropping the cached connection after a connection-level failure
     /// (see [`retry_after`]) so the next attempt starts clean.
-    async fn settle<T>(guard: &mut Guard<'_>, result: Result<T>) -> Result<T> {
-        if result.as_ref().is_err_and(|e| retry_after(e, 0))
-            && let Some(conn) = guard.take()
-        {
+    async fn drop_if_broken<T>(guard: &mut Guard<'_>, result: Result<T>) -> Result<T> {
+        if let Some(conn) = take_if_broken(guard, &result) {
             let _ = conn.close().await;
         }
         result
@@ -219,7 +217,7 @@ impl Explorer {
 
 /// The explorer's cached connection as a [`PeekSource`] that holds the connection lock for one
 /// batch only, so other operations interleave between the batches of a long scan. A
-/// connection-level failure drops the cached connection, as `settle` does.
+/// connection-level failure drops the cached connection, as `drop_if_broken` does.
 struct PerBatch<'a> {
     explorer: &'a Explorer,
 }
@@ -238,7 +236,7 @@ impl PeekSource for PerBatch<'_> {
             .expect("opened")
             .peek_batch(address, from, max)
             .await;
-        Explorer::settle(&mut guard, result).await
+        Explorer::drop_if_broken(&mut guard, result).await
     }
 
     async fn peek_session_batch(
@@ -254,7 +252,17 @@ impl PeekSource for PerBatch<'_> {
             .expect("opened")
             .peek_session_batch(address, session_id, from, max)
             .await;
-        Explorer::settle(&mut guard, result).await
+        Explorer::drop_if_broken(&mut guard, result).await
+    }
+}
+
+/// Take the connection out of `slot` when `result` is a failure that means it is broken
+/// (see [`retry_after`]); answers from a healthy service, such as `Unsupported`, leave it.
+fn take_if_broken<C, T>(slot: &mut Option<C>, result: &Result<T>) -> Option<C> {
+    if result.as_ref().is_err_and(|e| retry_after(e, 0)) {
+        slot.take()
+    } else {
+        None
     }
 }
 
@@ -359,6 +367,24 @@ mod tests {
         assert_send(&e.peek_message(p, PeekView::Active, 1));
         assert_send(&e.collect_sequences(p, PeekView::Active, &[1], 10, None));
         assert_send(&e.peek(p, PeekView::Active, o));
+    }
+
+    #[test]
+    fn only_connection_level_failures_drop_the_cached_connection() {
+        let refused: Result<()> = Err(Error::Unsupported {
+            capability: "peek within a session".into(),
+        });
+        let mut slot = Some(1u8);
+        assert!(take_if_broken(&mut slot, &refused).is_none());
+        assert_eq!(
+            slot,
+            Some(1),
+            "an Unsupported session peek leaves the connection"
+        );
+        assert!(take_if_broken(&mut slot, &Ok(())).is_none());
+        let broken: Result<()> = Err(Error::Network("reset".into()));
+        assert_eq!(take_if_broken(&mut slot, &broken), Some(1));
+        assert_eq!(slot, None);
     }
 
     #[test]
