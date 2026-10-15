@@ -48,6 +48,26 @@ export interface ConnectionReport {
 export interface AccountView { id: string; user_principal: string; display_name: string | null; tenant_id: string }
 export interface SignInPrompt { kind: "browser" | "device-code"; url: string; user_code: string | null; message: string }
 
+/** A tenant the signed-in account can reach. `home` is the one the account signed in to; the list puts it first. */
+export interface TenantView { tenant_id: string; display_name: string | null; default_domain: string | null; home: boolean }
+
+export interface DiscoveredNamespace {
+  name: string;
+  /** Full host, like `sb-orders.servicebus.windows.net`. */
+  host: string;
+  resource_id: string;
+  subscription_id: string;
+  subscription_name: string;
+  tenant_id: string | null;
+  location: string | null;
+  tier: string | null;
+  /** Shared access keys are turned off: Entra ID only. */
+  local_auth_disabled: boolean;
+}
+
+export interface SkippedSubscription { subscription_id: string; subscription_name: string; reason: string }
+export interface DiscoveryView { namespaces: DiscoveredNamespace[]; skipped: SkippedSubscription[] }
+
 export interface ConnectionView {
   profile_id: string;
   profile_name: string;

@@ -67,7 +67,7 @@ fn wants_interaction(message: &str) -> bool {
 /// Map a token failure for `guest` (not the home tenant) to a command error. The kit reports
 /// "this tenant needs an interactive sign-in" as `NotSignedIn`; for the home tenant that really
 /// means signing in again, but for a guest tenant it means MFA or Conditional Access, which this
-/// version can't satisfy yet.
+/// needs its own interactive sign-in (`sign_in` with that tenant).
 pub fn token_error(e: KitError, guest: bool) -> CommandError {
     let interactive = guest
         && match &e {
@@ -80,7 +80,7 @@ pub fn token_error(e: KitError, guest: bool) -> CommandError {
     if interactive {
         CommandError::new(
             "mfa_required",
-            "This tenant requires multi-factor sign-in. Signing in to other tenants arrives in a later update.",
+            "This tenant requires multi-factor sign-in. Sign in to it to list its namespaces.",
         )
     } else {
         e.into()

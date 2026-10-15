@@ -2,7 +2,7 @@ import { CircleAlert, CircleCheck } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 import {
   useAccount, useDeleteProfile, useProfiles, useSaveProfile, useTestProfile,
-  type Check, type EngineError, type Profile, type ProfileDraft, type Transport,
+  type Check, type DiscoveredNamespace, type EngineError, type Profile, type ProfileDraft, type Transport,
 } from "@/engine";
 import {
   Button, Field, Input, LabelSwatch, Segmented, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Sheet, Textarea,
@@ -10,6 +10,7 @@ import {
 } from "@/ui";
 import { useShell } from "../context";
 import { placeError, sentence, type Errors } from "./profileErrors";
+import { NamespacePicker } from "./NamespacePicker";
 import { SignInPanel } from "./SignInPanel";
 
 type AuthKind = "connection-string" | "entra";
@@ -99,6 +100,11 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
   const del = useDeleteProfile();
   const test = useTestProfile();
   const account = useAccount();
+  // Signed in, a new Entra connection picks its namespace from a list; the typed fields stay one click away.
+  const picker = !editing && f.auth === "entra" && !!account.data;
+  const [manual, setManual] = useState(false);
+  const [browsedTenant, setBrowsedTenant] = useState<string | null>(null);
+  const showManual = !picker || manual || f.namespace.trim() !== "";
   const set = <K extends keyof Form>(k: K, v: Form[K]) => setF((x) => ({ ...x, [k]: v }));
   const dirty = editing && changed(f, saved);
   const hasProxy = f.proxy.trim() !== "";
@@ -114,9 +120,16 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
     if (!f.name.trim()) e.name = "Enter a name for this connection.";
     if (f.auth === "connection-string" && (!editing || f.replaceSecret) && !f.connectionString.trim())
       e.connectionString = "Paste the namespace's connection string.";
-    if (f.auth === "entra" && !f.namespace.trim()) e.namespace = "Enter the namespace name, like sb-orders, or its full host.";
+    if (f.auth === "entra" && !f.namespace.trim())
+      e.namespace = picker ? "Pick a namespace from the list, or enter one manually." : "Enter the namespace name, like sb-orders, or its full host.";
     if (f.auth === "entra" && !editing && !account.data) e.signIn = "Sign in with Entra ID first.";
     return e;
+  }
+
+  function pick(ns: DiscoveredNamespace, tenantId: string | null) {
+    setF((x) => ({ ...x, namespace: ns.host, tenant: tenantId ?? "", name: x.name.trim() ? x.name : ns.name }));
+    setErrors((e) => ({ ...e, namespace: undefined, name: undefined }));
+    setManual(true);
   }
 
   async function onSave() {
@@ -295,12 +308,45 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
                 <p className="m-0 text-11 text-muted">This connection uses a different account. Sign in with that account to use it.</p>
               )}
             </div>
-            <Field label="Namespace" hint="The namespace name, like sb-orders, or its full host." error={errors.namespace}>
-              {(ids) => <Input {...ids} value={f.namespace} onChange={(e) => set("namespace", e.target.value)} placeholder="sb-orders" />}
-            </Field>
-            <Field label="Tenant" hint="Only if the namespace is in another tenant than your account's home tenant.">
-              {(ids) => <Input {...ids} value={f.tenant} onChange={(e) => set("tenant", e.target.value)} placeholder="contoso.onmicrosoft.com" />}
-            </Field>
+            {picker && (
+              <NamespacePicker
+                key={account.data?.id}
+                selectedHost={f.namespace.trim().toLowerCase()}
+                onPick={pick}
+                onTenant={setBrowsedTenant}
+              />
+            )}
+            {showManual ? (
+              <>
+                <Field label="Namespace" hint="The namespace name, like sb-orders, or its full host." error={errors.namespace}>
+                  {(ids) => <Input {...ids} value={f.namespace} onChange={(e) => set("namespace", e.target.value)} placeholder="sb-orders" />}
+                </Field>
+                <Field label={picker ? "Tenant ID" : "Tenant"} hint="Only if the namespace is in another tenant than your account's home tenant.">
+                  {(ids) => <Input {...ids} value={f.tenant} onChange={(e) => set("tenant", e.target.value)} placeholder="contoso.onmicrosoft.com" />}
+                </Field>
+              </>
+            ) : (
+              <div className="flex flex-col items-start gap-1">
+                {errors.namespace && (
+                  <p className="m-0 flex items-start gap-1.5 text-12">
+                    <CircleAlert aria-hidden="true" className="mt-px size-3.5 shrink-0 text-accent" />
+                    <span>{errors.namespace}</span>
+                  </p>
+                )}
+                <Button
+                  size="sm"
+                  variant="quiet"
+                  className="-ml-1.5"
+                  onClick={() => {
+                    // The tenant being browsed is the one the typed namespace most likely belongs to.
+                    setF((x) => ({ ...x, tenant: browsedTenant ?? x.tenant }));
+                    setManual(true);
+                  }}
+                >
+                  Enter a namespace manually
+                </Button>
+              </div>
+            )}
           </>
         )}
 

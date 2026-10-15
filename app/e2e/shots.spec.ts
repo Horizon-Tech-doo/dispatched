@@ -232,6 +232,40 @@ export const shots: {
     viewportOnly: true,
   },
   {
+    name: "profile-entra-discover",
+    path: "/?scenario=empty",
+    ready: (p) => p.getByRole("heading", { name: "Add a connection" }),
+    prepare: async (page) => {
+      await page.getByRole("button", { name: "Sign in with Entra ID" }).click();
+      const sheet = page.getByRole("dialog", { name: "Add connection" });
+      await sheet.getByRole("button", { name: "Sign in with Entra ID" }).click();
+      await sheet.getByRole("listbox", { name: "Namespaces" }).waitFor();
+      await sheet.getByRole("option", { name: /sb-logistics-prod/ }).waitFor();
+      await sheet.getByLabel("Name", { exact: true }).fill("Logistics production");
+      await page.keyboard.press("Shift"); // keyboard modality so :focus-visible matches
+      await sheet.getByRole("listbox", { name: "Namespaces" }).focus();
+      await page.keyboard.press("ArrowDown");
+    },
+    holds: (p) => p.getByRole("dialog", { name: "Add connection" }),
+    viewportOnly: true,
+  },
+  {
+    name: "profile-entra-mfa",
+    path: "/?scenario=empty",
+    ready: (p) => p.getByRole("heading", { name: "Add a connection" }),
+    prepare: async (page) => {
+      await page.getByRole("button", { name: "Sign in with Entra ID" }).click();
+      const sheet = page.getByRole("dialog", { name: "Add connection" });
+      await sheet.getByRole("button", { name: "Sign in with Entra ID" }).click();
+      await sheet.getByRole("listbox", { name: "Namespaces" }).waitFor();
+      await sheet.getByRole("combobox", { name: "Tenant" }).click();
+      await page.getByRole("option", { name: "Northwind Traders" }).click();
+      await sheet.getByRole("button", { name: "Sign in to Northwind Traders" }).waitFor();
+    },
+    holds: (p) => p.getByRole("dialog", { name: "Add connection" }),
+    viewportOnly: true,
+  },
+  {
     name: "profile-edit",
     path: "/?scenario=default",
     ready: (p) => p.getByRole("list", { name: "Saved connections" }),

@@ -3,7 +3,10 @@ import type { AccountView, ActivityEntry, ConnectionView, EntityListing, Profile
 import { setUpdater } from "../updater";
 import * as fx from "./fixtures";
 
-export type Scenario = "default" | "empty" | "forbidden" | "missing-secret" | "network" | "sign-in-expired" | "many" | "many-topics";
+export type Scenario =
+  | "default" | "empty" | "forbidden" | "missing-secret" | "network" | "sign-in-expired" | "many" | "many-topics"
+  // Entra namespace discovery: nothing found, the listing fails, more namespaces than fit without a filter.
+  | "no-namespaces" | "discovery-error" | "many-namespaces";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -20,9 +23,11 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
   const listeners = new Map<string, Set<(p: unknown) => void>>();
   const calls: { cmd: string; args?: unknown }[] = [];
   const settings = new Map<string, unknown>(Object.entries(seed));
-  let profiles: Profile[] = scenario === "empty" ? [] : structuredClone(fx.profiles);
+  let profiles: Profile[] = scenario === "empty" || scenario === "no-namespaces" || scenario === "discovery-error" || scenario === "many-namespaces" ? [] : structuredClone(fx.profiles);
   let active: Profile | null = null;
   let account: AccountView | null = null;
+  /** Guest tenants the user has signed in to interactively (their MFA is satisfied). */
+  const signedInTenants = new Set<string>();
   let cancelSignIn: (() => void) | null = null;
 
   const emit = (event: string, payload: unknown) => listeners.get(event)?.forEach((cb) => cb(payload));
@@ -117,12 +122,47 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
           activity("Sign-in cancelled", started);
           throw new EngineError("cancelled", "Sign-in cancelled.");
         }
+        // Signing in to one tenant satisfies its MFA and leaves the account as it is.
+        const tenant = (args.tenant as string | null) || null;
+        if (account && tenant) {
+          signedInTenants.add(tenant);
+          activity(`Signed in as ${account.user_principal}`, started);
+          return account;
+        }
         // Signing in again while signed in picks the other fixture account.
         account = account?.id === "oid-1"
           ? { id: "oid-2", user_principal: "dev@fabrikam.example", display_name: "Dev", tenant_id: "tenant-2" }
           : { id: "oid-1", user_principal: "ops@contoso.example", display_name: "Ops", tenant_id: "tenant-1" };
         activity(`Signed in as ${account.user_principal}`, started);
         return account;
+      }
+      case "list_tenants": {
+        if (!account) throw new EngineError("not_signed_in", "Sign in with Entra ID to list your namespaces.");
+        const tenants = fx.tenantsFor(account.tenant_id);
+        activity(`Listed ${count(tenants.length, "tenant", "tenants")}`, started);
+        return tenants;
+      }
+      case "discover_namespaces": {
+        if (!account) throw new EngineError("not_signed_in", "Sign in with Entra ID to list your namespaces.");
+        const asked = (args.tenant as string | null) || null;
+        const home = asked === null || asked === account.tenant_id;
+        const label = home ? "the home tenant" : `tenant ${asked}`;
+        const fail = (e: EngineError, action = `Finding namespaces in ${label} failed`) => {
+          activity(action, started, e);
+          return e;
+        };
+        if (!home && asked === fx.GUEST_TENANT && !signedInTenants.has(asked))
+          throw fail(new EngineError("mfa_required", "This tenant requires multi-factor sign-in. Sign in to it to list its namespaces."));
+        if (scenario === "discovery-error") throw fail(new EngineError("network", "network error: connection reset by peer"));
+        const found = !home
+          ? asked === fx.GUEST_TENANT ? fx.guestDiscovery : { namespaces: [], skipped: [] }
+          : scenario === "no-namespaces"
+            ? { namespaces: [], skipped: [] }
+            : scenario === "many-namespaces"
+              ? fx.manyDiscoveryFor(account.tenant_id)
+              : fx.discoveryFor(account.tenant_id);
+        activity(`Found ${count(found.namespaces.length, "namespace", "namespaces")} in ${label}`, started);
+        return structuredClone(found);
       }
       case "sign_in_cancel":
         cancelSignIn?.();

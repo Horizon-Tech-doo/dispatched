@@ -1,6 +1,6 @@
 import { call } from "./ipc";
 import type {
-  AccountView, AppInfo, ConnectionReport, ConnectionView, EntityListing, Profile, ProfileDraft, SubscriptionInfo,
+  AccountView, AppInfo, ConnectionReport, ConnectionView, DiscoveryView, EntityListing, Profile, ProfileDraft, SubscriptionInfo, TenantView,
 } from "./types";
 
 export const appInfo = () => call<AppInfo>("app_info");
@@ -15,6 +15,11 @@ export const profileTest = (id: string) => call<ConnectionReport>("profile_test"
 export const accountCurrent = () => call<AccountView | null>("account_current");
 export const signIn = (tenant: string | null, deviceCode: boolean) => call<AccountView>("sign_in", { tenant, deviceCode });
 export const signInCancel = () => call<void>("sign_in_cancel");
+
+/** The signed-in account's tenants, home first. */
+export const listTenants = () => call<TenantView[]>("list_tenants");
+/** Service Bus namespaces in one tenant (`null` is the home tenant). A guest tenant that needs multi-factor sign-in fails with kind `mfa_required`. */
+export const discoverNamespaces = (tenant: string | null) => call<DiscoveryView>("discover_namespaces", { tenant });
 
 export const connect = (profileId: string) => call<ConnectionView>("connect", { profileId });
 export const disconnect = () => call<void>("disconnect");

@@ -9,6 +9,8 @@ export const keys = {
   account: ["account"] as const,
   entities: (profileId: string | null) => ["entities", profileId] as const,
   subscriptions: (profileId: string | null, topic: string) => ["subscriptions", profileId, topic] as const,
+  tenants: (accountId: string | null) => ["tenants", accountId] as const,
+  discovery: (accountId: string | null, tenantId: string | null) => ["discovery", accountId, tenantId] as const,
   setting: (key: string) => ["setting", key] as const,
 };
 
@@ -27,6 +29,26 @@ export function createQueryClient(): QueryClient {
 export const useAppInfo = () => useQuery({ queryKey: keys.appInfo, queryFn: commands.appInfo, staleTime: Infinity });
 export const useProfiles = () => useQuery({ queryKey: keys.profiles, queryFn: commands.profilesList });
 export const useAccount = () => useQuery({ queryKey: keys.account, queryFn: commands.accountCurrent });
+
+/** The tenants of the signed-in account; another account refetches. */
+export function useTenants(enabled = true) {
+  const accountId = useAccount().data?.id ?? null;
+  return useQuery({
+    queryKey: keys.tenants(accountId),
+    queryFn: commands.listTenants,
+    enabled: enabled && accountId !== null,
+  });
+}
+
+/** Service Bus namespaces in a tenant (`null` is the home tenant) of the signed-in account. */
+export function useDiscoveredNamespaces(tenantId: string | null, enabled = true) {
+  const accountId = useAccount().data?.id ?? null;
+  return useQuery({
+    queryKey: keys.discovery(accountId, tenantId),
+    queryFn: () => commands.discoverNamespaces(tenantId),
+    enabled: enabled && accountId !== null,
+  });
+}
 
 /** Queues and topics of the connected profile. `refetchMs` 0 disables auto-refresh. */
 export function useEntities(profileId: string | null, refetchMs = 0) {

@@ -1,4 +1,4 @@
-import type { EntityCounts, Profile, QueueInfo, SubscriptionInfo, TopicInfo } from "../types";
+import type { DiscoveredNamespace, DiscoveryView, EntityCounts, Profile, QueueInfo, SkippedSubscription, SubscriptionInfo, TenantView, TopicInfo } from "../types";
 
 export const counts = (active: number, dead_letter: number, scheduled = 0): EntityCounts => ({
   active, dead_letter, scheduled, transfer: 0, transfer_dead_letter: 0, approximate: false, truncated: false,
@@ -46,3 +46,63 @@ export const subscriptions: Record<string, SubscriptionInfo[]> = {
 export const manyQueues: QueueInfo[] = Array.from({ length: 2000 }, (_, i) =>
   q(`queue-${String(i).padStart(4, "0")}`, counts((i * 37) % 900, i % 17 === 0 ? (i % 50) + 1 : 0)),
 );
+
+/** The tenant a guest account (not the signed-in one's home) belongs to; it asks for multi-factor sign-in. */
+export const GUEST_TENANT = "tenant-guest";
+
+/** The signed-in account's tenants, home first. The mock accounts are `tenant-1` and `tenant-2`. */
+export const tenantsFor = (homeTenantId: string): TenantView[] => [
+  homeTenantId === "tenant-2"
+    ? { tenant_id: homeTenantId, display_name: "Fabrikam Dev", default_domain: "fabrikamdev.onmicrosoft.com", home: true }
+    : { tenant_id: homeTenantId, display_name: "Horizon Tech", default_domain: "horizontech.onmicrosoft.com", home: true },
+  { tenant_id: GUEST_TENANT, display_name: "Northwind Traders", default_domain: "northwindtraders.onmicrosoft.com", home: false },
+];
+
+const ns = (
+  name: string, tenantId: string, subscription: string, location: string, tier: string, extra: Partial<DiscoveredNamespace> = {},
+): DiscoveredNamespace => ({
+  name,
+  host: `${name}.servicebus.windows.net`,
+  resource_id: `/subscriptions/${subscription.toLowerCase().replace(/\W+/g, "-")}/resourceGroups/rg-${name}/providers/Microsoft.ServiceBus/namespaces/${name}`,
+  subscription_id: subscription.toLowerCase().replace(/\W+/g, "-"),
+  subscription_name: subscription,
+  tenant_id: tenantId,
+  location,
+  tier,
+  local_auth_disabled: false,
+  ...extra,
+});
+
+const skippedLegacy: SkippedSubscription = {
+  subscription_id: "legacy-sandbox",
+  subscription_name: "Legacy sandbox",
+  reason: "access denied: you need Reader on this subscription to list its namespaces",
+};
+
+export const discoveryFor = (homeTenantId: string): DiscoveryView => ({
+  namespaces: [
+    ns("sb-finance-events", homeTenantId, "Finance shared", "northeurope", "Standard", { local_auth_disabled: true }),
+    ns("sb-logistics-dev", homeTenantId, "Logistics dev", "westeurope", "Standard"),
+    ns("sb-logistics-prod", homeTenantId, "Logistics prod", "westeurope", "Premium"),
+    ns("sb-partner-gateway", homeTenantId, "Partner integrations", "northeurope", "Standard"),
+  ],
+  skipped: [skippedLegacy],
+});
+
+/** Enough namespaces to need the filter. */
+export const manyDiscoveryFor = (homeTenantId: string): DiscoveryView => ({
+  namespaces: [
+    ...discoveryFor(homeTenantId).namespaces,
+    ...Array.from({ length: 8 }, (_, i) => ns(`sb-team-${String(i + 1).padStart(2, "0")}`, homeTenantId, `Team ${i + 1}`, i % 2 ? "westeurope" : "northeurope", "Standard")),
+  ].sort((a, b) => a.name.localeCompare(b.name)),
+  skipped: [],
+});
+
+/** What the guest tenant lists once the user has signed in to it. */
+export const guestDiscovery: DiscoveryView = {
+  namespaces: [
+    ns("nw-orders", GUEST_TENANT, "Northwind production", "westeurope", "Premium"),
+    ns("nw-telemetry", GUEST_TENANT, "Northwind shared", "uksouth", "Standard"),
+  ],
+  skipped: [],
+};
