@@ -246,7 +246,7 @@ Dropdown/context/select content: `side`, 1px line, 3px radius, `shadow-float`, m
 
 ## Motion
 
-Only sheets, the drawer and popovers move. Sheet: x 24px + opacity, 150ms, `cubic-bezier(0.16, 1, 0.3, 1)` (ease-out-expo). No transitions on hover, no loading shimmer, no skeleton animation, no layout animation. `prefers-reduced-motion` collapses CSS animations to 0.01ms and transitions to 0s (never a token transition: `transition-property` defaults to `all`, so it would animate every style change), and the sheet drops the slide (opacity only).
+Only sheets, the drawer and popovers move. Sheet: x 24px + opacity, 150ms, `cubic-bezier(0.16, 1, 0.3, 1)` (ease-out-expo). No transitions on hover, no loading shimmer, no skeleton animation, no layout animation. `prefers-reduced-motion` collapses CSS animations to 0.01ms and transitions to 0s (never a token transition: `transition-property` defaults to `all`, so it would animate every style change), and the sheet appears and leaves at once (no slide and no fade: its motion runs with duration 0).
 
 ## Copy voice
 

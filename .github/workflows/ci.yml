@@ -26,9 +26,9 @@ jobs:
         with: { workspaces: "dispatched -> target" }
       - if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --all --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo clippy -p dispatched-core --all-targets --features test-support -- -D warnings
-      - run: cargo test
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo clippy -p dispatched-core --all-targets --features test-support --locked -- -D warnings
+      - run: cargo test --locked
   app:
     runs-on: ubuntu-latest
     steps:
@@ -48,7 +48,7 @@ jobs:
       # The Tauri crate embeds app/dist at compile time, so build the frontend first.
       - run: npm ci && npm run build
         working-directory: dispatched/app
-      - run: cargo clippy -p dispatched-app -- -D warnings && cargo test -p dispatched-app
+      - run: cargo clippy -p dispatched-app --locked -- -D warnings && cargo test -p dispatched-app --locked
   emulator:
     runs-on: ubuntu-latest
     steps:
@@ -65,7 +65,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          DISPATCHED_EMULATOR=1 cargo test -p dispatched-core --features test-support --test emulator_m0 --test emulator_m1 -- --nocapture 2>&1 | tee emulator-gate.log
+          DISPATCHED_EMULATOR=1 cargo test --locked -p dispatched-core --features test-support --test emulator_m0 --test emulator_m1 -- --nocapture 2>&1 | tee emulator-gate.log
           # The gate tests print "skipped: ..." and pass when the emulator is
           # not enabled; that must never count as a green gate.
           if grep -q 'skipped:' emulator-gate.log; then
