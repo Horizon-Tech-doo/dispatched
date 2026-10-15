@@ -80,7 +80,7 @@ use crate::ops::browse::{PeekPageView, PeekRequest};
 use crate::ops::connection::ConnectionView;
 use crate::ops::dashboard::DashboardView;
 use crate::ops::discovery::{DiscoveryView, TenantView};
-use crate::ops::export::{ExportRequest, JobStarted};
+use crate::ops::export::{ExportRequest, JobStarted, PickedPath};
 use crate::ops::tree::EntityListing;
 use dispatched_core::{
     EntityDetails, EntityKind, FilterIssue, FilterSpec, MessageDetail, PeekView, RuleInfo,
@@ -236,17 +236,19 @@ pub async fn dashboard(
     ops::dashboard::dashboard(&state, &TauriEvents(app), &profile_id).await
 }
 
-/// The native save dialog for an export, with a suggested file name. Its "replace?" question is
-/// the user's answer for that path only: Rust remembers the returned path, and only that exact
-/// path, once, may be replaced by the next `export_start` (see `authorize_overwrite`).
+/// The native save dialog for an export, with a suggested file name, as a sheet on the calling
+/// window. The chosen path stays in Rust under a one-time pick id; `export_start` takes the id,
+/// so an export can only write where the user chose (the dialog asked "replace?" there).
+/// Returns `None` when the dialog was cancelled.
 #[tauri::command]
 pub async fn pick_export_path(
     app: AppHandle,
+    window: tauri::WebviewWindow,
     state: State<'_, AppState>,
     entity: String,
     view: PeekView,
     format: String,
-) -> Result<Option<String>, CommandError> {
+) -> Result<Option<PickedPath>, CommandError> {
     use tauri_plugin_dialog::DialogExt;
     // `time` can't read the local offset in a multi-threaded process on Unix, so the name is UTC.
     let name =
@@ -259,15 +261,16 @@ pub async fn pick_export_path(
     let picked = tauri::async_runtime::spawn_blocking(move || {
         app.dialog()
             .file()
+            .set_parent(&window)
             .set_file_name(&name)
             .add_filter(label, &[ext])
             .blocking_save_file()
     })
     .await
     .map_err(|e| CommandError::new("io", format!("The save dialog failed: {e}")))?;
-    let path = picked.and_then(|p| p.into_path().ok());
-    state.jobs.set_picked(path.clone());
-    Ok(path.map(|p| p.display().to_string()))
+    Ok(picked
+        .and_then(|p| p.into_path().ok())
+        .map(|path| ops::export::remember_pick(&state.jobs, path)))
 }
 
 #[tauri::command]
@@ -277,6 +280,9 @@ pub async fn export_start(
     profile_id: String,
     request: ExportRequest,
 ) -> Result<JobStarted, CommandError> {
+    // Held while the job is registered, so a connect or disconnect that closes this explorer
+    // either comes first (then `active_for` refuses) or cancels the job.
+    let _serial = state.connect_lock.lock().await;
     let active = state.active_for(&profile_id).await?;
     ops::export::start(
         &state.jobs,
@@ -291,7 +297,11 @@ pub fn job_cancel(state: State<'_, AppState>, id: String) -> bool {
     state.jobs.cancel(&id)
 }
 
+/// Show a finished export's file in the file manager (runs a short-lived process).
 #[tauri::command]
-pub fn job_reveal(state: State<'_, AppState>, id: String) -> Result<(), CommandError> {
-    ops::export::reveal(&state.jobs, &id)
+pub async fn job_reveal(state: State<'_, AppState>, id: String) -> Result<(), CommandError> {
+    let jobs = state.jobs.clone();
+    tauri::async_runtime::spawn_blocking(move || ops::export::reveal(&jobs, &id))
+        .await
+        .map_err(|e| CommandError::new("io", format!("Couldn't show the file: {e}")))?
 }

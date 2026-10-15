@@ -14,19 +14,27 @@ struct Entry {
 #[derive(Default)]
 pub struct Jobs {
     inner: Mutex<HashMap<String, Entry>>,
-    /// The path the native save dialog returned last; the user answered its "replace?" there.
-    picked: Mutex<Option<PathBuf>>,
+    /// Paths the native save dialog returned, by one-time pick id. Exports write only to these:
+    /// the webview names a pick, never a path, and the dialog has asked "replace?" for each.
+    picks: Mutex<HashMap<String, PathBuf>>,
 }
 
 impl Jobs {
-    /// Remember what the save dialog returned (`None` when it was cancelled).
-    pub fn set_picked(&self, path: Option<PathBuf>) {
-        *self.picked.lock().unwrap() = path;
+    /// Remember a path the save dialog returned. Returns its pick id.
+    pub fn pick(&self, path: PathBuf) -> String {
+        let id = format!("pick-{}", uuid::Uuid::new_v4().simple());
+        self.picks.lock().unwrap().insert(id.clone(), path);
+        id
     }
 
-    /// The last picked path, once: a pick authorises one export.
-    pub fn take_picked(&self) -> Option<PathBuf> {
-        self.picked.lock().unwrap().take()
+    /// The picked path, once: a pick authorises one export.
+    pub fn take_pick(&self, id: &str) -> Option<PathBuf> {
+        self.picks.lock().unwrap().remove(id)
+    }
+
+    /// Put back a pick that was taken for an export that did not start.
+    pub fn restore_pick(&self, id: &str, path: PathBuf) {
+        self.picks.lock().unwrap().insert(id.to_string(), path);
     }
 
     /// A new job id and its cancel token.
@@ -58,6 +66,15 @@ impl Jobs {
             }
             None => false,
         }
+    }
+
+    /// Ask every running job to stop (their connection is closing). Returns how many.
+    pub fn cancel_running(&self) -> usize {
+        let inner = self.inner.lock().unwrap();
+        let running: Vec<&CancellationToken> =
+            inner.values().filter_map(|e| e.cancel.as_ref()).collect();
+        running.iter().for_each(|t| t.cancel());
+        running.len()
     }
 
     /// Mark a job finished, keeping the file it wrote.
@@ -96,11 +113,29 @@ mod tests {
     }
 
     #[test]
-    fn a_picked_path_is_taken_once() {
+    fn a_pick_is_taken_once_and_can_be_put_back() {
         let jobs = Jobs::default();
-        assert!(jobs.take_picked().is_none());
-        jobs.set_picked(Some("/tmp/a.json".into()));
-        assert_eq!(jobs.take_picked().unwrap().to_string_lossy(), "/tmp/a.json");
-        assert!(jobs.take_picked().is_none());
+        assert!(jobs.take_pick("pick-none").is_none());
+        let a = jobs.pick("/tmp/a.json".into());
+        let b = jobs.pick("/tmp/b.json".into());
+        assert!(a.starts_with("pick-") && a != b);
+        assert_eq!(jobs.take_pick(&a).unwrap().to_string_lossy(), "/tmp/a.json");
+        assert!(jobs.take_pick(&a).is_none(), "spent");
+        jobs.restore_pick(&a, "/tmp/a.json".into());
+        assert_eq!(jobs.take_pick(&a).unwrap().to_string_lossy(), "/tmp/a.json");
+        assert_eq!(jobs.take_pick(&b).unwrap().to_string_lossy(), "/tmp/b.json");
+    }
+
+    #[test]
+    fn cancel_running_stops_every_running_job_only() {
+        let jobs = Jobs::default();
+        let (a, ta) = jobs.start();
+        let (b, tb) = jobs.start();
+        let (done, td) = jobs.start();
+        jobs.finish(&done, Some("/tmp/x.json".into()));
+        assert_eq!(jobs.cancel_running(), 2);
+        assert!(ta.is_cancelled() && tb.is_cancelled() && !td.is_cancelled());
+        assert_eq!(jobs.output(&done).unwrap().to_string_lossy(), "/tmp/x.json");
+        let _ = (a, b);
     }
 }

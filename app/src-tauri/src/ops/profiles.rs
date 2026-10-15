@@ -173,7 +173,7 @@ pub async fn delete(state: &AppState, ev: &dyn Events, id: &str) -> Result<(), C
                 }
             };
             if let Some(old) = old {
-                old.explorer.close().await;
+                state.close(old).await;
             }
             state.store.delete(&profile.name, state.secrets.as_ref())?;
             state

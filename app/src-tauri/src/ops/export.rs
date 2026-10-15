@@ -11,7 +11,8 @@ use dispatched_core::{
 };
 use horizon_azure_kit::safety::CancellationToken;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Most messages examined to find selected sequence numbers again.
@@ -33,17 +34,26 @@ pub enum ExportScope {
     },
 }
 
+/// What to export and where. `pick` names a path the save dialog returned (`pick_export_path`);
+/// the webview never sends a path, so it can only make Rust write where the user chose.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExportRequest {
     pub entity: String,
     pub view: PeekView,
     pub scope: ExportScope,
     pub format: String,
-    pub path: String,
-    #[serde(default)]
-    pub overwrite: bool,
+    pub pick: String,
     #[serde(default)]
     pub total_hint: Option<u64>,
+}
+
+/// A path the save dialog returned. `name` and `dir` are for display only.
+#[derive(Debug, Serialize)]
+pub struct PickedPath {
+    pub pick: String,
+    pub name: String,
+    pub dir: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -123,7 +133,7 @@ impl ExportSource for Explorer {
     }
 }
 
-fn file_name(path: &std::path::Path) -> String {
+fn file_name(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())
@@ -182,11 +192,11 @@ pub fn suggested_file_name(
     )
 }
 
-/// Validate a request and open the export file (fails early when it exists and may not be replaced).
-pub fn plan(req: ExportRequest) -> Result<ExportPlan, CommandError> {
+/// Validate a request and open the export file at `path`, which the save dialog returned. A file
+/// already there is replaced when the export finishes: the dialog asked "replace?" for it.
+pub fn plan(req: ExportRequest, path: PathBuf) -> Result<ExportPlan, CommandError> {
     let entity = EntityPath::parse(&req.entity)?;
     let format = ExportFormat::parse(&req.format)?;
-    let path = PathBuf::from(&req.path);
     if !path.is_absolute() {
         return Err(CommandError::new(
             "invalid",
@@ -223,7 +233,7 @@ pub fn plan(req: ExportRequest) -> Result<ExportPlan, CommandError> {
             (m, h) => m.or(h),
         },
     };
-    let file = FileExport::create(&path, format, req.overwrite)?;
+    let file = FileExport::create(&path, format, true)?;
     let title = format!(
         "Export {entity} ({}) to {}",
         req.view.as_str(),
@@ -312,6 +322,10 @@ pub async fn run(
             }
         }
     }
+    // A cancel that arrived during the last read still wins: no file is put in place.
+    if cancel.is_cancelled() {
+        return Err(CommandError::new("cancelled", "Export cancelled."));
+    }
     let written = file.finish()?;
     Ok(ExportSummary {
         written,
@@ -324,13 +338,18 @@ pub async fn run(
     })
 }
 
-/// `overwrite` comes from the webview, which must not be able to replace any file it names
-/// (injected script could). It is honoured only for the exact path the native save dialog
-/// returned last, where the user answered "replace?"; every other path is written only when
-/// nothing is there. Taking the pick also spends it.
-pub fn authorize_overwrite(jobs: &Jobs, req: &mut ExportRequest) {
-    let picked = jobs.take_picked();
-    req.overwrite = req.overwrite && picked.is_some_and(|p| p == std::path::Path::new(&req.path));
+/// Remember a path the save dialog returned and describe it for display.
+pub fn remember_pick(jobs: &Jobs, path: PathBuf) -> PickedPath {
+    let name = file_name(&path);
+    let dir = path
+        .parent()
+        .map(|d| d.display().to_string())
+        .unwrap_or_default();
+    PickedPath {
+        pick: jobs.pick(path),
+        name,
+        dir,
+    }
 }
 
 /// Validate, then run the export in the background. Returns at once with the job id.
@@ -338,10 +357,21 @@ pub fn start(
     jobs: &Arc<Jobs>,
     source: Arc<dyn ExportSource>,
     ev: Arc<dyn Events>,
-    mut req: ExportRequest,
+    req: ExportRequest,
 ) -> Result<JobStarted, CommandError> {
-    authorize_overwrite(jobs, &mut req);
-    let plan = plan(req)?;
+    let pick = req.pick.clone();
+    let path = jobs
+        .take_pick(&pick)
+        .ok_or_else(|| CommandError::new("invalid", "Choose where to save the export."))?;
+    // Spent only when the export starts: a request refused here (a filter that does not
+    // compile) can be fixed and sent again with the same pick.
+    let plan = match plan(req, path.clone()) {
+        Ok(plan) => plan,
+        Err(e) => {
+            jobs.restore_pick(&pick, path);
+            return Err(e);
+        }
+    };
     let (id, cancel) = jobs.start();
     ev.job(JobEvent::Started {
         id: id.clone(),
@@ -385,17 +415,44 @@ pub fn start(
     Ok(JobStarted { id })
 }
 
-/// Open the folder holding a finished export's file.
+/// The program and arguments that show `file` in the platform's file manager: selected in
+/// Finder (`open -R`) or Explorer (`/select,`); elsewhere its folder is opened.
+pub fn reveal_command(file: &Path, os: &str) -> (&'static str, Vec<OsString>) {
+    match os {
+        "macos" => ("open", vec!["-R".into(), file.into()]),
+        "windows" => ("explorer", vec!["/select,".into(), file.into()]),
+        _ => (
+            "xdg-open",
+            vec![file.parent().unwrap_or(file).as_os_str().to_owned()],
+        ),
+    }
+}
+
+/// Show a finished export's file in the file manager. Only files this app wrote can be shown.
 pub fn reveal(jobs: &Jobs, id: &str) -> Result<(), CommandError> {
-    let path = jobs
+    let file = jobs
         .output(id)
         .ok_or_else(|| CommandError::new("not_found", "That export has no file to show."))?;
-    let folder = path
-        .parent()
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or(path);
-    open::that(&folder)
-        .map_err(|e| CommandError::new("io", format!("Couldn't open the folder: {e}")))
+    if !file.is_file() {
+        return Err(CommandError::new(
+            "not_found",
+            "The exported file is no longer there. It was moved or deleted.",
+        ));
+    }
+    let os = std::env::consts::OS;
+    let (program, args) = reveal_command(&file, os);
+    let status = std::process::Command::new(program)
+        .args(args)
+        .status()
+        .map_err(|e| CommandError::new("io", format!("Couldn't show the file: {e}")))?;
+    // Explorer exits with 1 even when it showed the file.
+    if !status.success() && os != "windows" {
+        return Err(CommandError::new(
+            "io",
+            format!("Couldn't show the file: {program} exited with {status}."),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -403,6 +460,7 @@ mod tests {
     use super::*;
     use crate::events::Recorder;
     use dispatched_core::{MessageBody, MessageState, PeekPage, PeekedMessage};
+    use std::path::Path;
     use std::sync::Mutex;
 
     fn msg(seq: i64) -> PeekedMessage {
@@ -434,6 +492,14 @@ mod tests {
         n: i64,
         calls: Mutex<u32>,
         cancel_after: Option<(u32, CancellationToken)>,
+    }
+
+    fn fake(n: i64) -> Fake {
+        Fake {
+            n,
+            calls: Mutex::new(0),
+            cancel_after: None,
+        }
     }
 
     #[async_trait::async_trait]
@@ -471,8 +537,12 @@ mod tests {
             _v: PeekView,
             seqs: &[i64],
             _b: u64,
-            _c: &CancellationToken,
+            c: &CancellationToken,
         ) -> dispatched_core::Result<SequenceCollection> {
+            if let Some((_, token)) = &self.cancel_after {
+                token.cancel();
+            }
+            let _ = c;
             let (found, missing): (Vec<i64>, Vec<i64>) = seqs.iter().partition(|s| **s <= self.n);
             Ok(SequenceCollection {
                 messages: found.into_iter().map(msg).collect(),
@@ -482,37 +552,36 @@ mod tests {
         }
     }
 
-    fn request(dir: &std::path::Path, scope: ExportScope) -> ExportRequest {
+    fn all() -> ExportScope {
+        ExportScope::All {
+            filter: Default::default(),
+            from_sequence: 0,
+            max: None,
+        }
+    }
+
+    fn request(pick: &str, scope: ExportScope) -> ExportRequest {
         ExportRequest {
             entity: "orders".into(),
             view: PeekView::DeadLetter,
             scope,
             format: "json".into(),
-            path: dir.join("out.json").to_string_lossy().into_owned(),
-            overwrite: false,
+            pick: pick.into(),
             total_hint: Some(5),
         }
+    }
+
+    /// Plan an export of `scope` to `dir/out.json`, as if the dialog had returned it.
+    fn plan_in(dir: &Path, scope: ExportScope) -> Result<ExportPlan, CommandError> {
+        plan(request("pick-x", scope), dir.join("out.json"))
     }
 
     #[tokio::test]
     async fn exports_every_page_with_progress_and_a_summary() {
         let dir = tempfile::tempdir().unwrap();
         let ev = Recorder::default();
-        let plan = plan(request(
-            dir.path(),
-            ExportScope::All {
-                filter: Default::default(),
-                from_sequence: 0,
-                max: None,
-            },
-        ))
-        .unwrap();
-        let fake = Fake {
-            n: 5,
-            calls: Mutex::new(0),
-            cancel_after: None,
-        };
-        let s = run(plan, &fake, &CancellationToken::new(), &ev, "j1")
+        let plan = plan_in(dir.path(), all()).unwrap();
+        let s = run(plan, &fake(5), &CancellationToken::new(), &ev, "j1")
             .await
             .unwrap();
         assert_eq!(s.written, 5);
@@ -536,15 +605,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ev = Recorder::default();
         let token = CancellationToken::new();
-        let plan = plan(request(
-            dir.path(),
-            ExportScope::All {
-                filter: Default::default(),
-                from_sequence: 0,
-                max: None,
-            },
-        ))
-        .unwrap();
+        let plan = plan_in(dir.path(), all()).unwrap();
         let fake = Fake {
             n: 100,
             calls: Mutex::new(0),
@@ -561,22 +622,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_cancel_during_the_last_page_still_leaves_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let ev = Recorder::default();
+        let token = CancellationToken::new();
+        // Three messages are two pages; the cancel arrives while the second (last) one is read.
+        let fake = Fake {
+            n: 3,
+            calls: Mutex::new(0),
+            cancel_after: Some((2, token.clone())),
+        };
+        let e = run(
+            plan_in(dir.path(), all()).unwrap(),
+            &fake,
+            &token,
+            &ev,
+            "j1",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            (e.kind, e.message.as_str()),
+            ("cancelled", "Export cancelled.")
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        // The same for selected messages.
+        let token = CancellationToken::new();
+        let fake = Fake {
+            n: 3,
+            calls: Mutex::new(0),
+            cancel_after: Some((1, token.clone())),
+        };
+        let plan = plan_in(
+            dir.path(),
+            ExportScope::Selected {
+                sequences: vec![1, 2],
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            run(plan, &fake, &token, &ev, "j2").await.unwrap_err().kind,
+            "cancelled"
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
     async fn selected_export_summary_counts_missing_messages() {
         let dir = tempfile::tempdir().unwrap();
         let ev = Recorder::default();
-        let plan = plan(request(
+        let plan = plan_in(
             dir.path(),
             ExportScope::Selected {
                 sequences: vec![1, 2, 9],
             },
-        ))
+        )
         .unwrap();
-        let fake = Fake {
-            n: 5,
-            calls: Mutex::new(0),
-            cancel_after: None,
-        };
-        let s = run(plan, &fake, &CancellationToken::new(), &ev, "j1")
+        let s = run(plan, &fake(5), &CancellationToken::new(), &ev, "j1")
             .await
             .unwrap();
         assert_eq!(s.written, 2);
@@ -589,98 +691,90 @@ mod tests {
     #[test]
     fn plan_refuses_bad_input_before_any_work() {
         let dir = tempfile::tempdir().unwrap();
-        let mut r = request(
-            dir.path(),
-            ExportScope::All {
-                filter: Default::default(),
-                from_sequence: 0,
-                max: None,
-            },
-        );
+        let mut r = request("p", all());
         r.format = "csv".into();
-        assert_eq!(plan(r).unwrap_err().kind, "invalid");
-        let mut r = request(
-            dir.path(),
-            ExportScope::All {
-                filter: Default::default(),
-                from_sequence: 0,
-                max: None,
-            },
+        assert_eq!(
+            plan(r, dir.path().join("out.json")).unwrap_err().kind,
+            "invalid"
         );
-        r.path = "relative.json".into();
-        assert_eq!(plan(r).unwrap_err().kind, "invalid");
-        let r = request(dir.path(), ExportScope::Selected { sequences: vec![] });
-        assert_eq!(plan(r).unwrap_err().kind, "invalid");
-        std::fs::write(dir.path().join("out.json"), "x").unwrap();
-        let r = request(
-            dir.path(),
-            ExportScope::All {
-                filter: Default::default(),
-                from_sequence: 0,
-                max: None,
-            },
+        assert_eq!(
+            plan(request("p", all()), "relative.json".into())
+                .unwrap_err()
+                .kind,
+            "invalid"
         );
-        assert!(plan(r).unwrap_err().message.contains("already exists"));
+        assert_eq!(
+            plan_in(dir.path(), ExportScope::Selected { sequences: vec![] })
+                .unwrap_err()
+                .kind,
+            "invalid"
+        );
+        let e = plan(request("p", all()), dir.path().to_path_buf()).unwrap_err();
+        assert!(e.message.contains("is a directory"), "{}", e.message);
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "nothing created"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_picked_file_that_exists_is_replaced() {
+        // The save dialog asked "replace?" for it.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("out.json"), "old").unwrap();
+        let s = run(
+            plan_in(dir.path(), all()).unwrap(),
+            &fake(1),
+            &CancellationToken::new(),
+            &Recorder::default(),
+            "j1",
+        )
+        .await
+        .unwrap();
+        assert_eq!(s.written, 1);
+        assert!(
+            std::fs::read_to_string(dir.path().join("out.json"))
+                .unwrap()
+                .contains("dispatched.message/v1")
+        );
     }
 
     #[test]
-    fn overwrite_is_allowed_only_for_the_path_the_dialog_returned() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("out.json");
-        std::fs::write(&target, "keep").unwrap();
-        let all = || ExportScope::All {
-            filter: Default::default(),
-            from_sequence: 0,
-            max: None,
-        };
-        let asking = || {
-            let mut r = request(dir.path(), all());
-            r.overwrite = true;
-            r
-        };
-        let jobs = Jobs::default();
-        // The webview asks to replace a path the dialog never returned: refused.
-        let mut r = asking();
-        authorize_overwrite(&jobs, &mut r);
-        assert!(!r.overwrite);
-        assert!(plan(r).unwrap_err().message.contains("already exists"));
-        // Another path than the picked one: refused.
-        jobs.set_picked(Some(dir.path().join("other.json")));
-        let mut r = asking();
-        authorize_overwrite(&jobs, &mut r);
-        assert!(!r.overwrite);
-        // The picked path itself: allowed, once.
-        jobs.set_picked(Some(target.clone()));
-        let mut r = asking();
-        authorize_overwrite(&jobs, &mut r);
-        assert!(r.overwrite);
-        let mut again = asking();
-        authorize_overwrite(&jobs, &mut again);
-        assert!(!again.overwrite, "a pick authorises one export");
-        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+    fn a_request_cannot_name_a_path() {
+        let base = serde_json::json!({"entity": "orders", "view": "dead-letter", "scope": {"kind": "all"}, "format": "json"});
+        let mut with_pick = base.clone();
+        with_pick["pick"] = "pick-1".into();
+        let r: ExportRequest = serde_json::from_value(with_pick.clone()).unwrap();
+        assert_eq!((r.pick.as_str(), r.total_hint), ("pick-1", None));
+        let mut with_path = with_pick.clone();
+        with_path["path"] = "/etc/passwd".into();
+        assert!(
+            serde_json::from_value::<ExportRequest>(with_path).is_err(),
+            "a path is refused"
+        );
+        let mut with_overwrite = with_pick;
+        with_overwrite["overwrite"] = true.into();
+        assert!(serde_json::from_value::<ExportRequest>(with_overwrite).is_err());
+        assert!(
+            serde_json::from_value::<ExportRequest>(base).is_err(),
+            "a pick is required"
+        );
     }
 
     #[tokio::test]
     async fn export_events_name_the_file_not_the_messages() {
         let dir = tempfile::tempdir().unwrap();
         let ev = Recorder::default();
-        let plan = plan(request(
-            dir.path(),
-            ExportScope::All {
-                filter: Default::default(),
-                from_sequence: 0,
-                max: None,
-            },
-        ))
+        run(
+            plan_in(dir.path(), all()).unwrap(),
+            &fake(3),
+            &CancellationToken::new(),
+            &ev,
+            "j1",
+        )
+        .await
         .unwrap();
-        let fake = Fake {
-            n: 3,
-            calls: Mutex::new(0),
-            cancel_after: None,
-        };
-        run(plan, &fake, &CancellationToken::new(), &ev, "j1")
-            .await
-            .unwrap();
         let events = serde_json::to_string(&*ev.jobs.lock().unwrap()).unwrap();
         assert!(!events.contains("secret-body"), "{events}");
     }
@@ -713,15 +807,60 @@ mod tests {
     #[test]
     fn selected_totals_count_each_sequence_once() {
         let dir = tempfile::tempdir().unwrap();
-        let p = plan(request(
+        let p = plan_in(
             dir.path(),
             ExportScope::Selected {
                 sequences: vec![3, 1, 3, 2, 1],
             },
-        ))
+        )
         .unwrap();
         assert_eq!(p.total, Some(3));
         assert!(matches!(&p.scope, Scope::Selected(s) if s == &[1, 2, 3]));
+    }
+
+    #[test]
+    fn a_pick_describes_the_file_for_display() {
+        let jobs = Jobs::default();
+        let p = remember_pick(&jobs, PathBuf::from("/data/exports/out.json"));
+        assert!(p.pick.starts_with("pick-"));
+        assert_eq!(
+            (p.name.as_str(), p.dir.as_str()),
+            ("out.json", "/data/exports")
+        );
+        assert_eq!(
+            serde_json::to_value(&p).unwrap().as_object().unwrap().len(),
+            3
+        );
+    }
+
+    #[test]
+    fn reveal_selects_the_file_on_each_platform() {
+        let f = Path::new("/data/exports/out.json");
+        let (prog, args) = reveal_command(f, "macos");
+        assert_eq!((prog, args), ("open", vec![OsString::from("-R"), f.into()]));
+        let (prog, args) = reveal_command(f, "windows");
+        assert_eq!(
+            (prog, args),
+            ("explorer", vec![OsString::from("/select,"), f.into()])
+        );
+        let (prog, args) = reveal_command(f, "linux");
+        assert_eq!(
+            (prog, args),
+            ("xdg-open", vec![OsString::from("/data/exports")])
+        );
+    }
+
+    #[test]
+    fn reveal_needs_a_file_this_app_wrote() {
+        let jobs = Jobs::default();
+        assert_eq!(reveal(&jobs, "job-nope").unwrap_err().kind, "not_found");
+        let (id, _) = jobs.start();
+        jobs.finish(&id, Some("/nowhere/gone.json".into()));
+        assert_eq!(
+            reveal(&jobs, &id).unwrap_err().kind,
+            "not_found",
+            "the file was moved or deleted"
+        );
     }
 
     /// Pages that take a moment each, so a job can be cancelled while it runs.
@@ -736,13 +875,7 @@ mod tests {
             opts: &PeekOptions,
         ) -> dispatched_core::Result<PeekPage> {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            Fake {
-                n: self.0,
-                calls: Mutex::new(0),
-                cancel_after: None,
-            }
-            .page(e, v, opts)
-            .await
+            fake(self.0).page(e, v, opts).await
         }
         async fn sequences(
             &self,
@@ -773,23 +906,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_started_job_reports_its_file_and_can_be_revealed() {
+    async fn a_started_job_writes_the_picked_file_and_reports_it() {
         let dir = tempfile::tempdir().unwrap();
         let ev = Arc::new(Recorder::default());
         let jobs = Arc::new(Jobs::default());
-        let all = ExportScope::All {
-            filter: Default::default(),
-            from_sequence: 0,
-            max: None,
-        };
-        let started = start(
-            &jobs,
-            Arc::new(Slow(3)),
-            ev.clone(),
-            request(dir.path(), all),
-        )
-        .unwrap();
         let target = dir.path().join("out.json");
+        let pick = remember_pick(&jobs, target.clone()).pick;
+        let started = start(&jobs, Arc::new(Slow(3)), ev.clone(), request(&pick, all())).unwrap();
         assert_eq!(
             finished(&ev).await,
             JobEvent::Finished {
@@ -811,20 +934,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_pick_is_spent_by_one_export_and_kept_when_the_request_is_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let ev = Arc::new(Recorder::default());
+        let jobs = Arc::new(Jobs::default());
+        let unknown = start(
+            &jobs,
+            Arc::new(Slow(1)),
+            ev.clone(),
+            request("pick-unknown", all()),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (unknown.kind, unknown.message.as_str()),
+            ("invalid", "Choose where to save the export.")
+        );
+        let pick = remember_pick(&jobs, dir.path().join("out.json")).pick;
+        // A filter that does not compile: refused, and the pick can be used again once it is fixed.
+        let bad = ExportScope::All {
+            filter: dispatched_core::FilterSpec {
+                property: Some("= = (".into()),
+                ..Default::default()
+            },
+            from_sequence: 0,
+            max: None,
+        };
+        assert_eq!(
+            start(&jobs, Arc::new(Slow(1)), ev.clone(), request(&pick, bad))
+                .unwrap_err()
+                .kind,
+            "invalid"
+        );
+        assert!(
+            ev.jobs.lock().unwrap().is_empty(),
+            "no job for a refused request"
+        );
+        start(&jobs, Arc::new(Slow(1)), ev.clone(), request(&pick, all())).unwrap();
+        finished(&ev).await;
+        let again = start(&jobs, Arc::new(Slow(1)), ev.clone(), request(&pick, all())).unwrap_err();
+        assert_eq!(
+            again.message, "Choose where to save the export.",
+            "a pick authorises one export"
+        );
+    }
+
+    #[tokio::test]
     async fn cancelling_a_running_job_finishes_it_as_cancelled_with_no_file() {
         let dir = tempfile::tempdir().unwrap();
         let ev = Arc::new(Recorder::default());
         let jobs = Arc::new(Jobs::default());
-        let all = ExportScope::All {
-            filter: Default::default(),
-            from_sequence: 0,
-            max: None,
-        };
+        let pick = remember_pick(&jobs, dir.path().join("out.json")).pick;
         let started = start(
             &jobs,
             Arc::new(Slow(100_000)),
             ev.clone(),
-            request(dir.path(), all),
+            request(&pick, all()),
         )
         .unwrap();
         // Cancel once the first page is written, so the job is mid-export.
@@ -866,22 +1030,5 @@ mod tests {
         let log = ev.activity.lock().unwrap();
         assert_eq!(log[0].action, "Export cancelled");
         assert!(log[0].error.is_none());
-    }
-
-    #[tokio::test]
-    async fn a_job_that_cannot_start_emits_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("out.json"), "keep").unwrap();
-        let ev = Arc::new(Recorder::default());
-        let jobs = Arc::new(Jobs::default());
-        let mut r = request(dir.path(), ExportScope::Selected { sequences: vec![1] });
-        r.overwrite = true;
-        let e = start(&jobs, Arc::new(Slow(3)), ev.clone(), r).unwrap_err();
-        assert!(e.message.contains("already exists"), "{}", e.message);
-        assert!(ev.jobs.lock().unwrap().is_empty());
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("out.json")).unwrap(),
-            "keep"
-        );
     }
 }

@@ -85,6 +85,13 @@ impl AppState {
         }
     }
 
+    /// Close a connection that was taken out of `active`. Running jobs read through it, so they
+    /// are cancelled first and stop at their next page instead of failing on a closed explorer.
+    pub async fn close(&self, old: Active) {
+        self.jobs.cancel_running();
+        old.explorer.close().await;
+    }
+
     pub async fn active(&self) -> Result<Active, CommandError> {
         self.active
             .read()
