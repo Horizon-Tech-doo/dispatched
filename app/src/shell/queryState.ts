@@ -1,4 +1,4 @@
-import { useIsFetching, useQueryClient } from "@tanstack/react-query";
+import { notifyManager, useIsFetching, useQueryClient } from "@tanstack/react-query";
 import { useSyncExternalStore } from "react";
 import type { EngineError } from "@/engine";
 
@@ -12,7 +12,7 @@ export function useQueryState(queryKey: readonly unknown[]): { dataUpdatedAt: nu
     const q = cache.find({ queryKey, exact: true });
     return `${q?.state.dataUpdatedAt ?? 0}|${q?.state.error ? (q.state.error as EngineError).kind : ""}`;
   };
-  const snap = useSyncExternalStore((cb) => cache.subscribe(cb), read);
+  const snap = useSyncExternalStore((cb) => cache.subscribe(notifyManager.batchCalls(cb)), read);
   const q = cache.find({ queryKey, exact: true });
   void snap;
   return { dataUpdatedAt: q?.state.dataUpdatedAt ?? 0, error: (q?.state.error as EngineError | null) ?? null };

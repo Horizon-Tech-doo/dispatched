@@ -2,6 +2,7 @@ import { CircleAlert } from "lucide-react";
 import { keys, useAppInfo } from "@/engine";
 import { Button, formatClock } from "@/ui";
 import { useShell } from "./context";
+import { useJobs } from "./drawer/activity";
 import { useIsFetching, useQueryState } from "./queryState";
 
 const LOST = new Set(["network", "timeout", "auth", "not_signed_in"]);
@@ -9,6 +10,7 @@ const LOST = new Set(["network", "timeout", "auth", "not_signed_in"]);
 export function StatusBar() {
   const { conn, shell, dispatch } = useShell();
   const info = useAppInfo().data;
+  const running = useJobs().filter((j) => !j.finished).length;
   const entities = useQueryState(keys.entities(conn.status === "connected" ? conn.profileId : null));
   const fetching = useIsFetching({ queryKey: ["entities"] }) > 0;
   const lost = conn.status === "connected" && entities.error != null && LOST.has(entities.error.kind);
@@ -25,8 +27,10 @@ export function StatusBar() {
         <span role="status" className={lost ? "text-fg" : undefined}>{state}</span>
         {lost && <Button size="sm" variant="quiet" onClick={conn.retry}>Reconnect</Button>}
       </span>
-      {conn.status === "connected" && !shell.layout.drawerOpen && (
-        <Button size="sm" variant="quiet" onClick={() => dispatch({ type: "layout", patch: { drawerOpen: true } })}>Show activity</Button>
+      {!shell.layout.drawerOpen && (
+        <Button size="sm" variant="quiet" onClick={() => dispatch({ type: "layout", patch: { drawerOpen: true } })}>
+          Show activity{running > 0 && <span className="tabular-nums"> · {running} running</span>}
+        </Button>
       )}
       {info?.startup_error && (
         <span className="flex items-center gap-1.5 text-fg">

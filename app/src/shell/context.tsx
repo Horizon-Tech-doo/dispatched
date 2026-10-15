@@ -35,7 +35,7 @@ export function ShellProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let off: (() => void) | undefined;
     let live = true;
-    void startEventCapture().then((f) => (live ? (off = f) : f()));
+    startEventCapture().then((f) => (live ? (off = f) : f()), () => {});
     return () => {
       live = false;
       off?.();
