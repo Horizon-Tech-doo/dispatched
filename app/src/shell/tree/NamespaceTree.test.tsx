@@ -130,7 +130,8 @@ describe("NamespaceTree", () => {
     // One automatic retry for network errors, after the query client's default delay.
     expect(await screen.findByRole("heading", { name: "Can't list this namespace" }, { timeout: 4000 })).toBeInTheDocument();
     expect(screen.getByText("The connection to sb-logistics-prod was interrupted. Check your network or VPN, then retry.")).toBeInTheDocument();
-    const raw = screen.getByText("network error: connection reset by peer");
+    // The drawer logs the same failure; the tree's own line is the one outside it.
+    const raw = screen.getAllByText("network error: connection reset by peer").find((el) => !el.closest("[aria-label='Jobs and activity']"))!;
     expect(raw.className).toContain("text-11");
     expect(raw.className).toContain("text-muted");
     expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();

@@ -170,6 +170,33 @@ export const shots: {
     path: "/?scenario=default&autoconnect=p-logistics",
     ready: (p) => p.getByRole("heading", { name: "Open an entity" }),
   },
+  {
+    name: "drawer",
+    path: "/?scenario=network&autoconnect=p-logistics",
+    // The tree error appears after the automatic retry; the log line is checked in prepare.
+    ready: (p) => p.getByRole("heading", { name: "Can't list this namespace" }),
+    prepare: async (page) => {
+      await page.getByRole("region", { name: "Jobs and activity" }).getByText("Listing the namespace failed").first().waitFor();
+    },
+  },
+  {
+    name: "drawer-hidden",
+    path: "/?scenario=default&autoconnect=p-logistics",
+    ready: (p) => p.getByRole("tree", { name: "Namespace" }).getByRole("treeitem", { name: "invoice-generate" }),
+    prepare: async (page) => {
+      await page.keyboard.press("ControlOrMeta+j");
+      await page.getByRole("button", { name: "Show activity" }).waitFor();
+    },
+  },
+  {
+    name: "drawer-jobs",
+    path: "/?scenario=default&autoconnect=p-logistics",
+    ready: (p) => p.getByRole("tree", { name: "Namespace" }).getByRole("treeitem", { name: "invoice-generate" }),
+    prepare: async (page) => {
+      await page.getByRole("tab", { name: /^Jobs/ }).click();
+      await page.getByText("Exports and bulk operations show their progress here").waitFor();
+    },
+  },
 ];
 
 for (const colorScheme of ["dark", "light"] as const) {

@@ -1,6 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { createContext, useCallback, useContext, useState, type Dispatch, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useState, type Dispatch, type ReactNode } from "react";
 import { useTheme } from "@/ui";
+import { startEventCapture } from "./drawer/activity";
 import { useConnectionController, type ConnectionController } from "./connection";
 import { usePrefs, useProfileShell, type Prefs, type ProfileShell, type ShellAction } from "./state";
 
@@ -31,6 +32,15 @@ interface ShellContextValue {
 const ShellContext = createContext<ShellContextValue | null>(null);
 
 export function ShellProvider({ children }: { children: ReactNode }) {
+  useEffect(() => {
+    let off: (() => void) | undefined;
+    let live = true;
+    void startEventCapture().then((f) => (live ? (off = f) : f()));
+    return () => {
+      live = false;
+      off?.();
+    };
+  }, []);
   const [prefs, setPrefs] = usePrefs();
   useTheme(prefs.theme, prefs.density);
   const conn = useConnectionController();

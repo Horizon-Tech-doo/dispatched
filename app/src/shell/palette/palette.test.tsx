@@ -158,6 +158,13 @@ describe("palette", () => {
     expect(row.className).not.toContain("h-7");
   });
 
-  // Needs Task 17's drawer; Task 17 replaces this with the real test.
-  it.todo("toggles the drawer with mod+j");
+  it("toggles the drawer with mod+j", async () => {
+    renderShell("default", { last_profile: "p-logistics" });
+    await screen.findByRole("tree", { name: "Namespace" });
+    expect(await screen.findByRole("region", { name: "Jobs and activity" })).toBeInTheDocument();
+    await userEvent.keyboard("{Control>}j{/Control}");
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Jobs and activity" })).not.toBeInTheDocument());
+    await userEvent.keyboard("{Control>}j{/Control}");
+    expect(await screen.findByRole("region", { name: "Jobs and activity" })).toBeInTheDocument();
+  });
 });
