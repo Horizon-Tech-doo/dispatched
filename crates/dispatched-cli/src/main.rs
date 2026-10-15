@@ -89,6 +89,10 @@ enum Command {
         /// Maximum matching messages.
         #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..))]
         top: u32,
+        /// The last N matching messages instead of the first (no continuation). Scans back
+        /// from the end of the entity; --top is limited to 5000.
+        #[arg(long, conflicts_with = "from_seq")]
+        from_end: bool,
     },
     /// Write peeked messages to a file or stdout (JSON or NDJSON).
     Export {
@@ -104,11 +108,38 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Show an entity's properties and counts.
+    Show {
+        /// `queue`, `topic` or `topic/subscriptions/subscription`.
+        entity: String,
+    },
+    /// Sessions of a session-enabled queue or subscription.
+    Session {
+        #[command(subcommand)]
+        cmd: SessionCmd,
+    },
+    /// Rules of a subscription.
+    Rule {
+        #[command(subcommand)]
+        cmd: RuleCmd,
+    },
     /// Manage saved profiles.
     Profile {
         #[command(subcommand)]
         cmd: ProfileCmd,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum SessionCmd {
+    /// List sessions with message counts.
+    Ls { entity: String },
+}
+
+#[derive(Subcommand, Debug)]
+enum RuleCmd {
+    /// List the rules of a subscription.
+    Ls { subscription: String },
 }
 
 #[tokio::main]
@@ -192,7 +223,12 @@ async fn run(cli: Cli) -> Result<(), (anyhow::Error, Hints)> {
     let hints = Hints {
         namespace_selected: matches!(
             cli.command,
-            Command::Ls { .. } | Command::Peek { .. } | Command::Export { .. }
+            Command::Ls { .. }
+                | Command::Peek { .. }
+                | Command::Export { .. }
+                | Command::Show { .. }
+                | Command::Session { .. }
+                | Command::Rule { .. }
         ) && resolve::select(&flags, &env).namespace.is_some(),
     };
     run_command(cli).await.map_err(|e| (e, hints))
@@ -232,7 +268,18 @@ async fn run_command(cli: Cli) -> anyhow::Result<()> {
             all_tenants,
         } => commands::auth::namespaces(&ctx, tenant, all_tenants, format).await,
         Command::Ls { topics } => commands::browse::ls(&ctx, &sel, topics, format).await,
-        Command::Peek { view, top } => commands::browse::peek(&ctx, &sel, &view, top, format).await,
+        Command::Peek {
+            view,
+            top,
+            from_end,
+        } => commands::browse::peek(&ctx, &sel, &view, top, from_end, format).await,
+        Command::Show { entity } => commands::inspect::show(&ctx, &sel, &entity, format).await,
+        Command::Session {
+            cmd: SessionCmd::Ls { entity },
+        } => commands::inspect::sessions(&ctx, &sel, &entity, format).await,
+        Command::Rule {
+            cmd: RuleCmd::Ls { subscription },
+        } => commands::inspect::rules(&ctx, &sel, &subscription, format).await,
         Command::Export {
             view,
             top,
@@ -324,7 +371,7 @@ mod tests {
             "x",
         ])
         .unwrap();
-        let Command::Peek { view, top } = cli.command else {
+        let Command::Peek { view, top, .. } = cli.command else {
             panic!("not peek")
         };
         assert_eq!(view.entity.as_deref(), Some("q"));
@@ -360,6 +407,38 @@ mod tests {
         assert!(Cli::try_parse_from(["dispatched", "export"]).is_err());
         assert!(Cli::try_parse_from(["dispatched", "peek", "--top", "0"]).is_err());
         assert!(Cli::try_parse_from(["dispatched", "peek", "--dlq", "--view", "active"]).is_err());
+    }
+
+    #[test]
+    fn peek_from_end_conflicts_with_from_seq_and_session_parses() {
+        let cli = Cli::try_parse_from([
+            "dispatched",
+            "peek",
+            "q",
+            "--from-end",
+            "--session",
+            "RMA-1",
+            "--top",
+            "5",
+        ])
+        .unwrap();
+        let Command::Peek { view, from_end, .. } = cli.command else {
+            panic!("not peek")
+        };
+        assert!(from_end);
+        assert_eq!(view.session.as_deref(), Some("RMA-1"));
+        assert!(
+            Cli::try_parse_from(["dispatched", "peek", "q", "--from-end", "--from-seq", "9"])
+                .is_err()
+        );
+        assert!(Cli::try_parse_from(["dispatched", "session", "ls", "q"]).is_ok());
+        assert!(Cli::try_parse_from(["dispatched", "rule", "ls", "t/subscriptions/s"]).is_ok());
+        assert!(Cli::try_parse_from(["dispatched", "show", "q"]).is_ok());
+        // --session also works for export.
+        assert!(
+            Cli::try_parse_from(["dispatched", "export", "q", "--session", "s", "--out", "-"])
+                .is_ok()
+        );
     }
 
     use dispatched_core::Error as CoreError;

@@ -18,7 +18,7 @@ use time::format_description::well_known::Rfc3339;
 
 /// The namespace the user selected. The sign-in (a keychain read) is only
 /// looked up when the selection uses Entra.
-fn namespace(ctx: &Ctx, sel: &Selection<'_>) -> anyhow::Result<Namespace> {
+pub(crate) fn namespace(ctx: &Ctx, sel: &Selection<'_>) -> anyhow::Result<Namespace> {
     let sign_in = if needs_sign_in(sel, ctx)? {
         ctx.current_sign_in()?
     } else {
@@ -31,6 +31,11 @@ fn namespace(ctx: &Ctx, sel: &Selection<'_>) -> anyhow::Result<Namespace> {
         &ctx.session,
         sign_in.as_ref(),
     )
+}
+
+/// An explorer for the namespace the user selected.
+pub(crate) fn explorer_for(ctx: &Ctx, sel: &Selection<'_>) -> anyhow::Result<Explorer> {
+    Ok(Explorer::new(namespace(ctx, sel)?)?)
 }
 
 /// The entities pinned on the profile the selection resolves to. Empty when
@@ -87,6 +92,9 @@ pub struct ViewArgs {
     /// With --body-json: the value must equal this.
     #[arg(long, requires = "body_json")]
     pub body_json_eq: Option<String>,
+    /// Only messages of this session (exact session id).
+    #[arg(long)]
+    pub session: Option<String>,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -107,7 +115,7 @@ impl ViewArgs {
             body_regex: self.body_regex.as_deref(),
             body_json: self.body_json.as_deref(),
             body_json_eq: self.body_json_eq.as_deref(),
-            session: None,
+            session: self.session.as_deref(),
         }
     }
 }
@@ -565,14 +573,55 @@ pub fn peek_json(page: &PeekPage) -> serde_json::Value {
     })
 }
 
+/// The most `peek --from-end` returns; core pages the tail in the same size.
+pub const MAX_TAIL: u32 = 5_000;
+/// The smallest scan budget for `peek --from-end`: finding the end and reading back
+/// from it needs more than a forward peek's default.
+pub const TAIL_MIN_SCAN: u32 = 100_000;
+
+/// What to tell the user (on stderr) about a tail peek.
+pub fn tail_notes(page: &PeekPage, top: u32, capped: bool) -> Vec<String> {
+    let n = page.messages.len();
+    let mut notes = Vec::new();
+    if capped {
+        notes.push(format!(
+            "(--top is limited to {MAX_TAIL} with --from-end; showing at most {MAX_TAIL})"
+        ));
+    }
+    if page.exhausted {
+        if n as u64 >= u64::from(top) {
+            notes.push(format!(
+                "(last {n} matching message(s); scanned {})",
+                page.scanned
+            ));
+        } else {
+            notes.push(format!(
+                "(only {n} matching message(s) found, {top} asked for; scanned {})",
+                page.scanned
+            ));
+        }
+    } else {
+        notes.push(format!(
+            "warning: scanned {} message(s) without reaching the end of the entity, so these {n} \
+             match(es) are not the last ones. Narrow the filter or raise --scan-limit",
+            page.scanned
+        ));
+    }
+    notes
+}
+
 pub async fn peek(
     ctx: &Ctx,
     sel: &Selection<'_>,
     args: &ViewArgs,
     top: u32,
+    from_end: bool,
     format: Format,
 ) -> anyhow::Result<()> {
     let q = Query::open(ctx, sel, args)?;
+    if from_end {
+        return peek_tail(q, top, format).await;
+    }
     let page = q
         .explorer
         .peek(&q.entity, q.view, &q.options(top, q.from_seq))
@@ -599,6 +648,28 @@ pub async fn peek(
         }
         print_notes(&notes);
     }
+    Ok(())
+}
+
+/// `peek --from-end`: the last `top` matches, oldest first, with no continuation.
+async fn peek_tail(q: Query, top: u32, format: Format) -> anyhow::Result<()> {
+    let capped = top > MAX_TAIL;
+    let top = top.min(MAX_TAIL);
+    let opts = PeekOptions::new(top)
+        .scan_limit(q.scan_limit.max(TAIL_MIN_SCAN))
+        .filter(q.filter.clone());
+    let page = q.explorer.peek_tail(&q.entity, q.view, &opts).await;
+    q.explorer.close().await;
+    let page = page?;
+    if let Format::Json = format {
+        println!("{}", serde_json::to_string_pretty(&peek_json(&page))?);
+    } else {
+        println!("{}", messages_table(&page.messages, q.view));
+        if page.messages.is_empty() && page.exhausted {
+            eprintln!("(no messages)");
+        }
+    }
+    print_notes(&tail_notes(&page, top, capped));
     Ok(())
 }
 
@@ -932,6 +1003,26 @@ mod tests {
         // Export has no scan limit.
         let n = scan_notes(&summary(50_000, 3, None, Continuation::More(50_001)));
         assert!(n[0].starts_with("(more:"), "{n:?}");
+    }
+
+    #[test]
+    fn tail_notes_say_whether_the_end_was_reached() {
+        let done = tail_notes(&page(&[8, 9], 40, None, true), 2, false);
+        assert_eq!(done, vec!["(last 2 matching message(s); scanned 40)"]);
+        let few = tail_notes(&page(&[9], 40, None, true), 5, false);
+        assert_eq!(
+            few,
+            vec!["(only 1 matching message(s) found, 5 asked for; scanned 40)"]
+        );
+        let cut = tail_notes(&page(&[1], 100_000, None, false), 5, false);
+        assert_eq!(cut.len(), 1);
+        assert!(
+            cut[0].starts_with("warning:") && cut[0].contains("without reaching the end"),
+            "{cut:?}"
+        );
+        assert!(!cut[0].contains("last 1 matching"), "{cut:?}");
+        let capped = tail_notes(&page(&[1], 10, None, true), MAX_TAIL, true);
+        assert!(capped[0].contains("5000"), "{capped:?}");
     }
 
     // --- tables and JSON ---
