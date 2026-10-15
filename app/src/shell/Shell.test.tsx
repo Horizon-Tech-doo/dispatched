@@ -92,4 +92,23 @@ describe("Shell", () => {
     expect(await screen.findByRole("heading", { name: "Couldn't connect to Logistics" })).toBeInTheDocument();
     expect(treePanel()).toBeNull();
   });
+
+  it("offers Show activity while the same profile reconnects, never on the welcome screen", async () => {
+    const { mock } = renderShell("default", { last_profile: "p-logistics" });
+    await waitFor(() => expect(treePanel()).not.toBeNull());
+    await userEvent.click(await screen.findByRole("button", { name: "Hide drawer" }));
+    expect(await screen.findByRole("button", { name: "Show activity" })).toBeInTheDocument();
+    const settle = gateConnect(mock);
+    await chooseConnection(/^Logistics sb-logistics-prod/);
+    expect(await within(screen.getByRole("contentinfo")).findByText("Connecting…")).toBeInTheDocument();
+    expect(treePanel()).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Show activity" })).toBeInTheDocument();
+    settle();
+    await waitFor(() => expect(within(screen.getByRole("contentinfo")).getByText("Peek only, nothing locked")).toBeInTheDocument());
+    // A different profile takes the window back to Welcome, where there is no drawer to show.
+    gateConnect(mock);
+    await chooseConnection(/Logistics dev/);
+    expect(await screen.findByRole("list", { name: "Saved connections" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Show activity/ })).not.toBeInTheDocument();
+  });
 });

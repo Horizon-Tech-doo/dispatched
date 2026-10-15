@@ -8,7 +8,7 @@ import { useIsFetching, useQueryState } from "./queryState";
 const LOST = new Set(["network", "timeout", "auth", "not_signed_in"]);
 
 export function StatusBar() {
-  const { conn, shell, dispatch } = useShell();
+  const { conn, shell, live, dispatch } = useShell();
   const info = useAppInfo().data;
   const running = useJobs().filter((j) => !j.finished).length;
   const entities = useQueryState(keys.entities(conn.status === "connected" ? conn.profileId : null));
@@ -27,7 +27,7 @@ export function StatusBar() {
         <span role="status" className={lost ? "text-fg" : undefined}>{state}</span>
         {lost && <Button size="sm" variant="quiet" onClick={conn.retry}>Reconnect</Button>}
       </span>
-      {!shell.layout.drawerOpen && (
+      {live && !shell.layout.drawerOpen && (
         <Button size="sm" variant="quiet" onClick={() => dispatch({ type: "layout", patch: { drawerOpen: true } })}>
           Show activity{running > 0 && <span className="tabular-nums"> · {running} running</span>}
         </Button>

@@ -19,7 +19,8 @@ function ActivityLog() {
   // New rows are followed only when the user was already at the bottom. Keyed on the newest id, not the
   // length, which stops changing once the cap trims old rows.
   useLayoutEffect(() => {
-    if (atBottom.current) toEnd();
+    if (newest === undefined) atBottom.current = true; // a cleared log starts following again
+    else if (atBottom.current) toEnd();
   }, [newest]);
   if (!entries.length)
     return <EmptyState title="No activity yet" body="Every call to Service Bus appears here: what ran, how long it took, and why anything failed." />;

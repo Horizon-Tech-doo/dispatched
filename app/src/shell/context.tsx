@@ -21,6 +21,8 @@ interface ShellContextValue {
   shellLoaded: boolean;
   /** The profile the workbench is showing; stays set while that same profile reconnects. */
   shellProfileId: string | null;
+  /** The workbench is up: connected, or reconnecting the profile it already shows. Welcome otherwise. */
+  live: boolean;
   sheet: SheetState;
   openSheet: (s: Exclude<SheetState, null>) => void;
   closeSheet: () => void;
@@ -35,7 +37,10 @@ export function ShellProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let off: (() => void) | undefined;
     let live = true;
-    startEventCapture().then((f) => (live ? (off = f) : f()), () => {});
+    startEventCapture().then(
+      (f) => (live ? (off = f) : f()),
+      (e) => console.error("Could not subscribe to engine events", e),
+    );
     return () => {
       live = false;
       off?.();
@@ -49,6 +54,7 @@ export function ShellProvider({ children }: { children: ReactNode }) {
   const [shellProfileId, setShellProfileId] = useState<string | null>(null);
   if (conn.status === "connected" && conn.profileId !== shellProfileId) setShellProfileId(conn.profileId);
   else if ((conn.status === "idle" || conn.status === "failed") && shellProfileId !== null) setShellProfileId(null);
+  const live = conn.status === "connected" || (conn.status === "connecting" && shellProfileId !== null && conn.profileId === shellProfileId);
   const [shell, dispatch, shellLoaded] = useProfileShell(shellProfileId);
   const [sheet, setSheet] = useState<SheetState>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -61,7 +67,7 @@ export function ShellProvider({ children }: { children: ReactNode }) {
   return (
     <ShellContext.Provider
       value={{
-        prefs, setPrefs, conn, shell, dispatch, shellLoaded, shellProfileId, sheet,
+        prefs, setPrefs, conn, shell, dispatch, shellLoaded, shellProfileId, live, sheet,
         openSheet: setSheet, closeSheet: () => setSheet(null),
         paletteOpen, setPaletteOpen, refresh,
       }}

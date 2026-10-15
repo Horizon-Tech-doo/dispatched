@@ -35,10 +35,13 @@ describe("startEventCapture", () => {
       onActivity: vi.fn(async () => off),
       onJob: vi.fn(async () => { throw new Error("listen failed"); }),
     }));
-    const { startEventCapture } = await import("./activity");
-    await expect(startEventCapture()).rejects.toThrow("listen failed");
-    expect(off).toHaveBeenCalledTimes(1);
-    vi.doUnmock("@/engine");
+    try {
+      const { startEventCapture } = await import("./activity");
+      await expect(startEventCapture()).rejects.toThrow("listen failed");
+      expect(off).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.doUnmock("@/engine");
+    }
   });
 });
 

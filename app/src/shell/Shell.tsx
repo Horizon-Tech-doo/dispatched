@@ -10,9 +10,8 @@ import { Welcome } from "./Welcome";
 
 /** The window: top bar, then tree | (workspace / drawer), then status bar. */
 export function Shell({ tree, workspace, drawer }: { tree?: ReactNode; workspace?: ReactNode; drawer?: ReactNode }) {
-  const { conn, shell, shellLoaded, shellProfileId, dispatch } = useShell();
+  const { shell, shellLoaded, live, dispatch } = useShell();
   // Reconnecting the same profile keeps the workbench up; Welcome is for no connection or a failed one.
-  const live = conn.status === "connected" || (conn.status === "connecting" && shellProfileId !== null && conn.profileId === shellProfileId);
   const ready = live && shellLoaded;
   const drawerShown = shell.layout.drawerOpen && drawer != null;
   return (
