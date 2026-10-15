@@ -2,7 +2,7 @@
 
 use crate::Format;
 use crate::context::Ctx;
-use crate::output::{ellipsize, sanitize, table};
+use crate::output::{ellipsize, sanitize, table, thousands};
 use crate::resolve::{Selection, needs_sign_in, resolve};
 use clap::Args;
 use dispatched_core::messaging::DEFAULT_SCAN_LIMIT;
@@ -579,8 +579,8 @@ pub const MAX_TAIL: u32 = 5_000;
 /// from it needs more than a forward peek's default.
 pub const TAIL_MIN_SCAN: u32 = 100_000;
 
-/// What to tell the user (on stderr) about a tail peek.
-pub fn tail_notes(page: &PeekPage, top: u32, capped: bool) -> Vec<String> {
+/// What to tell the user (on stderr) about a tail peek. `limit` is the scan budget it ran with.
+pub fn tail_notes(page: &PeekPage, top: u32, capped: bool, limit: u32) -> Vec<String> {
     let n = page.messages.len();
     let mut notes = Vec::new();
     if capped {
@@ -588,22 +588,33 @@ pub fn tail_notes(page: &PeekPage, top: u32, capped: bool) -> Vec<String> {
             "(--top is limited to {MAX_TAIL} with --from-end; showing at most {MAX_TAIL})"
         ));
     }
-    if page.exhausted {
-        if n as u64 >= u64::from(top) {
-            notes.push(format!(
-                "(last {n} matching message(s); scanned {})",
-                page.scanned
-            ));
-        } else {
-            notes.push(format!(
-                "(only {n} matching message(s) found, {top} asked for; scanned {})",
-                page.scanned
-            ));
-        }
-    } else {
+    if !page.exhausted {
         notes.push(format!(
             "warning: scanned {} message(s) without reaching the end of the entity, so these {n} \
-             match(es) are not the last ones. Narrow the filter or raise --scan-limit",
+             match(es) are not the last ones. Narrow the filter or raise --scan-limit above {}",
+            page.scanned,
+            thousands(u64::from(TAIL_MIN_SCAN))
+        ));
+    } else if (n as u64) >= u64::from(top) {
+        notes.push(format!(
+            "(last {n} matching message(s); scanned {})",
+            page.scanned
+        ));
+    } else if page.scanned >= limit {
+        // The budget ended the search, not the start of the entity: older messages may match.
+        let what = match n {
+            0 => "no matching messages".to_string(),
+            n => format!("{n} matching message(s)"),
+        };
+        notes.push(format!(
+            "({what} in the newest {}; older messages were not examined)",
+            thousands(u64::from(limit))
+        ));
+    } else if n == 0 {
+        notes.push(format!("(no matching messages; scanned {})", page.scanned));
+    } else {
+        notes.push(format!(
+            "(only {n} matching message(s) found, {top} asked for; scanned {})",
             page.scanned
         ));
     }
@@ -655,8 +666,9 @@ pub async fn peek(
 async fn peek_tail(q: Query, top: u32, format: Format) -> anyhow::Result<()> {
     let capped = top > MAX_TAIL;
     let top = top.min(MAX_TAIL);
+    let limit = q.scan_limit.max(TAIL_MIN_SCAN);
     let opts = PeekOptions::new(top)
-        .scan_limit(q.scan_limit.max(TAIL_MIN_SCAN))
+        .scan_limit(limit)
         .filter(q.filter.clone());
     let page = q.explorer.peek_tail(&q.entity, q.view, &opts).await;
     q.explorer.close().await;
@@ -664,12 +676,10 @@ async fn peek_tail(q: Query, top: u32, format: Format) -> anyhow::Result<()> {
     if let Format::Json = format {
         println!("{}", serde_json::to_string_pretty(&peek_json(&page))?);
     } else {
+        // An empty tail says so once, in the note below.
         println!("{}", messages_table(&page.messages, q.view));
-        if page.messages.is_empty() && page.exhausted {
-            eprintln!("(no messages)");
-        }
     }
-    print_notes(&tail_notes(&page, top, capped));
+    print_notes(&tail_notes(&page, top, capped, limit));
     Ok(())
 }
 
@@ -1007,22 +1017,55 @@ mod tests {
 
     #[test]
     fn tail_notes_say_whether_the_end_was_reached() {
-        let done = tail_notes(&page(&[8, 9], 40, None, true), 2, false);
+        let lim = TAIL_MIN_SCAN;
+        let done = tail_notes(&page(&[8, 9], 40, None, true), 2, false, lim);
         assert_eq!(done, vec!["(last 2 matching message(s); scanned 40)"]);
-        let few = tail_notes(&page(&[9], 40, None, true), 5, false);
+        let few = tail_notes(&page(&[9], 40, None, true), 5, false, lim);
         assert_eq!(
             few,
             vec!["(only 1 matching message(s) found, 5 asked for; scanned 40)"]
         );
-        let cut = tail_notes(&page(&[1], 100_000, None, false), 5, false);
+        let cut = tail_notes(&page(&[1], 100_000, None, false), 5, false, lim);
         assert_eq!(cut.len(), 1);
         assert!(
             cut[0].starts_with("warning:") && cut[0].contains("without reaching the end"),
             "{cut:?}"
         );
+        assert!(
+            cut[0].contains("--scan-limit above 100,000"),
+            "the hint names the floor: {cut:?}"
+        );
         assert!(!cut[0].contains("last 1 matching"), "{cut:?}");
-        let capped = tail_notes(&page(&[1], 10, None, true), MAX_TAIL, true);
+        let capped = tail_notes(&page(&[1], 10, None, true), MAX_TAIL, true, lim);
         assert!(capped[0].contains("5000"), "{capped:?}");
+    }
+
+    #[test]
+    fn a_short_tail_that_hit_the_scan_limit_does_not_claim_the_whole_entity() {
+        let lim = TAIL_MIN_SCAN;
+        let n = tail_notes(&page(&[7, 8, 9], 100_000, None, true), 5, false, lim);
+        assert_eq!(
+            n,
+            vec!["(3 matching message(s) in the newest 100,000; older messages were not examined)"]
+        );
+        assert!(!n[0].contains("only"), "{n:?}");
+        let none = tail_notes(&page(&[], 100_000, None, true), 5, false, lim);
+        assert_eq!(
+            none,
+            vec!["(no matching messages in the newest 100,000; older messages were not examined)"]
+        );
+        // A raised --scan-limit is the limit that counts.
+        let n = tail_notes(&page(&[9], 250_000, None, true), 5, false, 250_000);
+        assert!(n[0].contains("newest 250,000"), "{n:?}");
+        // Reaching --top is a clean tail whatever was scanned.
+        let full = tail_notes(&page(&[8, 9], 100_000, None, true), 2, false, lim);
+        assert_eq!(full, vec!["(last 2 matching message(s); scanned 100000)"]);
+    }
+
+    #[test]
+    fn an_empty_tail_is_one_line() {
+        let n = tail_notes(&page(&[], 40, None, true), 5, false, TAIL_MIN_SCAN);
+        assert_eq!(n, vec!["(no matching messages; scanned 40)"]);
     }
 
     // --- tables and JSON ---

@@ -3,13 +3,14 @@
 use crate::Format;
 use crate::commands::browse::explorer_for;
 use crate::context::Ctx;
-use crate::output::{sanitize, table};
+use crate::output::{sanitize, table, thousands};
 use crate::resolve::Selection;
 use dispatched_core::messaging::sessions::{
     BrokerList, MAX_SESSIONS, SessionListing, SessionSummary,
 };
 use dispatched_core::mgmt::{EntityDetails, EntityKind, RuleFilter, RuleInfo};
 use dispatched_core::{EntityPath, Error};
+use std::future::Future;
 use time::format_description::well_known::Rfc3339;
 
 fn quoted(name: &str, v: &Option<String>) -> Option<String> {
@@ -112,7 +113,7 @@ pub fn sessions_notes(l: &SessionListing) -> Vec<String> {
         )),
         BrokerList::Empty => notes.push(format!(
             "The service listed no sessions; showing sessions found in the first {} messages.",
-            l.scanned
+            thousands(l.scanned)
         )),
         BrokerList::Unavailable { .. } => notes.push(
             "Couldn't ask the service for sessions; showing sessions found by peeking.".into(),
@@ -121,20 +122,10 @@ pub fn sessions_notes(l: &SessionListing) -> Vec<String> {
     if l.truncated {
         notes.push(format!(
             "Message counts are lower bounds: only the first {} messages were counted, and there are more.",
-            l.scanned
+            thousands(l.scanned)
         ));
     }
     notes
-}
-
-/// `10000` as `10,000`.
-fn thousands(n: u64) -> String {
-    let digits: Vec<char> = n.to_string().chars().rev().collect();
-    let groups: Vec<String> = digits
-        .chunks(3)
-        .map(|g| g.iter().rev().collect::<String>())
-        .collect();
-    groups.iter().rev().cloned().collect::<Vec<_>>().join(",")
 }
 
 pub fn details_table(d: &EntityDetails) -> String {
@@ -164,6 +155,25 @@ pub fn details_table(d: &EntityDetails) -> String {
     table(&["Property", "Value"], &rows)
 }
 
+/// An entity's details: a subscription path is a subscription; any other is a queue, else a
+/// topic (only a missing queue falls through; other errors are reported as they are).
+async fn details_of<F, Fut>(
+    path: &EntityPath,
+    mut fetch: F,
+) -> dispatched_core::Result<EntityDetails>
+where
+    F: FnMut(EntityKind) -> Fut,
+    Fut: Future<Output = dispatched_core::Result<EntityDetails>>,
+{
+    if path.subscription.is_some() {
+        return fetch(EntityKind::Subscription).await;
+    }
+    match fetch(EntityKind::Queue).await {
+        Err(Error::NotFound(_)) => fetch(EntityKind::Topic).await,
+        other => other,
+    }
+}
+
 pub async fn show(
     ctx: &Ctx,
     sel: &Selection<'_>,
@@ -172,14 +182,7 @@ pub async fn show(
 ) -> anyhow::Result<()> {
     let path = EntityPath::parse(entity)?;
     let ex = explorer_for(ctx, sel)?;
-    let result = if path.subscription.is_some() {
-        ex.entity_details(EntityKind::Subscription, entity).await
-    } else {
-        match ex.entity_details(EntityKind::Queue, entity).await {
-            Err(Error::NotFound(_)) => ex.entity_details(EntityKind::Topic, entity).await,
-            other => other,
-        }
-    };
+    let result = details_of(&path, |kind| ex.entity_details(kind, entity)).await;
     ex.close().await;
     let d = result?;
     match format {
@@ -215,18 +218,26 @@ pub async fn sessions(
     Ok(())
 }
 
+/// The topic and subscription of a `<topic>/subscriptions/<subscription>` path.
+fn rule_target(subscription: &str) -> anyhow::Result<(String, String)> {
+    let path = EntityPath::parse(subscription)?;
+    match path.subscription {
+        Some(sub) => Ok((path.entity, sub)),
+        None => anyhow::bail!(
+            "rules belong to a subscription: pass <topic>/subscriptions/<subscription>"
+        ),
+    }
+}
+
 pub async fn rules(
     ctx: &Ctx,
     sel: &Selection<'_>,
     subscription: &str,
     format: Format,
 ) -> anyhow::Result<()> {
-    let path = EntityPath::parse(subscription)?;
-    let Some(sub) = path.subscription.as_deref() else {
-        anyhow::bail!("rules belong to a subscription: pass <topic>/subscriptions/<subscription>");
-    };
+    let (topic, sub) = rule_target(subscription)?;
     let ex = explorer_for(ctx, sel)?;
-    let result = ex.list_rules(&path.entity, sub).await;
+    let result = ex.list_rules(&topic, &sub).await;
     ex.close().await;
     let rules = result?;
     match format {
@@ -240,7 +251,7 @@ pub async fn rules(
 mod tests {
     use super::*;
     use dispatched_core::messaging::sessions::BrokerList;
-    use dispatched_core::mgmt::{CorrelationProperty, EntityProperty, RuleFilter};
+    use dispatched_core::mgmt::{CorrelationProperty, EntityCounts, EntityProperty, RuleFilter};
 
     fn listing(broker: BrokerList, truncated: bool) -> SessionListing {
         SessionListing {
@@ -332,7 +343,7 @@ mod tests {
         assert!(
             notes
                 .iter()
-                .any(|n| n.contains("lower bounds") && n.contains("first 10000")),
+                .any(|n| n.contains("lower bounds") && n.contains("first 10,000")),
             "{notes:?}"
         );
     }
@@ -350,7 +361,7 @@ mod tests {
         assert_eq!(
             empty,
             vec![
-                "The service listed no sessions; showing sessions found in the first 10000 messages."
+                "The service listed no sessions; showing sessions found in the first 10,000 messages."
             ]
         );
         let down = none(&listing(
@@ -367,11 +378,131 @@ mod tests {
         assert_eq!(none(&listing(BrokerList::Empty, true)).len(), 2);
     }
 
+    fn counted(approximate: bool, truncated: bool) -> EntityDetails {
+        EntityDetails {
+            kind: EntityKind::Queue,
+            name: "q".into(),
+            topic: None,
+            status: None,
+            counts: Some(EntityCounts {
+                active: 5,
+                dead_letter: 4,
+                scheduled: 3,
+                transfer: 2,
+                transfer_dead_letter: 1,
+                approximate,
+                truncated,
+            }),
+            size_in_bytes: None,
+            properties: vec![],
+        }
+    }
+
     #[test]
-    fn thousands_groups_digits() {
-        assert_eq!(thousands(10_000), "10,000");
-        assert_eq!(thousands(999), "999");
-        assert_eq!(thousands(1_234_567), "1,234,567");
+    fn details_table_counts_are_exact_approximate_or_lower_bounds() {
+        let cells = |d: &EntityDetails| -> Vec<(String, String)> {
+            details_table(d)
+                .lines()
+                .skip(1)
+                .map(|l| {
+                    let (k, v) = l.rsplit_once("  ").unwrap();
+                    (k.trim().to_string(), v.trim().to_string())
+                })
+                .collect()
+        };
+        let exact = cells(&counted(false, false));
+        assert_eq!(exact.len(), 5, "{exact:?}");
+        assert_eq!(exact[0], ("Active".to_string(), "5".to_string()));
+        assert_eq!(exact[4], ("Transfer DLQ".to_string(), "1".to_string()));
+        let approx = cells(&counted(true, false));
+        assert!(
+            approx
+                .iter()
+                .all(|(_, v)| v.starts_with('~') && !v.ends_with('+'))
+        );
+        assert_eq!(approx[1], ("Dead-letter".to_string(), "~4".to_string()));
+        let lower = cells(&counted(true, true));
+        assert_eq!(lower[2], ("Scheduled".to_string(), "~3+".to_string()));
+        assert!(
+            lower
+                .iter()
+                .all(|(_, v)| v.starts_with('~') && v.ends_with('+'))
+        );
+    }
+
+    fn details(kind: EntityKind) -> EntityDetails {
+        EntityDetails {
+            kind,
+            name: "x".into(),
+            topic: None,
+            status: None,
+            counts: None,
+            size_in_bytes: None,
+            properties: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn show_tries_a_queue_then_a_topic_and_keeps_other_errors() {
+        use std::sync::Mutex;
+        let asked = Mutex::new(Vec::new());
+        let missing_queue = |k: EntityKind| {
+            asked.lock().unwrap().push(k);
+            async move {
+                match k {
+                    EntityKind::Queue => Err(Error::NotFound("queue `x`".into())),
+                    k => Ok(details(k)),
+                }
+            }
+        };
+        let d = details_of(&EntityPath::queue("x"), missing_queue)
+            .await
+            .unwrap();
+        assert_eq!(d.kind, EntityKind::Topic);
+        assert_eq!(
+            *asked.lock().unwrap(),
+            [EntityKind::Queue, EntityKind::Topic]
+        );
+
+        // A queue is not followed by a topic lookup.
+        let asked = Mutex::new(Vec::new());
+        let d = details_of(&EntityPath::queue("x"), |k| {
+            asked.lock().unwrap().push(k);
+            async move { Ok(details(k)) }
+        })
+        .await
+        .unwrap();
+        assert_eq!(d.kind, EntityKind::Queue);
+        assert_eq!(*asked.lock().unwrap(), [EntityKind::Queue]);
+
+        // Only a missing queue falls through: other errors are reported as they are.
+        let e = details_of(&EntityPath::queue("x"), |_| async {
+            Err::<EntityDetails, _>(Error::Network("down".into()))
+        })
+        .await
+        .unwrap_err();
+        assert!(matches!(e, Error::Network(_)), "{e}");
+
+        // A subscription path asks for a subscription only.
+        let asked = Mutex::new(Vec::new());
+        let sub = EntityPath::subscription("t", "s");
+        let e = details_of(&sub, |k| {
+            asked.lock().unwrap().push(k);
+            async { Err::<EntityDetails, _>(Error::NotFound("subscription".into())) }
+        })
+        .await
+        .unwrap_err();
+        assert!(matches!(e, Error::NotFound(_)));
+        assert_eq!(*asked.lock().unwrap(), [EntityKind::Subscription]);
+    }
+
+    #[test]
+    fn rules_need_a_subscription_path() {
+        let (topic, sub) = rule_target("orders/eu/subscriptions/audit").unwrap();
+        assert_eq!((topic.as_str(), sub.as_str()), ("orders/eu", "audit"));
+        let e = rule_target("orders").unwrap_err().to_string();
+        assert!(e.contains("<topic>/subscriptions/<subscription>"), "{e}");
+        assert!(rule_target("a/subscriptions/").is_err());
     }
 
     #[test]
