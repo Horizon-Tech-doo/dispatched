@@ -540,6 +540,27 @@ mod tests {
     }
 
     #[test]
+    fn a_profile_asking_for_a_tenant_uses_the_same_person_s_sign_in_there() {
+        use crate::ops::test_util::{remember_guest_sign_in, remember_sign_in};
+        let s = state();
+        let home = remember_sign_in(&s, "home-oid", "tenant-home", true);
+        s.store.set_current_sign_in(Some(&home.id)).unwrap();
+        // Saved before the tenant sign-in: bound to home, asking for the guest tenant.
+        let p = Profile::entra(
+            "G",
+            "g.servicebus.windows.net",
+            "home-oid",
+            Some("tenant-guest"),
+        );
+        s.store.insert(&p).unwrap();
+        assert_eq!(bound_sign_in(&s, &p).unwrap().unwrap().id, "home-oid");
+        remember_guest_sign_in(&s, &home, "guest-oid", "tenant-guest", true);
+        let bound = bound_sign_in(&s, &p).unwrap().unwrap();
+        assert_eq!((bound.id.as_str(), bound.live), ("guest-oid", true));
+        assert!(namespace_for_profile(&s, &p).is_ok());
+    }
+
+    #[test]
     fn an_expired_bound_sign_in_falls_back_to_the_same_person_s_tenant_sign_in() {
         use crate::ops::test_util::{remember_guest_sign_in, remember_sign_in};
         let s = state();

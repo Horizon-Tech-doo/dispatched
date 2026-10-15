@@ -142,9 +142,11 @@ impl AppState {
         Ok(found)
     }
 
-    /// The sign-in an Entra profile bound to `sign_in_id` (asking for `tenant`, if any) uses now: its
-    /// own sign-in while that has its refresh token; else a live sign-in by the same identity in the
-    /// tenant the profile lists (its `tenant`, or the bound sign-in's own). Returns the bound record too.
+    /// The sign-in an Entra profile bound to `sign_in_id` (asking for `tenant`, if any) uses now. The same
+    /// person's own sign-in in that tenant comes first, since it has satisfied the tenant's own sign-in
+    /// rules (MFA) where the bound sign-in asking for the tenant may not; then the bound sign-in while it
+    /// has its refresh token; else the same person's live sign-in in the bound sign-in's tenant. Returns
+    /// the bound record too.
     pub fn usable_sign_in(
         &self,
         sign_in_id: &str,
@@ -153,11 +155,15 @@ impl AppState {
         let Some(bound) = self.store.sign_in(sign_in_id)? else {
             return Ok((None, None));
         };
+        if let Some(t) = tenant.filter(|t| !t.eq_ignore_ascii_case(&bound.tenant_id))
+            && let Some(own) = self.live_sign_in_like(t, &bound)?
+        {
+            return Ok((Some(bound), Some(own)));
+        }
         if self.session.is_signed_in(&bound)? {
             return Ok((Some(bound.clone()), Some(bound)));
         }
-        let t = tenant.unwrap_or(&bound.tenant_id);
-        let usable = self.live_sign_in_like(t, &bound)?;
+        let usable = self.live_sign_in_like(&bound.tenant_id, &bound)?;
         Ok((Some(bound), usable))
     }
 }
