@@ -12,7 +12,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "e2e": "playwright test",
-    "shots": "playwright test e2e/shots.spec.ts --project=webkit",
+    "shots": "SHOTS=1 playwright test e2e/shots.spec.ts --project=webkit",
     "tauri": "tauri"
   },
   "dependencies": {

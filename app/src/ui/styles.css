@@ -9,6 +9,10 @@
   --radius-*: initial;
   --shadow-*: initial;
   --font-*: initial;
+  --animate-*: initial;
+  --font-weight-*: initial;
+  --font-weight-normal: 400;
+  --font-weight-semibold: 600;
 }
 
 @theme inline {
@@ -74,7 +78,7 @@
   input, textarea, [data-selectable] { user-select: text; }
   :focus-visible { outline: 1px solid var(--c-fg); outline-offset: -1px; }
   ::selection { background: var(--c-selection); color: var(--c-fg); }
-  ::placeholder { color: var(--c-faint); }
+  ::placeholder { color: var(--c-muted); }
   * { scrollbar-width: thin; scrollbar-color: var(--c-line) transparent; }
   .font-mono { font-variant-ligatures: none; }
   @media (prefers-reduced-motion: reduce) {

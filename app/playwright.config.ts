@@ -4,6 +4,7 @@ const viewport = { width: 1440, height: 900 };
 
 export default defineConfig({
   testDir: "e2e",
+  testIgnore: process.env.SHOTS ? [] : ["**/shots.spec.ts"],
   fullyParallel: true,
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? [["list"], ["html", { open: "never" }]] : [["list"]],

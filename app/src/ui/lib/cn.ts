@@ -2,10 +2,10 @@ import { clsx, type ClassValue } from "clsx";
 import { extendTailwindMerge } from "tailwind-merge";
 
 // Teach tailwind-merge our custom font-size scale (so `text-12` and `text-muted` don't collide)
-// and the `row` spacing step (so `h-row` and `h-4` dedupe).
+// the `row` spacing step (so `h-row` and `h-4` dedupe), and our radius and shadow tokens.
 const merge = extendTailwindMerge({
   extend: {
-    theme: { spacing: ["row"] },
+    theme: { spacing: ["row"], radius: ["ctl"], shadow: ["float"] },
     classGroups: { "font-size": [{ text: ["11", "12", "13", "14"] }] },
   },
 });
