@@ -30,7 +30,7 @@ time = { workspace = true }
 tauri = { version = "~2.11", features = [] }
 tauri-plugin-process = "~2.3"
 tauri-plugin-updater = "~2.12"
-tokio = { version = "1", features = ["sync", "macros", "time"] }
+tokio = { version = "1", features = ["sync", "macros", "time", "rt"] }
 
 [dev-dependencies]
 secrecy = { workspace = true }

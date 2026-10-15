@@ -78,9 +78,13 @@ pub async fn profile_test(
 use crate::ops::account::{AccountView, SignInView};
 use crate::ops::browse::{PeekPageView, PeekRequest};
 use crate::ops::connection::ConnectionView;
+use crate::ops::dashboard::DashboardView;
 use crate::ops::discovery::{DiscoveryView, TenantView};
 use crate::ops::tree::EntityListing;
-use dispatched_core::{FilterIssue, FilterSpec, MessageDetail, PeekView, SubscriptionInfo};
+use dispatched_core::{
+    EntityDetails, EntityKind, FilterIssue, FilterSpec, MessageDetail, PeekView, RuleInfo,
+    SessionListing, SubscriptionInfo,
+};
 
 #[tauri::command]
 pub async fn account_current(
@@ -188,4 +192,45 @@ pub async fn message_detail(
 #[tauri::command]
 pub fn check_filter(filter: FilterSpec) -> Vec<FilterIssue> {
     ops::browse::check_filter(&filter)
+}
+
+#[tauri::command]
+pub async fn entity_details(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile_id: String,
+    kind: EntityKind,
+    entity: String,
+) -> Result<EntityDetails, CommandError> {
+    ops::entity::entity_details(&state, &TauriEvents(app), &profile_id, kind, &entity).await
+}
+
+/// `entity` is `topic/subscriptions/name`.
+#[tauri::command]
+pub async fn list_rules(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile_id: String,
+    entity: String,
+) -> Result<Vec<RuleInfo>, CommandError> {
+    ops::entity::list_rules(&state, &TauriEvents(app), &profile_id, &entity).await
+}
+
+#[tauri::command]
+pub async fn list_sessions(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile_id: String,
+    entity: String,
+) -> Result<SessionListing, CommandError> {
+    ops::entity::list_sessions(&state, &TauriEvents(app), &profile_id, &entity).await
+}
+
+#[tauri::command]
+pub async fn dashboard(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile_id: String,
+) -> Result<DashboardView, CommandError> {
+    ops::dashboard::dashboard(&state, &TauriEvents(app), &profile_id).await
 }

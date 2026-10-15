@@ -4,7 +4,9 @@
 pub mod account;
 pub mod browse;
 pub mod connection;
+pub mod dashboard;
 pub mod discovery;
+pub mod entity;
 pub mod profiles;
 pub mod settings;
 pub mod tree;
