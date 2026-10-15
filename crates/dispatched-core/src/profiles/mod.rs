@@ -219,7 +219,7 @@ pub fn namespace_for(
         ProfileAuth::ConnectionString => {
             let secret = secrets.get(&secret_key(&profile.id))?.ok_or_else(|| {
                 Error::Invalid(format!(
-                    "profile `{}` has no stored connection string; remove and add it again",
+                    "profile `{}` has no stored connection string; edit the connection and paste it again",
                     profile.name
                 ))
             })?;
@@ -290,6 +290,12 @@ mod tests {
         let e = namespace_for(&p, &MemoryStore::new(), &session(), None).unwrap_err();
         assert!(matches!(e, Error::Invalid(_)));
         assert!(e.to_string().contains("no stored connection string"), "{e}");
+        // ... and says how to fix it.
+        assert!(
+            e.to_string()
+                .contains("edit the connection and paste it again"),
+            "{e}"
+        );
     }
 
     #[test]

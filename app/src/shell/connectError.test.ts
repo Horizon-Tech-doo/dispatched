@@ -6,7 +6,7 @@ const err = (kind: string, message: string) => ({ kind, message });
 
 describe("describeConnectError", () => {
   it("explains a missing keychain secret", () => {
-    const d = describeConnectError(err("invalid", "profile `Logistics` has no stored connection string; remove and add it again"), profile);
+    const d = describeConnectError(err("invalid", "profile `Logistics` has no stored connection string; edit the connection and paste it again"), profile);
     expect(d.message).toBe("The connection string for Logistics isn't in the system keychain. Edit the connection and paste it again.");
     expect(d.retryable).toBe(false);
   });

@@ -172,7 +172,7 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
         const p = profiles.find((o) => o.id === args.profileId);
         if (!p) throw new EngineError("not_found", "That profile no longer exists.");
         if (scenario === "missing-secret") {
-          const e = new EngineError("invalid", `profile \`${p.name}\` has no stored connection string; remove and add it again`);
+          const e = new EngineError("invalid", `profile \`${p.name}\` has no stored connection string; edit the connection and paste it again`);
           activity(`Connecting to ${p.name} failed`, started, e);
           throw e;
         }
