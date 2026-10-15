@@ -16,7 +16,10 @@ pub fn get(state: &AppState, key: &str) -> Result<Option<Value>, CommandError> {
 pub fn set(state: &AppState, key: &str, value: Option<Value>) -> Result<(), CommandError> {
     let text = value.map(|v| v.to_string());
     if text.as_ref().is_some_and(|t| t.len() > MAX_SETTING_BYTES) {
-        return Err(CommandError::new("invalid", "That setting is too large to save."));
+        return Err(CommandError::new(
+            "invalid",
+            "That setting is too large to save.",
+        ));
     }
     state.store.set_app_setting(key, text.as_deref())?;
     Ok(())
@@ -32,8 +35,16 @@ mod tests {
     fn settings_round_trip_as_json() {
         let s = state();
         assert_eq!(get(&s, "ui").unwrap(), None);
-        set(&s, "ui", Some(json!({"theme": "dark", "density": "compact"}))).unwrap();
-        assert_eq!(get(&s, "ui").unwrap(), Some(json!({"theme": "dark", "density": "compact"})));
+        set(
+            &s,
+            "ui",
+            Some(json!({"theme": "dark", "density": "compact"})),
+        )
+        .unwrap();
+        assert_eq!(
+            get(&s, "ui").unwrap(),
+            Some(json!({"theme": "dark", "density": "compact"}))
+        );
         set(&s, "ui", None).unwrap();
         assert_eq!(get(&s, "ui").unwrap(), None);
     }

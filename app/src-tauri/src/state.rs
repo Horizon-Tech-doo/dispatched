@@ -31,7 +31,11 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(store: ProfileStore, secrets: Arc<dyn CredentialStore>) -> Self {
-        let session = Arc::new(EntraSession::new(AzureCloud::Public, secrets.clone(), KEY_PREFIX));
+        let session = Arc::new(EntraSession::new(
+            AzureCloud::Public,
+            secrets.clone(),
+            KEY_PREFIX,
+        ));
         Self {
             store,
             secrets,

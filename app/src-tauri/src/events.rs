@@ -33,9 +33,20 @@ pub struct ActivityEntry {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum JobEvent {
-    Started { id: String, title: String, total: Option<u64> },
-    Progress { id: String, done: u64, total: Option<u64> },
-    Finished { id: String, error: Option<ActivityError> },
+    Started {
+        id: String,
+        title: String,
+        total: Option<u64>,
+    },
+    Progress {
+        id: String,
+        done: u64,
+        total: Option<u64>,
+    },
+    Finished {
+        id: String,
+        error: Option<ActivityError>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -114,10 +125,18 @@ pub async fn tracked<T>(
         Ok(v) => (describe(v), None),
         Err(e) => (
             failed.to_string(),
-            Some(ActivityError { kind: e.kind.to_string(), message: e.message.clone() }),
+            Some(ActivityError {
+                kind: e.kind.to_string(),
+                message: e.message.clone(),
+            }),
         ),
     };
-    ev.activity(ActivityEntry { at: now_rfc3339(), action, duration_ms, error });
+    ev.activity(ActivityEntry {
+        at: now_rfc3339(),
+        action,
+        duration_ms,
+        error,
+    });
     result
 }
 
@@ -129,12 +148,20 @@ mod tests {
     #[tokio::test]
     async fn tracked_records_success_and_failure_with_durations() {
         let ev = Recorder::default();
-        let ok: Result<u32, CommandError> = tracked(&ev, "Counting failed", async { Ok(3) }, |n| format!("Counted {n}")).await;
+        let ok: Result<u32, CommandError> = tracked(&ev, "Counting failed", async { Ok(3) }, |n| {
+            format!("Counted {n}")
+        })
+        .await;
         assert_eq!(ok.unwrap(), 3);
         let err: Result<u32, CommandError> = tracked(
             &ev,
             "Counting failed",
-            async { Err(CommandError::new("forbidden", "access denied (needs Listen): no")) },
+            async {
+                Err(CommandError::new(
+                    "forbidden",
+                    "access denied (needs Listen): no",
+                ))
+            },
             |n| format!("Counted {n}"),
         )
         .await;
@@ -144,7 +171,10 @@ mod tests {
         assert!(log[0].error.is_none());
         assert_eq!(log[1].action, "Counting failed");
         assert_eq!(log[1].error.as_ref().unwrap().kind, "forbidden");
-        assert!(time::OffsetDateTime::parse(&log[0].at, &time::format_description::well_known::Rfc3339).is_ok());
+        assert!(
+            time::OffsetDateTime::parse(&log[0].at, &time::format_description::well_known::Rfc3339)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -159,12 +189,21 @@ mod tests {
             serde_json::to_value(&e).unwrap(),
             serde_json::json!({"at":"2026-10-15T09:41:12Z","action":"Listed 4 queues and 3 topics","duration_ms":312,"error":null})
         );
-        let j = JobEvent::Progress { id: "j1".into(), done: 5, total: Some(10) };
+        let j = JobEvent::Progress {
+            id: "j1".into(),
+            done: 5,
+            total: Some(10),
+        };
         assert_eq!(
             serde_json::to_value(&j).unwrap(),
             serde_json::json!({"type":"progress","id":"j1","done":5,"total":10})
         );
-        let p = SignInPrompt { kind: "device-code", url: "https://microsoft.com/devicelogin".into(), user_code: Some("ABCD-EFGH".into()), message: "Go to ...".into() };
+        let p = SignInPrompt {
+            kind: "device-code",
+            url: "https://microsoft.com/devicelogin".into(),
+            user_code: Some("ABCD-EFGH".into()),
+            message: "Go to ...".into(),
+        };
         assert_eq!(serde_json::to_value(&p).unwrap()["user_code"], "ABCD-EFGH");
     }
 }

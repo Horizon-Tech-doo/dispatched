@@ -25,12 +25,19 @@ pub fn app_info(app: AppHandle, state: State<'_, AppState>) -> AppInfo {
 }
 
 #[tauri::command]
-pub fn settings_get(state: State<'_, AppState>, key: String) -> Result<Option<Value>, CommandError> {
+pub fn settings_get(
+    state: State<'_, AppState>,
+    key: String,
+) -> Result<Option<Value>, CommandError> {
     ops::settings::get(&state, &key)
 }
 
 #[tauri::command]
-pub fn settings_set(state: State<'_, AppState>, key: String, value: Option<Value>) -> Result<(), CommandError> {
+pub fn settings_set(
+    state: State<'_, AppState>,
+    key: String,
+    value: Option<Value>,
+) -> Result<(), CommandError> {
     ops::settings::set(&state, &key, value)
 }
 
@@ -40,16 +47,28 @@ pub fn profiles_list(state: State<'_, AppState>) -> Result<Vec<Profile>, Command
 }
 
 #[tauri::command]
-pub async fn profile_save(app: AppHandle, state: State<'_, AppState>, draft: ProfileDraft) -> Result<Profile, CommandError> {
+pub async fn profile_save(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    draft: ProfileDraft,
+) -> Result<Profile, CommandError> {
     ops::profiles::save(&state, &TauriEvents(app), draft).await
 }
 
 #[tauri::command]
-pub async fn profile_delete(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), CommandError> {
+pub async fn profile_delete(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), CommandError> {
     ops::profiles::delete(&state, &TauriEvents(app), &id).await
 }
 
 #[tauri::command]
-pub async fn profile_test(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<ConnectionReport, CommandError> {
+pub async fn profile_test(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<ConnectionReport, CommandError> {
     ops::profiles::test(&state, &TauriEvents(app), &id).await
 }

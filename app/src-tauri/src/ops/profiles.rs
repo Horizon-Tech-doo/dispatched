@@ -9,7 +9,11 @@ pub fn list(state: &AppState) -> Result<Vec<Profile>, CommandError> {
     Ok(state.store.list()?)
 }
 
-pub async fn save(state: &AppState, ev: &dyn Events, draft: ProfileDraft) -> Result<Profile, CommandError> {
+pub async fn save(
+    state: &AppState,
+    ev: &dyn Events,
+    draft: ProfileDraft,
+) -> Result<Profile, CommandError> {
     tracked(
         ev,
         "Saving the profile failed",
@@ -18,7 +22,9 @@ pub async fn save(state: &AppState, ev: &dyn Events, draft: ProfileDraft) -> Res
                 dispatched_core::profiles::DraftAuth::Entra { .. } => state.current_sign_in()?,
                 _ => None,
             };
-            Ok(state.store.save_draft(&draft, state.secrets.as_ref(), sign_in.as_ref())?)
+            Ok(state
+                .store
+                .save_draft(&draft, state.secrets.as_ref(), sign_in.as_ref())?)
         },
         |p| format!("Saved profile {}", p.name),
     )
@@ -35,14 +41,19 @@ pub async fn delete(state: &AppState, ev: &dyn Events, id: &str) -> Result<(), C
         ev,
         "Removing the profile failed",
         async {
-            let was_active = state.active.read().await.as_ref().is_some_and(|a| a.profile_id == id);
-            if was_active
-                && let Some(old) = state.active.write().await.take()
-            {
+            let was_active = state
+                .active
+                .read()
+                .await
+                .as_ref()
+                .is_some_and(|a| a.profile_id == id);
+            if was_active && let Some(old) = state.active.write().await.take() {
                 old.explorer.close().await;
             }
             state.store.delete(&profile.name, state.secrets.as_ref())?;
-            state.store.clear_app_settings_with_prefix(&format!("shell:{id}"))?;
+            state
+                .store
+                .clear_app_settings_with_prefix(&format!("shell:{id}"))?;
             Ok(())
         },
         |_| format!("Removed profile {name}"),
@@ -68,10 +79,19 @@ pub fn namespace_for_profile(state: &AppState, p: &Profile) -> Result<Namespace,
             }
         }
     };
-    Ok(namespace_for(p, state.secrets.as_ref(), &state.session, sign_in.as_ref())?)
+    Ok(namespace_for(
+        p,
+        state.secrets.as_ref(),
+        &state.session,
+        sign_in.as_ref(),
+    )?)
 }
 
-pub async fn test(state: &AppState, ev: &dyn Events, id: &str) -> Result<ConnectionReport, CommandError> {
+pub async fn test(
+    state: &AppState,
+    ev: &dyn Events,
+    id: &str,
+) -> Result<ConnectionReport, CommandError> {
     let p = state
         .store
         .get_by_id(id)?
@@ -85,7 +105,14 @@ pub async fn test(state: &AppState, ev: &dyn Events, id: &str) -> Result<Connect
             explorer.close().await;
             Ok(report)
         },
-        |r| format!("Tested {}: management {}, messaging {}", p.name, check_word(&r.management), check_word(&r.messaging)),
+        |r| {
+            format!(
+                "Tested {}: management {}, messaging {}",
+                p.name,
+                check_word(&r.management),
+                check_word(&r.messaging)
+            )
+        },
     )
     .await
 }
@@ -110,7 +137,9 @@ mod tests {
         ProfileDraft {
             id: None,
             name: name.into(),
-            auth: DraftAuth::ConnectionString { connection_string: cs.map(str::to_string) },
+            auth: DraftAuth::ConnectionString {
+                connection_string: cs.map(str::to_string),
+            },
             production: false,
             color: None,
             transport: Transport::Amqp,
@@ -125,7 +154,11 @@ mod tests {
         let ev = Recorder::default();
         let p = save(&s, &ev, draft("Logistics", Some(CS))).await.unwrap();
         assert!(!serde_json::to_string(&p).unwrap().contains(SECRET_PART));
-        assert!(!serde_json::to_string(&list(&s).unwrap()).unwrap().contains(SECRET_PART));
+        assert!(
+            !serde_json::to_string(&list(&s).unwrap())
+                .unwrap()
+                .contains(SECRET_PART)
+        );
         let log = serde_json::to_string(&*ev.activity.lock().unwrap()).unwrap();
         assert!(log.contains("Saved profile Logistics"), "{log}");
         assert!(!log.contains(SECRET_PART), "{log}");
@@ -148,12 +181,24 @@ mod tests {
         let s = state();
         let ev = Recorder::default();
         let p = save(&s, &ev, draft("Logistics", Some(CS))).await.unwrap();
-        s.store.set_app_setting(&format!("shell:{}", p.id), Some("{}")).unwrap();
+        s.store
+            .set_app_setting(&format!("shell:{}", p.id), Some("{}"))
+            .unwrap();
         s.store.set_app_setting("ui", Some("{}")).unwrap();
         delete(&s, &ev, &p.id).await.unwrap();
         assert!(list(&s).unwrap().is_empty());
-        assert!(s.secrets.get(&dispatched_core::profiles::secret_key(&p.id)).unwrap().is_none());
-        assert!(s.store.app_setting(&format!("shell:{}", p.id)).unwrap().is_none());
+        assert!(
+            s.secrets
+                .get(&dispatched_core::profiles::secret_key(&p.id))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            s.store
+                .app_setting(&format!("shell:{}", p.id))
+                .unwrap()
+                .is_none()
+        );
         assert!(s.store.app_setting("ui").unwrap().is_some());
     }
 
@@ -175,6 +220,10 @@ mod tests {
         s.store.insert(&p).unwrap();
         let e = namespace_for_profile(&s, &p).unwrap_err();
         assert_eq!(e.kind, "invalid");
-        assert!(e.message.contains("Orphan") && e.message.contains("connection string"), "{}", e.message);
+        assert!(
+            e.message.contains("Orphan") && e.message.contains("connection string"),
+            "{}",
+            e.message
+        );
     }
 }
