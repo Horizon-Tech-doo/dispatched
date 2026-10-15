@@ -1,0 +1,41 @@
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title type="text">Rules</title>
+  <entry>
+    <title type="text">$Default</title>
+    <content type="application/xml">
+      <RuleDescription xmlns="http://schemas.microsoft.com/netservices/2010/10/servicebus/connect" xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+        <Filter i:type="TrueFilter"><SqlExpression>1=1</SqlExpression><CompatibilityLevel>20</CompatibilityLevel></Filter>
+        <Action i:type="EmptyRuleAction"/>
+        <CreatedAt>2026-09-01T08:00:00Z</CreatedAt>
+        <Name>$Default</Name>
+      </RuleDescription>
+    </content>
+  </entry>
+  <entry>
+    <title type="text">eu-only</title>
+    <content type="application/xml">
+      <RuleDescription xmlns="http://schemas.microsoft.com/netservices/2010/10/servicebus/connect" xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+        <Filter i:type="SqlFilter"><SqlExpression>region = 'eu' AND sys.Label LIKE 'order%'</SqlExpression></Filter>
+        <Action i:type="SqlRuleAction"><SqlExpression>SET priority = 'high'</SqlExpression></Action>
+        <Name>eu-only</Name>
+      </RuleDescription>
+    </content>
+  </entry>
+  <entry>
+    <title type="text">priority</title>
+    <content type="application/xml">
+      <RuleDescription xmlns="http://schemas.microsoft.com/netservices/2010/10/servicebus/connect" xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+        <Filter i:type="CorrelationFilter">
+          <CorrelationId>batch-7</CorrelationId>
+          <Label>priority</Label>
+          <Properties>
+            <KeyValueOfstringanyType><Key>region</Key><Value xmlns:d6p1="http://www.w3.org/2001/XMLSchema" i:type="d6p1:string">eu</Value></KeyValueOfstringanyType>
+            <KeyValueOfstringanyType><Key>tier</Key><Value xmlns:d6p1="http://www.w3.org/2001/XMLSchema" i:type="d6p1:int">2</Value></KeyValueOfstringanyType>
+          </Properties>
+        </Filter>
+        <Action i:type="EmptyRuleAction"/>
+        <Name>priority</Name>
+      </RuleDescription>
+    </content>
+  </entry>
+</feed>

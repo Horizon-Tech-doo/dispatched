@@ -104,7 +104,7 @@ fn text(node: &Node, name: &str) -> Option<String> {
     node.text_of(name).map(str::to_string)
 }
 
-fn counts(desc: &Node) -> Option<EntityCounts> {
+pub(crate) fn counts(desc: &Node) -> Option<EntityCounts> {
     let c = desc.child("CountDetails")?;
     Some(EntityCounts {
         active: opt(c, "ActiveMessageCount").unwrap_or_default(),

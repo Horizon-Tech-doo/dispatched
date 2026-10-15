@@ -4,7 +4,10 @@ use crate::messaging::{
     PeekOptions, PeekPage, PeekSource, PeekedMessage, SequenceCollection, ServiceBusConnection,
     StateCounts, collect_sequences, count_messages, peek_one, peek_tail, scan_messages,
 };
-use crate::mgmt::{EntityCounts, ManagementClient, QueueInfo, SubscriptionInfo, TopicInfo};
+use crate::mgmt::{
+    EntityCounts, EntityDetails, EntityKind, ManagementClient, QueueInfo, RuleInfo,
+    SubscriptionInfo, TopicInfo,
+};
 use crate::namespace::{EntityPath, Namespace, PeekView, SubQueue};
 use crate::{Error, Result};
 use async_trait::async_trait;
@@ -91,6 +94,25 @@ impl Explorer {
         )
         .await;
         Ok(subs)
+    }
+
+    /// One entity's description; missing queue or subscription counts are counted by peeking
+    /// (approximate), as in the listings.
+    pub async fn entity_details(&self, kind: EntityKind, path: &str) -> Result<EntityDetails> {
+        let mut d = self.mgmt.entity_details(kind, path).await?;
+        if d.counts.is_none() && kind != EntityKind::Topic {
+            let entity = EntityPath::parse(path)?;
+            match self.count_by_peek(&entity, Self::COUNT_CAP).await {
+                Ok(c) => d.counts = Some(c),
+                Err(e) => tracing::debug!(entity = %path, error = %e, "approximate count failed"),
+            }
+        }
+        Ok(d)
+    }
+
+    /// The rules of a subscription.
+    pub async fn list_rules(&self, topic: &str, subscription: &str) -> Result<Vec<RuleInfo>> {
+        self.mgmt.list_rules(topic, subscription).await
     }
 
     /// Count messages by peeking, for namespaces such as the emulator that

@@ -31,7 +31,10 @@ pub use messaging::{
     MessageBody, MessageDetail, MessageState, MessageSummary, PeekOptions, PeekPage, PeekedMessage,
     PropValue,
 };
-pub use mgmt::{EntityCounts, ManagementClient, QueueInfo, SubscriptionInfo, TopicInfo};
+pub use mgmt::{
+    CorrelationProperty, EntityCounts, EntityDetails, EntityKind, EntityProperty, ManagementClient,
+    QueueInfo, RuleFilter, RuleInfo, SubscriptionInfo, TopicInfo,
+};
 pub use namespace::{
     EmulatorPorts, EntityPath, Namespace, PeekView, ProxyConfig, SubQueue, Transport,
 };
