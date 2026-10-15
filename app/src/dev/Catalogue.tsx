@@ -1,10 +1,15 @@
 import { useState, type ReactNode } from "react";
-import { RefreshCw } from "lucide-react";
+import { Copy, RefreshCw, Settings } from "lucide-react";
 import {
-  Button, CountBadge, EmptyState, EntityGlyph, Field, IconButton, Input, Kbd, ProdBadge,
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue, SkeletonRows, ThemeScope,
-  type Density, type ThemeName,
+  Button, CommandGroup, CommandInput, CommandItem, CommandList, CommandPaletteDialog, CommandShortcut,
+  CountBadge, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
+  EmptyState, EntityGlyph, Field, Hint, IconButton, Input, Kbd, MenuShortcut, Panel, PanelGroup, ProdBadge,
+  ResizeHandle, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Sheet, SkeletonRows,
+  Tabs, TabsList, TabsTrigger, ThemeScope, TooltipProvider,
+  shortcutLabel, type Density, type ThemeName,
 } from "@/ui";
+
+const SUB_TABS = ["Overview", "Messages", "Dead-letter", "Subscriptions", "Rules", "Properties", "Metrics", "Access", "Settings"];
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -12,6 +17,75 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
       <h2 className="m-0 mb-2 text-12 font-semibold text-muted">{title}</h2>
       <div className="flex flex-wrap items-start gap-3">{children}</div>
     </section>
+  );
+}
+
+function Overlays() {
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  return (
+    <Section title="Overlays">
+      <div className="w-full">
+        <Tabs defaultValue="orders">
+          <TabsList variant="strip" aria-label="Open entities">
+            <TabsTrigger value="orders"><EntityGlyph kind="queue" />orders</TabsTrigger>
+            <TabsTrigger value="shipment-events"><EntityGlyph kind="topic" />shipment-events</TabsTrigger>
+            <TabsTrigger value="audit"><EntityGlyph kind="subscription" />audit</TabsTrigger>
+          </TabsList>
+        </Tabs>
+      </div>
+      <div className="w-full border-b border-line">
+        <Tabs defaultValue="Overview">
+          <TabsList variant="underline" aria-label="Views">
+            {SUB_TABS.map((t) => <TabsTrigger key={t} value={t}>{t}</TabsTrigger>)}
+          </TabsList>
+        </Tabs>
+      </div>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild><Button>Logistics</Button></DropdownMenuTrigger>
+        <DropdownMenuContent>
+          <DropdownMenuItem><Copy />Copy name<MenuShortcut>{shortcutLabel("mod+c")}</MenuShortcut></DropdownMenuItem>
+          <DropdownMenuItem><RefreshCw />Refresh<MenuShortcut>{shortcutLabel("f5")}</MenuShortcut></DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem><Settings />Manage profiles</DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+      <Hint label="Refresh" shortcut="f5"><IconButton label="Refresh entity"><RefreshCw /></IconButton></Hint>
+      <Button onClick={() => setSheetOpen(true)}>Open sheet</Button>
+      <Button onClick={() => setPaletteOpen(true)}>Open palette <Kbd shortcut="mod+k" /></Button>
+      <Sheet
+        open={sheetOpen}
+        onOpenChange={setSheetOpen}
+        title="Add connection"
+        description="Saved on this computer."
+        footer={<><Button variant="quiet" onClick={() => setSheetOpen(false)}>Cancel</Button><Button variant="primary">Save profile</Button></>}
+      >
+        <div className="flex flex-col gap-3">
+          <Field label="Name">{(ids) => <Input {...ids} placeholder="Logistics" />}</Field>
+          <Field label="Connection string" hint="Stays in your keychain">{(ids) => <Input {...ids} mono placeholder="Endpoint=sb://…" />}</Field>
+        </div>
+      </Sheet>
+      <CommandPaletteDialog open={paletteOpen} onOpenChange={setPaletteOpen}>
+        <CommandInput placeholder="Type a command or search entities" />
+        <CommandList>
+          <CommandGroup heading="App">
+            <CommandItem><RefreshCw />Refresh<CommandShortcut><Kbd shortcut="f5" /></CommandShortcut></CommandItem>
+            <CommandItem><Settings />Toggle theme</CommandItem>
+          </CommandGroup>
+          <CommandGroup heading="Entities">
+            <CommandItem><EntityGlyph kind="queue" />orders</CommandItem>
+            <CommandItem><EntityGlyph kind="topic" />shipment-events</CommandItem>
+          </CommandGroup>
+        </CommandList>
+      </CommandPaletteDialog>
+      <div className="h-[400px] w-full border border-line">
+        <PanelGroup direction="horizontal">
+          <Panel defaultSize={35} minSize={20}><div className="p-3 text-muted">Tree</div></Panel>
+          <ResizeHandle />
+          <Panel minSize={30}><div className="p-3 text-muted">Content</div></Panel>
+        </PanelGroup>
+      </div>
+    </Section>
   );
 }
 
@@ -66,6 +140,7 @@ function Column({ theme, density }: { theme: ThemeName; density: Density }) {
           <EmptyState title="No dead letters" body="Messages that fail delivery land here. This subscription has none." />
           <EmptyState tone="error" title="Can't list subscriptions" body="This identity needs Listen or Manage on shipment-events." action={<Button>Retry</Button>} />
         </Section>
+        <Overlays />
       </div>
     </ThemeScope>
   );
@@ -74,17 +149,19 @@ function Column({ theme, density }: { theme: ThemeName; density: Density }) {
 export default function Catalogue() {
   const [density, setDensity] = useState<Density>("compact");
   return (
-    <div data-shot-scroller className="h-full overflow-auto">
-      <div className="flex items-center gap-2 border-b border-line bg-chrome px-4 py-2">
-        <span className="font-semibold">Component catalogue</span>
-        <Button variant="quiet" onClick={() => setDensity(density === "compact" ? "comfortable" : "compact")}>
-          Density: {density}
-        </Button>
+    <TooltipProvider>
+      <div data-shot-scroller className="h-full overflow-auto">
+        <div className="flex items-center gap-2 border-b border-line bg-chrome px-4 py-2">
+          <span className="font-semibold">Component catalogue</span>
+          <Button variant="quiet" onClick={() => setDensity(density === "compact" ? "comfortable" : "compact")}>
+            Density: {density}
+          </Button>
+        </div>
+        <div className="grid grid-cols-2">
+          <Column theme="dark" density={density} />
+          <Column theme="light" density={density} />
+        </div>
       </div>
-      <div className="grid grid-cols-2">
-        <Column theme="dark" density={density} />
-        <Column theme="light" density={density} />
-      </div>
-    </div>
+    </TooltipProvider>
   );
 }
