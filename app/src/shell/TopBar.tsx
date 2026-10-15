@@ -1,0 +1,36 @@
+import { RefreshCw, Search } from "lucide-react";
+import { inTauri } from "@/engine";
+import { Hint, IconButton, Kbd, isMac } from "@/ui";
+import { ConnectionSelector } from "./ConnectionSelector";
+import { useShell } from "./context";
+
+export function TopBar() {
+  const { conn, setPaletteOpen, refresh } = useShell();
+  const macInset = isMac && inTauri();
+  return (
+    <header
+      data-tauri-drag-region
+      className="flex h-[38px] shrink-0 items-center gap-3 border-b border-line bg-chrome pr-2"
+      style={{ paddingLeft: macInset ? 84 : 10 }}
+    >
+      <ConnectionSelector />
+      {conn.view && <span className="truncate text-12 text-faint">{conn.view.auth}</span>}
+      <div data-tauri-drag-region className="h-full min-w-4 flex-1" />
+      <button
+        type="button"
+        onClick={() => setPaletteOpen(true)}
+        className="flex h-6 w-[380px] max-w-[40vw] items-center gap-2 rounded-ctl border border-line bg-field px-2 text-12 text-faint hover:text-muted"
+      >
+        <Search aria-hidden="true" className="size-3.5 text-icon" />
+        <span className="flex-1 text-left">Go to entity or command</span>
+        <Kbd shortcut="mod+k" />
+      </button>
+      <div data-tauri-drag-region className="h-full min-w-4 flex-1" />
+      <Hint label="Refresh" shortcut="f5">
+        <IconButton label="Refresh" onClick={refresh} disabled={conn.status !== "connected"}>
+          <RefreshCw />
+        </IconButton>
+      </Hint>
+    </header>
+  );
+}

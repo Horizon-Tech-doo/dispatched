@@ -4,6 +4,10 @@ import { test, type Page } from "@playwright/test";
  *  `scroll: true` marks a screen whose content scrolls inside an `[data-shot-scroller]` element
  *  (the page itself never scrolls), so the capture expands it to its full height.
  *  `prepare` runs after load and before the screenshot (open a sheet, a menu...). */
+const waitConnected = async (page: Page) => {
+  await page.getByRole("contentinfo").getByText("Connected").waitFor();
+};
+
 export const shots: { name: string; path: string; scroll?: boolean; prepare?: (page: Page) => Promise<void> }[] = [
   { name: "catalogue", path: "/#catalogue", scroll: true },
   {
@@ -31,6 +35,19 @@ export const shots: { name: string; path: string; scroll?: boolean; prepare?: (p
       await page.getByRole("heading", { name: "Overlays" }).first().evaluate((el) => el.scrollIntoView({ block: "start" }));
       await page.getByRole("button", { name: "Open sheet" }).first().click();
       await page.getByRole("dialog", { name: "Add connection" }).waitFor();
+    },
+  },
+  { name: "welcome", path: "/?scenario=default" },
+  { name: "welcome-empty", path: "/?scenario=empty" },
+  { name: "connect-failed", path: "/?scenario=missing-secret&autoconnect=p-logistics" },
+  { name: "shell-prod", path: "/?scenario=default&autoconnect=p-logistics", prepare: waitConnected },
+  {
+    name: "shell-selector",
+    path: "/?scenario=default&autoconnect=p-logistics-dev",
+    prepare: async (page) => {
+      await waitConnected(page);
+      await page.getByRole("button", { name: /^Connection:/ }).click();
+      await page.getByRole("menu").waitFor();
     },
   },
 ];

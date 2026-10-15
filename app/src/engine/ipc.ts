@@ -29,6 +29,9 @@ export function setTransport(t: IpcTransport): void {
   transport = t;
 }
 
+/** True inside the desktop app (false in the browser mock and tests). */
+export const inTauri = (): boolean => typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
 export function toEngineError(e: unknown): EngineError {
   if (e instanceof EngineError) return e;
   if (e && typeof e === "object" && "kind" in e && "message" in e) {

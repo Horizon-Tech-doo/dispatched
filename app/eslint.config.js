@@ -40,9 +40,6 @@ export default tseslint.config(
     },
   },
   { files: ["src/engine/ipc.ts"], rules: { "no-restricted-imports": "off" } },
-  // TEMPORARY: M0 code, removed in Task 13. src/api.ts predates the boundary rules and
-  // imports @tauri-apps/* directly; Task 13 replaces it with src/engine/ipc.ts.
-  { files: ["src/api.ts"], rules: { "no-restricted-imports": "off" } },
   {
     files: ["src/shell/**"],
     rules: {
