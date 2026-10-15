@@ -23,9 +23,13 @@ open = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 time = { workspace = true }
-tauri = { version = "2", features = [] }
-tauri-plugin-process = "2"
-tauri-plugin-updater = "2"
+# Each Tauri crate stays on the same major.minor as its npm package in
+# app/package.json (`tauri build` refuses a mismatch). The newer lines
+# (tauri 2.12, plugin-process 2.4, plugin-updater 2.13+) need Rust 1.90,
+# above the workspace MSRV of 1.88; move a crate and its npm package together.
+tauri = { version = "~2.11", features = [] }
+tauri-plugin-process = "~2.3"
+tauri-plugin-updater = "~2.12"
 tokio = { version = "1", features = ["sync", "macros", "time"] }
 
 [dev-dependencies]
