@@ -30,22 +30,37 @@ export const useAppInfo = () => useQuery({ queryKey: keys.appInfo, queryFn: comm
 export const useProfiles = () => useQuery({ queryKey: keys.profiles, queryFn: commands.profilesList });
 export const useAccount = () => useQuery({ queryKey: keys.account, queryFn: commands.accountCurrent });
 
+/** A listing that needs the account: when it says the sign-in is gone, the account is read again, so a
+ *  sheet that showed a picker shows the sign-in panel instead. */
+function needsAccount<T>(qc: QueryClient, run: () => Promise<T>): () => Promise<T> {
+  return async () => {
+    try {
+      return await run();
+    } catch (e) {
+      if ((e as EngineError).kind === "not_signed_in") void qc.invalidateQueries({ queryKey: keys.account });
+      throw e;
+    }
+  };
+}
+
 /** The tenants of the signed-in account; another account refetches. */
 export function useTenants(enabled = true) {
+  const qc = useQueryClient();
   const accountId = useAccount().data?.id ?? null;
   return useQuery({
     queryKey: keys.tenants(accountId),
-    queryFn: commands.listTenants,
+    queryFn: needsAccount(qc, commands.listTenants),
     enabled: enabled && accountId !== null,
   });
 }
 
 /** Service Bus namespaces in a tenant (`null` is the home tenant) of the signed-in account. */
 export function useDiscoveredNamespaces(tenantId: string | null, enabled = true) {
+  const qc = useQueryClient();
   const accountId = useAccount().data?.id ?? null;
   return useQuery({
     queryKey: keys.discovery(accountId, tenantId),
-    queryFn: () => commands.discoverNamespaces(tenantId),
+    queryFn: needsAccount(qc, () => commands.discoverNamespaces(tenantId)),
     enabled: enabled && accountId !== null,
   });
 }
@@ -107,6 +122,11 @@ export function useSignIn() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ tenant, deviceCode }: { tenant: string | null; deviceCode: boolean }) => commands.signIn(tenant, deviceCode),
-    onSuccess: (account) => qc.setQueryData(keys.account, account),
+    onSuccess: (r) => {
+      qc.setQueryData(keys.account, r.account);
+      // A new sign-in changes which tenants have their own sign-in and whether profiles' sign-ins work.
+      void qc.invalidateQueries({ queryKey: ["tenants"] });
+      void qc.invalidateQueries({ queryKey: keys.profiles });
+    },
   });
 }

@@ -1,7 +1,7 @@
 import { ChevronRight, CircleAlert, CircleCheck } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import {
-  useAccount, useDeleteProfile, useProfiles, useSaveProfile, useTestProfile,
+  useAccount, useDeleteProfile, useProfiles, useSaveProfile, useTenants, useTestProfile,
   type Check, type DiscoveredNamespace, type EngineError, type Profile, type ProfileDraft, type Transport,
 } from "@/engine";
 import {
@@ -11,7 +11,7 @@ import {
 import { useShell } from "../context";
 import { placeError, sentence, type Errors } from "./profileErrors";
 import { NamespacePicker } from "./NamespacePicker";
-import { SignInPanel } from "./SignInPanel";
+import { SignInPanel, TenantSignInAction } from "./SignInPanel";
 
 type AuthKind = "connection-string" | "entra";
 
@@ -38,6 +38,13 @@ export function namespaceField(host: string): string {
   return short && !short.includes(".") ? short : host;
 }
 
+/** The tenant an Entra profile lists and connects in: its stored tenant, or, when it is bound to a tenant's own
+ *  sign-in (stored without a tenant, since that is the sign-in's home), that sign-in's tenant. `null`: home. */
+export function profileTenant(p: Profile): string | null {
+  if (p.auth.kind !== "entra") return null;
+  return p.auth.tenant ?? (p.bound_sign_in?.own_tenant ? p.bound_sign_in.tenant_id : null);
+}
+
 function initial(p: Profile | undefined, auth: AuthKind | undefined): Form {
   return {
     name: p?.name ?? "",
@@ -45,7 +52,7 @@ function initial(p: Profile | undefined, auth: AuthKind | undefined): Form {
     connectionString: "",
     replaceSecret: false,
     namespace: p ? namespaceField(p.host) : "",
-    tenant: p?.auth.kind === "entra" ? (p.auth.tenant ?? "") : "",
+    tenant: p?.auth.kind === "entra" ? profileTenant(p) ?? "" : "",
     production: p?.production ?? false,
     color: p?.color ?? "none",
     transport: p?.transport ?? "amqp",
@@ -106,11 +113,13 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
   const [manual, setManual] = useState(false);
   const showManual = !picker || manual;
   // What came from the list (not from typing), and whether the list shows instead of the summary of it.
-  const [picked, setPicked] = useState<{ ns: DiscoveredNamespace; tenantId: string | null; tenantLabel: string } | null>(null);
+  const [picked, setPicked] = useState<{ ns: DiscoveredNamespace; tenantId: string | null; tenantLabel: string; signInUpn: string | null } | null>(null);
   const [choosing, setChoosing] = useState(true);
   const [browsedTenant, setBrowsedTenant] = useState<string | null>(null);
   // Whether the Tenant ID holds text the user typed; until then it follows the tenant being browsed.
   const [tenantTyped, setTenantTyped] = useState(false);
+  const tenantTypedNow = useRef(false);
+  tenantTypedNow.current = tenantTyped;
   // Where focus goes once the summary or the list has rendered: a pick hides the list, Change hides the summary.
   const focusNext = useRef<"change" | "list" | null>(null);
   const changeButton = useRef<HTMLButtonElement>(null);
@@ -154,15 +163,35 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
     setBrowsedTenant(null);
     setChoosing(true);
     if (hasPick.current) dropPick();
-  }, [accountId]);
+    // A Tenant ID taken from the old account's tenants is not this account's: clear it unless it was typed.
+    // (Editing keeps the profile's own tenant.)
+    else if (!editing && !tenantTypedNow.current) setF((x) => ({ ...x, tenant: "" }));
+  }, [accountId, editing]);
   const dirty = editing && changed(f, saved);
   const hasProxy = f.proxy.trim() !== "";
   const transport: Transport = hasProxy ? "websockets" : f.transport; // a proxy carries AMQP over WebSockets
   const secretMissing =
     editing && profile.auth.kind === "connection-string" && conn.status === "failed" && conn.profileId === profile.id &&
     conn.error?.kind === "invalid" && /no stored connection string/.test(conn.error.message);
-  const otherAccount =
-    editing && profile.auth.kind === "entra" && account.data != null && account.data.id !== profile.auth.sign_in_id;
+  // The sign-in an edited Entra profile uses, as the engine reports it: warn only when it no longer works or is
+  // someone else's. A guest-tenant profile on the current account's own tenant sign-in is fine.
+  const bound = editing && profile.auth.kind === "entra" ? profile.bound_sign_in : null;
+  const signInIssue =
+    !editing || profile.auth.kind !== "entra" || account.data == null
+      ? null
+      : bound == null
+        ? `The account this connection used is no longer signed in on this computer. Save to use ${account.data.user_principal}.`
+        : !bound.live
+          ? `The sign-in this connection uses (${bound.user_principal}) has expired. Sign in again to use it.`
+          : !bound.same_account
+            ? `This connection uses a different account, ${bound.user_principal}. Sign in with that account to use it.`
+            : null;
+  // The tenant an edited Entra profile lives in, and its name when the tenant list has it.
+  const savedTenant = editing ? profileTenant(profile) : null;
+  const tenants = useTenants(savedTenant !== null);
+  const savedTenantName = savedTenant
+    ? (tenants.data?.find((t) => t.tenant_id.toLowerCase() === savedTenant.toLowerCase())?.display_name ?? savedTenant)
+    : null;
 
   function validate(): Errors {
     const e: Errors = {};
@@ -175,10 +204,10 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
     return e;
   }
 
-  function pick(ns: DiscoveredNamespace, tenantId: string | null, tenantLabel: string) {
+  function pick(ns: DiscoveredNamespace, tenantId: string | null, tenantLabel: string, signInUpn: string | null) {
     setF((x) => ({ ...x, namespace: ns.host, tenant: tenantId ?? "", name: x.name.trim() ? x.name : ns.name }));
     setErrors((e) => ({ ...e, namespace: undefined, name: undefined }));
-    setPicked({ ns, tenantId, tenantLabel });
+    setPicked({ ns, tenantId, tenantLabel, signInUpn });
     setTenantTyped(false); // the tenant is the picked one now
     setChoosing(false);
     focusNext.current = "change";
@@ -356,8 +385,9 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
                   <span>{errors.signIn}</span>
                 </p>
               )}
-              {otherAccount && (
-                <p className="m-0 text-11 text-muted">This connection uses a different account. Sign in with that account to use it.</p>
+              {signInIssue && <p className="m-0 text-11 text-muted">{signInIssue}</p>}
+              {savedTenant && savedTenantName && account.data && (
+                <TenantSignInAction tenantId={savedTenant} name={savedTenantName} />
               )}
             </div>
             {picker && (
@@ -388,6 +418,7 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
                         Change
                       </Button>
                     </div>
+                    {picked.signInUpn && <p className="m-0 text-11 text-muted">Listed and connected with your own sign-in to {picked.tenantLabel}, as {picked.signInUpn}.</p>}
                     {picked.ns.local_auth_disabled && <p className="m-0 text-11 text-muted">Shared access keys are off for this namespace. Entra ID only.</p>}
                   </div>
                 )}

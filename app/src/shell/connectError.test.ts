@@ -28,6 +28,17 @@ describe("describeConnectError", () => {
     expect(describeConnectError(err("forbidden", "x"), profile).message).toBe("This identity isn't allowed to connect to sb-logistics-prod.");
   });
 
+  it("offers the tenant's own sign-in when a profile in another tenant is not signed in", () => {
+    const d = describeConnectError(err("not_signed_in", "x"), { name: "Northwind orders", host: "nw-orders.servicebus.windows.net" }, { id: "tenant-guest", name: "Northwind Traders" });
+    expect(d).toEqual({
+      message: "Northwind orders is in Northwind Traders, which needs its own sign-in. Sign in to Northwind Traders to connect.",
+      retryable: false,
+      signInTo: { tenantId: "tenant-guest", name: "Northwind Traders" },
+    });
+    // Other failures of that profile keep their own text.
+    expect(describeConnectError(err("network", "reset"), profile, { id: "t", name: "T" }).signInTo).toBeUndefined();
+  });
+
   it("falls back to the message, capitalised and ended with a full stop", () => {
     expect(describeConnectError(err("weird", "something broke"), profile)).toEqual({ message: "Something broke.", retryable: true });
     expect(describeConnectError(err("weird", "Already done."), profile).message).toBe("Already done.");

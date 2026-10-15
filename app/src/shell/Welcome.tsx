@@ -1,9 +1,11 @@
-import { useAppInfo, useProfiles } from "@/engine";
+import { useAppInfo, useProfiles, useTenants, type Profile } from "@/engine";
 import { Button, EmptyState, LabelSwatch, ProdBadge, SkeletonRows } from "@/ui";
 import { shortHost } from "./ConnectionSelector";
 import { describeConnectError } from "./connectError";
 import { useShell } from "./context";
 import { keepTogether } from "./text";
+import { profileTenant } from "./sheets/ProfileSheet";
+import { TenantSignInAction } from "./sheets/SignInPanel";
 
 export function Welcome() {
   const { conn, openSheet } = useShell();
@@ -20,34 +22,11 @@ export function Welcome() {
       </div>
     );
   }
-  const edit = () => failed && openSheet({ kind: "profile", profileId: failed.id });
-  const failure = failed ? describeConnectError(conn.error, failed) : null;
-
   return (
     <div className="flex h-full w-full justify-center overflow-y-auto">
       <div className="flex w-[480px] max-w-full flex-col gap-4 py-16">
         {startupError && <EmptyState tone="error" title="Saved connections couldn't be opened" body={startupError} />}
-        {failed && failure && (
-          <EmptyState
-            tone="error"
-            title={`Couldn't connect to ${failed.name}`}
-            body={keepTogether(failure.message, shortHost(failed.host))}
-            detail={conn.error?.message}
-            action={
-              failure.retryable ? (
-                <>
-                  <Button onClick={conn.retry}>Try again</Button>
-                  <Button onClick={edit}>Edit connection</Button>
-                </>
-              ) : (
-                <>
-                  <Button onClick={edit}>Edit connection</Button>
-                  <Button onClick={conn.retry}>Try again</Button>
-                </>
-              )
-            }
-          />
-        )}
+        {failed && <ConnectFailed profile={failed} />}
         {profiles.data && profiles.data.length === 0 ? (
           <EmptyState
             title="Add a connection"
@@ -87,5 +66,43 @@ export function Welcome() {
         )}
       </div>
     </div>
+  );
+}
+
+/** Why connecting to `profile` failed, and the way out: sign in to its tenant, edit it, or try again. */
+function ConnectFailed({ profile }: { profile: Profile }) {
+  const { conn, openSheet } = useShell();
+  const tenantId = profileTenant(profile);
+  const tenants = useTenants(tenantId !== null && conn.error?.kind === "not_signed_in");
+  const tenantName = tenantId
+    ? (tenants.data?.find((t) => t.tenant_id.toLowerCase() === tenantId.toLowerCase())?.display_name ?? tenantId)
+    : null;
+  const failure = describeConnectError(conn.error, profile, tenantId && tenantName ? { id: tenantId, name: tenantName } : null);
+  const edit = () => openSheet({ kind: "profile", profileId: profile.id });
+  return (
+    <EmptyState
+      tone="error"
+      title={`Couldn't connect to ${profile.name}`}
+      body={keepTogether(failure.message, shortHost(profile.host))}
+      detail={conn.error?.message}
+      action={
+        failure.signInTo ? (
+          <div className="flex flex-col items-start gap-2">
+            <TenantSignInAction primary tenantId={failure.signInTo.tenantId} name={failure.signInTo.name} onSignedIn={() => conn.retry()} />
+            <Button variant="quiet" onClick={edit}>Edit connection</Button>
+          </div>
+        ) : failure.retryable ? (
+          <>
+            <Button onClick={conn.retry}>Try again</Button>
+            <Button onClick={edit}>Edit connection</Button>
+          </>
+        ) : (
+          <>
+            <Button onClick={edit}>Edit connection</Button>
+            <Button onClick={conn.retry}>Try again</Button>
+          </>
+        )
+      }
+    />
   );
 }

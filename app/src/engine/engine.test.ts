@@ -28,6 +28,24 @@ describe("commands over the mock transport", () => {
     expect(mock.calls).toContainEqual({ cmd: "sign_in", args: { tenant: null, deviceCode: true } });
   });
 
+  it("signs in to a tenant as its own sign-in, and to the home tenant as the account itself, as Rust does", async () => {
+    const log: string[] = [];
+    await onActivity((e) => log.push(e.action));
+    const first = await commands.signIn(null, false);
+    expect(first).toEqual({ account: expect.objectContaining({ id: "oid-1", tenant_id: "tenant-1" }), tenant_sign_in: null });
+    const guest = await commands.signIn("tenant-guest", false);
+    expect(guest.account.id).toBe("oid-1");
+    expect(guest.tenant_sign_in).toEqual({ tenant_id: "tenant-guest", user_principal: "ops@contoso.example", same_account: true });
+    expect(log).toContain("Signed in to tenant tenant-guest as ops@contoso.example");
+    // The current account's home tenant, in any case: the same account, current, no tenant sign-in.
+    const home = await commands.signIn("TENANT-1", false);
+    expect(home).toEqual({ account: expect.objectContaining({ id: "oid-1" }), tenant_sign_in: null });
+    expect(await commands.accountCurrent()).toMatchObject({ id: "oid-1" });
+    // The tenant lists with that sign-in.
+    const tenants = await commands.listTenants();
+    expect(tenants.find((t) => t.tenant_id === "tenant-guest")?.sign_in_upn).toBe("ops@contoso.example");
+  });
+
   it("lists the fixture namespace after connecting and emits activity", async () => {
     const log: string[] = [];
     await onActivity((e) => log.push(e.action));

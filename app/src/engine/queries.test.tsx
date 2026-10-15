@@ -5,7 +5,8 @@ import { describe, expect, it } from "vitest";
 import { setTransport } from "./ipc";
 import { createMockTransport } from "./mock/transport";
 import * as commands from "./commands";
-import { createQueryClient, useDeleteProfile, useEntities, useProfiles, useSaveProfile } from "./queries";
+import { createQueryClient, keys, useDeleteProfile, useEntities, useProfiles, useSaveProfile, useTenants } from "./queries";
+import { EngineError } from "./ipc";
 
 function wrapper() {
   const client = createQueryClient();
@@ -13,6 +14,29 @@ function wrapper() {
 }
 
 describe("queries", () => {
+  it("reads the account again when a listing says the sign-in is gone", async () => {
+    const mock = createMockTransport("default");
+    let signedIn = true;
+    setTransport({
+      listen: mock.listen,
+      invoke: async <T,>(cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === "account_current") return (signedIn ? { id: "oid-1", user_principal: "ops@contoso.example", display_name: null, tenant_id: "tenant-1" } : null) as T;
+        if (cmd === "list_tenants") {
+          signedIn = false; // the engine cleared the sign-in whose refresh token is gone
+          throw new EngineError("not_signed_in", "the refresh token has expired; sign in again");
+        }
+        return mock.invoke<T>(cmd, args);
+      },
+    });
+    const client = createQueryClient();
+    const w = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+    const { result } = renderHook(() => useTenants(), { wrapper: w });
+    // The listing failed, the account was read again and is gone, so the listing waits for a sign-in.
+    await waitFor(() => expect(client.getQueryData(keys.account)).toBeNull());
+    expect(client.getQueryState(keys.tenants("oid-1"))?.status).toBe("error");
+    expect(result.current.fetchStatus).toBe("idle");
+  });
+
   it("load profiles and refresh them after a save", async () => {
     setTransport(createMockTransport("default"));
     const w = wrapper();

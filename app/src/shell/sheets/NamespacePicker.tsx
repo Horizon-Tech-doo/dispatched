@@ -3,7 +3,7 @@ import { useEffect, useId, useMemo, useState, type KeyboardEvent } from "react";
 import { useAccount, useDiscoveredNamespaces, useTenants, type DiscoveredNamespace, type EngineError, type TenantView } from "@/engine";
 import { Button, EmptyState, Field, Input, Problem, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Skeleton, cn } from "@/ui";
 import { sentence } from "./profileErrors";
-import { SignInProgress, useSignInFlow } from "./SignInPanel";
+import { OtherAccountNotice, SignInProgress, useSignInFlow } from "./SignInPanel";
 
 /** More namespaces than this get a filter box. */
 export const FILTER_THRESHOLD = 8;
@@ -138,6 +138,7 @@ function TenantSignIn({ name, tenantId, message, onSignedIn }: {
         }
       />
       {flow.failure && <Problem title="Sign-in failed" body={sentence(flow.failure.message)} />}
+      <OtherAccountNotice flow={flow} name={name} />
     </>
   );
 }
@@ -149,8 +150,9 @@ export function NamespacePicker({
 }: {
   /** The host the form holds now, to mark its row. */
   selectedHost: string;
-  /** `tenantId` is the tenant to save the namespace under (`null`: the home tenant); `tenantLabel` names it. */
-  onPick: (ns: DiscoveredNamespace, tenantId: string | null, tenantLabel: string) => void;
+  /** `tenantId` is the tenant to save the namespace under (`null`: the home tenant); `tenantLabel` names it;
+   *  `signInUpn` is the identity of the tenant's own sign-in when the tenant is listed with one. */
+  onPick: (ns: DiscoveredNamespace, tenantId: string | null, tenantLabel: string, signInUpn: string | null) => void;
   /** The tenant being browsed changed (`null` is the home tenant). */
   onTenant: (tenantId: string | null) => void;
   hidden?: boolean;
@@ -180,7 +182,7 @@ export function NamespacePicker({
           </div>
         </div>
       ) : tenants.data ? (
-        <Field label="Tenant">
+        <Field label="Tenant" hint={browsed?.sign_in_upn ? `Listed with your own sign-in to this tenant, as ${browsed.sign_in_upn}.` : undefined}>
           {(ids) => (
             <Select
               value={tenantId ?? home?.tenant_id ?? HOME_VALUE}
@@ -264,7 +266,7 @@ export function NamespacePicker({
             items={shown}
             selectedHost={selectedHost}
             labelledBy={labelId}
-            onPick={(ns) => onPick(ns, tenantId, browsedLabel)}
+            onPick={(ns) => onPick(ns, tenantId, browsedLabel, browsed?.sign_in_upn ?? null)}
           />
         )}
 

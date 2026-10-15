@@ -240,7 +240,7 @@ describe("ProfileSheet details", () => {
     expect(within(sheet).queryByText(/Sign in with that account to use it/)).not.toBeInTheDocument(); // the profile's own account
     await user.click(within(sheet).getByRole("button", { name: "Use another account" }));
     expect(await within(sheet).findByText(/Signed in as dev@fabrikam.example/)).toBeInTheDocument();
-    expect(within(sheet).getByText("This connection uses a different account. Sign in with that account to use it.")).toBeInTheDocument();
+    expect(within(sheet).getByText("This connection uses a different account, ops@contoso.example. Sign in with that account to use it.")).toBeInTheDocument();
   });
 
   it("shows a failed 'Use another account' without losing the signed-in state", async () => {
@@ -529,8 +529,70 @@ describe("Entra discovery in the Add connection sheet", () => {
     await user.click(within(sheet).getByRole("button", { name: "Save" }));
     await waitFor(async () => {
       const saved = (await mock.invoke<Profile[]>("profiles_list")).find((p) => p.name === "Keep me");
-      expect(saved?.auth).toEqual({ kind: "entra", sign_in_id: "oid-guest", tenant: "tenant-guest" });
+      // Bound to that tenant's own sign-in, whose home is the tenant: no tenant is stored.
+      expect(saved?.auth).toEqual({ kind: "entra", sign_in_id: "oid-guest", tenant: null });
+      expect(saved?.bound_sign_in).toMatchObject({ tenant_id: "tenant-guest", live: true, same_account: true, own_tenant: true });
     });
+  });
+
+  it("says which identity a tenant is listed with, beside the tenant and in the summary", async () => {
+    const { user, sheet } = await signedIn();
+    await within(sheet).findByRole("listbox", { name: "Namespaces" });
+    await chooseTenant(user, sheet, "Northwind Traders");
+    await user.click(await within(sheet).findByRole("button", { name: "Sign in to Northwind Traders" }));
+    expect(await within(sheet).findByText("Listed with your own sign-in to this tenant, as ops@contoso.example.")).toBeInTheDocument();
+    await user.click(await within(sheet).findByRole("option", { name: /nw-orders/ }));
+    expect(summary(sheet)).toHaveTextContent("Listed and connected with your own sign-in to Northwind Traders, as ops@contoso.example.");
+  });
+
+  it("edits a guest-tenant profile without calling it a different account, and offers its tenant's sign-in", async () => {
+    const { user, sheet } = await signedIn();
+    await within(sheet).findByRole("listbox", { name: "Namespaces" });
+    await chooseTenant(user, sheet, "Northwind Traders");
+    await user.click(await within(sheet).findByRole("button", { name: "Sign in to Northwind Traders" }));
+    await user.click(await within(sheet).findByRole("option", { name: /nw-orders/ }));
+    await user.type(within(sheet).getByLabelText("Name"), " NW");
+    await user.click(within(sheet).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Add connection" })).not.toBeInTheDocument());
+    // It connects with the tenant's own sign-in; wait for the workbench before using the menu.
+    await within(await screen.findByRole("tree", { name: "Namespace" })).findByRole("treeitem", { name: /customs-docs/ });
+    await chooseMenuItem(user, /Connection: nw-orders NW/, "Manage connections…");
+    await user.click(within(await screen.findByRole("dialog", { name: "Connections" })).getByRole("button", { name: "Edit nw-orders NW" }));
+    const edit = await screen.findByRole("dialog", { name: "Edit nw-orders NW" });
+    expect(within(edit).getByText(/Signed in as ops@contoso.example/)).toBeInTheDocument();
+    expect(within(edit).queryByText(/different account|has expired/)).not.toBeInTheDocument();
+    // Its tenant shows, though none is stored (the tenant's own sign-in is at home there).
+    expect(within(edit).getByLabelText("Tenant")).toHaveValue("tenant-guest");
+    expect(await within(edit).findByRole("button", { name: "Sign in to Northwind Traders" })).toBeInTheDocument();
+  });
+
+  it("rebinds an edited profile saved before its tenant sign-in, after 'Sign in to <tenant>'", async () => {
+    const user = userEvent.setup();
+    const { mock } = renderShell("tenant-sign-in");
+    await user.click(await screen.findByRole("button", { name: /Connection: Choose a connection/ }));
+    await user.click(await screen.findByRole("menuitem", { name: "Manage connections…" }));
+    await user.click(within(await screen.findByRole("dialog", { name: "Connections" })).getByRole("button", { name: "Edit Northwind orders" }));
+    const edit = await screen.findByRole("dialog", { name: "Edit Northwind orders" });
+    expect(within(edit).getByLabelText("Tenant")).toHaveValue("tenant-guest");
+    await user.click(await within(edit).findByRole("button", { name: "Sign in to Northwind Traders" }));
+    await waitFor(() => expect(mock.calls.some((c) => c.cmd === "sign_in")).toBe(true));
+    await within(edit).findByRole("button", { name: "Sign in to Northwind Traders" }); // finished
+    await user.click(within(edit).getByRole("button", { name: "Save" }));
+    await waitFor(async () => {
+      const saved = (await mock.invoke<Profile[]>("profiles_list")).find((p) => p.id === "p-northwind");
+      expect(saved?.auth).toEqual({ kind: "entra", sign_in_id: "oid-guest", tenant: null });
+    });
+  });
+
+  it("clears a Tenant ID taken from the browsed tenant when the account changes", async () => {
+    const { user, sheet } = await signedIn();
+    await within(sheet).findByRole("listbox", { name: "Namespaces" });
+    await chooseTenant(user, sheet, "Northwind Traders");
+    await showManual(user, sheet);
+    expect(within(sheet).getByLabelText("Tenant ID")).toHaveValue("tenant-guest");
+    await user.click(within(sheet).getByRole("button", { name: "Use another account" }));
+    await within(sheet).findByText(/Signed in as dev@fabrikam.example/);
+    await waitFor(() => expect(within(sheet).getByLabelText("Tenant ID")).toHaveValue(""));
   });
 
   it("keeps the home sign-in current after signing in to a tenant, so other profiles are not 'a different account'", async () => {
@@ -700,11 +762,19 @@ describe("Entra discovery in the Add connection sheet", () => {
 
   it("shows a loading skeleton in the list shape first", async () => {
     const user = userEvent.setup();
-    renderShell("empty");
+    const { mock } = renderShell("empty");
     await user.click(await screen.findByRole("button", { name: "Sign in with Entra ID" }));
     const sheet = await screen.findByRole("dialog", { name: "Add connection" });
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    const invoke = mock.invoke.bind(mock);
+    mock.invoke = (async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "discover_namespaces") await held;
+      return invoke(cmd, args);
+    }) as typeof mock.invoke;
     await user.click(within(sheet).getByRole("button", { name: "Sign in with Entra ID" }));
     expect(await within(sheet).findByRole("status", { name: "Loading namespaces" })).toBeInTheDocument();
+    release();
     expect(await within(sheet).findByRole("listbox", { name: "Namespaces" })).toBeInTheDocument();
     expect(within(sheet).queryByRole("status", { name: "Loading namespaces" })).not.toBeInTheDocument();
   });

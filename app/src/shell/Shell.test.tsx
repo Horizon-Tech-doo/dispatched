@@ -79,6 +79,17 @@ describe("Shell", () => {
     expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
   });
 
+  it("a profile in a tenant that wants its own sign-in offers it, then connects", async () => {
+    const user = userEvent.setup();
+    const { mock } = renderShell("tenant-sign-in", { last_profile: "p-northwind" });
+    expect(await screen.findByRole("heading", { name: "Couldn't connect to Northwind orders" })).toBeInTheDocument();
+    expect(await screen.findByText(/Northwind orders is in Northwind Traders, which needs its own sign-in\. Sign in to Northwind Traders to connect\./)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Edit connection" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Sign in to Northwind Traders" }));
+    expect(mock.calls.find((c) => c.cmd === "sign_in")).toMatchObject({ args: { tenant: "tenant-guest", deviceCode: false } });
+    await waitFor(() => expect(screen.getByRole("button", { name: /Connection: Northwind orders/ })).toBeInTheDocument());
+  });
+
   it("keeps the workbench mounted while the same profile reconnects", async () => {
     const { mock } = renderShell("default", { last_profile: "p-logistics" });
     await waitFor(() => expect(treePanel()).not.toBeNull());

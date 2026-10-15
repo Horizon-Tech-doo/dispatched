@@ -6,6 +6,8 @@ export interface ConnectErrorText {
   message: string;
   /** Whether trying again unchanged can help; if not, the profile needs editing. */
   retryable: boolean;
+  /** The way out is that tenant's own sign-in ("Sign in to <tenant>"), then trying again. */
+  signInTo?: { tenantId: string; name: string };
 }
 
 const sentence = (s: string) => {
@@ -19,6 +21,8 @@ const sentence = (s: string) => {
 export function describeConnectError(
   error: Pick<EngineError, "kind" | "message"> | null,
   profile: { name: string; host: string },
+  /** The tenant an Entra profile lives in, other than the home one, and its name. */
+  tenant?: { id: string; name: string } | null,
 ): ConnectErrorText {
   const host = shortHost(profile.host);
   switch (error?.kind) {
@@ -31,6 +35,13 @@ export function describeConnectError(
       }
       return { message: sentence(error.message), retryable: false };
     case "not_signed_in":
+      // A profile in another tenant recovers with that tenant's own sign-in, right here.
+      if (tenant)
+        return {
+          message: `${profile.name} is in ${tenant.name}, which needs its own sign-in. Sign in to ${tenant.name} to connect.`,
+          retryable: false,
+          signInTo: { tenantId: tenant.id, name: tenant.name },
+        };
       return { message: `Your Entra sign-in for ${profile.name} has expired. Edit the connection to sign in again.`, retryable: false };
     case "auth":
       return { message: `${host} rejected the credentials. Edit the connection to replace them.`, retryable: false };

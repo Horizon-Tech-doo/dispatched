@@ -57,6 +57,11 @@ export const shots: {
     path: "/?scenario=missing-secret&autoconnect=p-logistics",
     ready: (p) => p.getByRole("heading", { name: "Couldn't connect to Logistics" }),
   },
+  {
+    name: "connect-tenant-sign-in",
+    path: "/?scenario=tenant-sign-in&autoconnect=p-northwind",
+    ready: (p) => p.getByRole("button", { name: "Sign in to Northwind Traders" }),
+  },
   { name: "shell-prod", path: "/?scenario=default&autoconnect=p-logistics", ready: (p) => p.getByRole("banner").getByText("PROD", { exact: true }) },
   {
     name: "shell-selector",
@@ -261,6 +266,39 @@ export const shots: {
       await sheet.getByRole("group", { name: "Selected namespace" }).waitFor();
     },
     holds: (p) => p.getByRole("dialog", { name: "Add connection" }),
+    viewportOnly: true,
+  },
+  {
+    name: "profile-entra-picked-guest",
+    path: "/?scenario=empty",
+    ready: (p) => p.getByRole("heading", { name: "Add a connection" }),
+    prepare: async (page) => {
+      await page.getByRole("button", { name: "Sign in with Entra ID" }).click();
+      const sheet = page.getByRole("dialog", { name: "Add connection" });
+      await sheet.getByRole("button", { name: "Sign in with Entra ID" }).click();
+      await sheet.getByRole("listbox", { name: "Namespaces" }).waitFor();
+      await sheet.getByRole("combobox", { name: "Tenant" }).click();
+      await page.getByRole("option", { name: "Northwind Traders" }).click();
+      await sheet.getByRole("button", { name: "Sign in to Northwind Traders" }).click();
+      await sheet.getByText("Listed with your own sign-in to this tenant, as ops@contoso.example.").waitFor();
+      await sheet.getByRole("option", { name: /nw-orders/ }).click();
+      await sheet.getByRole("group", { name: "Selected namespace" }).waitFor();
+    },
+    holds: (p) => p.getByRole("dialog", { name: "Add connection" }),
+    viewportOnly: true,
+  },
+  {
+    name: "profile-edit-tenant",
+    path: "/?scenario=tenant-sign-in",
+    ready: (p) => p.getByRole("list", { name: "Saved connections" }),
+    prepare: async (page) => {
+      await page.getByRole("button", { name: "Connection: Choose a connection" }).click();
+      await page.getByRole("menuitem", { name: "Manage connections…" }).click();
+      await page.getByRole("dialog", { name: "Connections" }).getByRole("button", { name: "Edit Northwind orders", exact: true }).click();
+      const sheet = page.getByRole("dialog", { name: "Edit Northwind orders", exact: true });
+      await sheet.getByRole("button", { name: "Sign in to Northwind Traders" }).waitFor();
+    },
+    holds: (p) => p.getByRole("dialog", { name: "Edit Northwind orders", exact: true }),
     viewportOnly: true,
   },
   {

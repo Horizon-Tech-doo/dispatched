@@ -3,7 +3,23 @@
 export type Transport = "amqp" | "websockets";
 export type ProfileAuth = { kind: "connection-string" } | { kind: "entra"; sign_in_id: string; tenant: string | null };
 
-export interface Profile {
+/** The sign-in an Entra profile uses now, as the engine sees it. */
+export interface BoundSignIn {
+  id: string;
+  user_principal: string;
+  /** The sign-in's own (home) tenant. */
+  tenant_id: string;
+  /** Its refresh token exists: connecting works without signing in again. */
+  live: boolean;
+  /** It is the current account's identity. */
+  same_account: boolean;
+  /** It is a tenant's own sign-in, outside the current account's home tenant: the profile's tenant is
+   *  `tenant_id` even when `auth.tenant` is null. */
+  own_tenant: boolean;
+}
+
+/** A profile as saved, without what the engine works out about it. */
+export interface StoredProfile {
   id: string;
   name: string;
   host: string;
@@ -14,6 +30,11 @@ export interface Profile {
   transport: Transport;
   proxy: string | null;
   pinned_entities: string[];
+}
+
+export interface Profile extends StoredProfile {
+  /** For Entra profiles: the sign-in used, or null if its record is gone. */
+  bound_sign_in: BoundSignIn | null;
 }
 
 export type DraftAuth =
@@ -46,10 +67,20 @@ export interface ConnectionReport {
 }
 
 export interface AccountView { id: string; user_principal: string; display_name: string | null; tenant_id: string }
+/** A sign-in made in a tenant that did not change the current account. */
+export interface TenantSignIn { tenant_id: string; user_principal: string; same_account: boolean }
+export interface SignInView { account: AccountView; tenant_sign_in: TenantSignIn | null }
 export interface SignInPrompt { kind: "browser" | "device-code"; url: string; user_code: string | null; message: string }
 
 /** A tenant the signed-in account can reach. `home` is the one the account signed in to; the list puts it first. */
-export interface TenantView { tenant_id: string; display_name: string | null; default_domain: string | null; home: boolean }
+export interface TenantView {
+  tenant_id: string;
+  display_name: string | null;
+  default_domain: string | null;
+  home: boolean;
+  /** The current account's own sign-in in this tenant, when the tenant is listed with it. */
+  sign_in_upn: string | null;
+}
 
 export interface DiscoveredNamespace {
   name: string;

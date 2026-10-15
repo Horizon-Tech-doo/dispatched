@@ -8,7 +8,7 @@ import { buildCommands } from "./commands";
 const ctx = () => ({
   listing: { queues: fx.queues, topics: fx.topics, limited: null, known: [] },
   subs: { "shipment-events": fx.subscriptions["shipment-events"] },
-  profiles: fx.profiles,
+  profiles: fx.profiles.map((p) => ({ ...p, bound_sign_in: null })),
   activeProfileId: "p-logistics",
   open: vi.fn(), connect: vi.fn(), openSheet: vi.fn(), refresh: vi.fn(), toggleDrawer: vi.fn(), setPrefs: vi.fn(),
 });

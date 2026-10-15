@@ -1,11 +1,12 @@
 import { CircleAlert } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { commands, onSignInPrompt, useAccount, useSignIn, type EngineError, type SignInPrompt } from "@/engine";
-import { Button } from "@/ui";
+import { commands, onSignInPrompt, useAccount, useSignIn, type EngineError, type SignInPrompt, type SignInView } from "@/engine";
+import { Button, Problem } from "@/ui";
+import { sentence } from "./profileErrors";
 
 /** One Entra sign-in, browser or device code, for the home tenant or one named tenant. A cancelled sign-in
  *  returns to idle without an error, and closing whatever shows it abandons a sign-in that is still waiting. */
-export function useSignInFlow(onDone?: () => void) {
+export function useSignInFlow(onDone?: (result: SignInView) => void) {
   const signIn = useSignIn();
   const [prompt, setPrompt] = useState<SignInPrompt | null>(null);
   const pending = useRef(false);
@@ -34,11 +35,48 @@ export function useSignInFlow(onDone?: () => void) {
 
   const start = (deviceCode: boolean, tenant: string | null = null) => {
     setPrompt(null);
-    signIn.mutate({ tenant, deviceCode }, { onSuccess: () => onDone?.(), onSettled: () => setPrompt(null) });
+    signIn.mutate({ tenant, deviceCode }, { onSuccess: (r) => onDone?.(r), onSettled: () => setPrompt(null) });
   };
   const cancel = () => void commands.signInCancel().catch(() => {});
   const failure = signIn.error && (signIn.error as EngineError).kind !== "cancelled" ? (signIn.error as EngineError) : null;
-  return { pending: signIn.isPending, prompt, copied, copy, start, cancel, failure };
+  // A tenant sign-in made with another account than the current one: kept, but never used for this account.
+  const tenantSignIn = signIn.data?.tenant_sign_in ?? null;
+  const otherAccount = tenantSignIn && !tenantSignIn.same_account ? { ...tenantSignIn, account: signIn.data!.account.user_principal } : null;
+  return { pending: signIn.isPending, prompt, copied, copy, start, cancel, failure, otherAccount };
+}
+
+/** After a tenant sign-in with another account: say which account was used and which one is needed. */
+export function OtherAccountNotice({ flow, name }: { flow: SignInFlow; name: string }) {
+  const o = flow.otherAccount;
+  if (!o) return null;
+  return (
+    <Problem
+      title={`Signed in to ${name} as ${o.user_principal}`}
+      body={`Connections here use ${o.account}. Sign in to ${name} with that account.`}
+    />
+  );
+}
+
+/** "Sign in to <tenant>": that tenant's own sign-in (MFA, Conditional Access), browser or device code,
+ *  with the progress, any failure, and a notice when another account was used. */
+export function TenantSignInAction({ tenantId, name, onSignedIn, primary }: {
+  tenantId: string;
+  name: string;
+  onSignedIn?: (result: SignInView) => void;
+  primary?: boolean;
+}) {
+  const flow = useSignInFlow(onSignedIn);
+  if (flow.pending) return <SignInProgress flow={flow} />;
+  return (
+    <div className="flex flex-col items-start gap-1.5">
+      <div className="flex flex-wrap gap-2">
+        <Button variant={primary ? "primary" : undefined} onClick={() => flow.start(false, tenantId)}>Sign in to {name}</Button>
+        <Button variant="quiet" onClick={() => flow.start(true, tenantId)}>Use a device code instead</Button>
+      </div>
+      {flow.failure && <Problem title="Sign-in failed" body={sentence(flow.failure.message)} />}
+      <OtherAccountNotice flow={flow} name={name} />
+    </div>
+  );
 }
 
 export type SignInFlow = ReturnType<typeof useSignInFlow>;

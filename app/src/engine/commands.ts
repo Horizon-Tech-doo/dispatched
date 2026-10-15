@@ -1,6 +1,6 @@
 import { call } from "./ipc";
 import type {
-  AccountView, AppInfo, ConnectionReport, ConnectionView, DiscoveryView, EntityListing, Profile, ProfileDraft, SubscriptionInfo, TenantView,
+  AccountView, AppInfo, ConnectionReport, ConnectionView, DiscoveryView, EntityListing, Profile, ProfileDraft, SignInView, SubscriptionInfo, TenantView,
 } from "./types";
 
 export const appInfo = () => call<AppInfo>("app_info");
@@ -13,7 +13,8 @@ export const profileDelete = (id: string) => call<void>("profile_delete", { id }
 export const profileTest = (id: string) => call<ConnectionReport>("profile_test", { id });
 
 export const accountCurrent = () => call<AccountView | null>("account_current");
-export const signIn = (tenant: string | null, deviceCode: boolean) => call<AccountView>("sign_in", { tenant, deviceCode });
+/** Signs in. With a tenant other than the current account's home, the sign-in is that tenant's own and the account stays. */
+export const signIn = (tenant: string | null, deviceCode: boolean) => call<SignInView>("sign_in", { tenant, deviceCode });
 export const signInCancel = () => call<void>("sign_in_cancel");
 
 /** The signed-in account's tenants, home first. */

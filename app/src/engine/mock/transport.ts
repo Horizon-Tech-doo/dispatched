@@ -1,12 +1,15 @@
 import { EngineError, setTransport, type IpcTransport, type Unlisten } from "../ipc";
-import type { AccountView, ActivityEntry, ConnectionView, EntityListing, Profile, ProfileDraft } from "../types";
+import type { AccountView, ActivityEntry, BoundSignIn, ConnectionView, EntityListing, Profile, ProfileDraft, SignInView, StoredProfile } from "../types";
 import { setUpdater } from "../updater";
 import * as fx from "./fixtures";
 
 export type Scenario =
   | "default" | "empty" | "forbidden" | "missing-secret" | "network" | "sign-in-expired" | "many" | "many-topics"
   // Entra namespace discovery: nothing found, the listing fails, more namespaces than fit without a filter.
-  | "no-namespaces" | "discovery-error" | "many-namespaces";
+  | "no-namespaces" | "discovery-error" | "many-namespaces"
+  // Signed in, with a profile in the guest tenant saved before that tenant's own sign-in: connecting to it
+  // needs "Sign in to Northwind Traders".
+  | "tenant-sign-in";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -19,17 +22,76 @@ function hostFromConnectionString(cs: string | null | undefined): string {
 /** `1 queue`, `4 queues`: the Rust activity lines use real plurals. */
 const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
+/** A remembered sign-in: an account's, or the same person's own sign-in in a guest tenant. */
+interface MockSignIn { id: string; user_principal: string; tenant_id: string }
+
+const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+const sameIdentity = (a: MockSignIn, b: MockSignIn) => a.id === b.id || same(a.user_principal, b.user_principal);
+const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** As core's `normalize_tenant`: trimmed, a GUID lowercase, null when blank or the sign-in's own tenant. */
+export function normalizeTenant(tenant: string | null | undefined, home: string | null): string | null {
+  const t = tenant?.trim();
+  if (!t || (home && same(t, home))) return null;
+  return GUID.test(t) ? t.toLowerCase() : t;
+}
+
 export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Record<string, unknown> = {}) {
   const listeners = new Map<string, Set<(p: unknown) => void>>();
   const calls: { cmd: string; args?: unknown }[] = [];
   const settings = new Map<string, unknown>(Object.entries(seed));
-  let profiles: Profile[] = scenario === "empty" || scenario === "no-namespaces" || scenario === "discovery-error" || scenario === "many-namespaces" ? [] : structuredClone(fx.profiles);
-  let active: Profile | null = null;
-  let account: AccountView | null = null;
-  /** Guest tenants the user has signed in to interactively (their MFA is satisfied). Each is its own sign-in
-   *  (another id, its own tenant) that is saved beside the home one and never becomes the current account. */
-  const signedInTenants = new Map<string, string>();
+  let profiles: StoredProfile[] =
+    scenario === "empty" || scenario === "no-namespaces" || scenario === "discovery-error" || scenario === "many-namespaces"
+      ? []
+      : structuredClone(scenario === "tenant-sign-in" ? [...fx.profiles, fx.guestProfile] : fx.profiles);
+  let active: StoredProfile | null = null;
+  let account: AccountView | null = scenario === "tenant-sign-in" ? { ...fx.accounts["oid-1"] } : null;
+  /** Every remembered sign-in, and the ids whose refresh token exists. The default account signed in once
+   *  before, so profiles bound to it work. A guest tenant's own sign-in (the same person, another id) is
+   *  saved beside the account's and never becomes the current account, as in Rust. */
+  const records = new Map<string, MockSignIn>(Object.values(fx.accounts).map((a) => [a.id, { ...a }]));
+  const live = new Set<string>(["oid-1"]);
   let cancelSignIn: (() => void) | null = null;
+
+  const current = (): MockSignIn | null => (account ? records.get(account.id) ?? null : null);
+  /** As `AppState::live_sign_in_like`: a live sign-in made in `tenant` by `who`'s identity, `who` first. */
+  const liveLike = (tenant: string, who: MockSignIn) =>
+    [...records.values()]
+      .filter((s) => same(s.tenant_id, tenant) && sameIdentity(s, who) && live.has(s.id))
+      .sort((a, b) => Number(b.id === who.id) - Number(a.id === who.id))[0] ?? null;
+  /** The current account's own sign-in in `tenant` (never another account's). */
+  const tenantSignIn = (tenant: string) => {
+    const c = current();
+    return c ? liveLike(tenant, c) : null;
+  };
+  /** As `AppState::usable_sign_in`: the same person's own sign-in in the profile's tenant first, then the bound one. */
+  const usable = (signInId: string, tenant: string | null) => {
+    const bound = records.get(signInId) ?? null;
+    if (!bound) return { bound, usable: null };
+    const own = tenant && !same(tenant, bound.tenant_id) ? liveLike(tenant, bound) : null;
+    if (own) return { bound, usable: own };
+    if (live.has(bound.id)) return { bound, usable: bound };
+    return { bound, usable: liveLike(bound.tenant_id, bound) };
+  };
+  const boundSignIn = (p: StoredProfile): BoundSignIn | null => {
+    if (p.auth.kind !== "entra") return null;
+    const u = usable(p.auth.sign_in_id, p.auth.tenant);
+    const s = u.usable ?? u.bound;
+    if (!s) return null;
+    const c = current();
+    return {
+      id: s.id, user_principal: s.user_principal, tenant_id: s.tenant_id, live: u.usable !== null,
+      same_account: c !== null && sameIdentity(c, s), own_tenant: c !== null && !same(c.tenant_id, s.tenant_id),
+    };
+  };
+  const view = (p: StoredProfile): Profile => ({ ...structuredClone(p), bound_sign_in: boundSignIn(p) });
+  /** As `entra_sign_in`: the current sign-in for its home tenant, else its own sign-in in the tenant, else the current one. */
+  const resolveSignIn = (tenant: string | null | undefined) => {
+    const c = current();
+    const t = tenant?.trim();
+    if (!c || !t || same(t, c.tenant_id)) return c;
+    return tenantSignIn(t) ?? c;
+  };
 
   const emit = (event: string, payload: unknown) => listeners.get(event)?.forEach((cb) => cb(payload));
   const activity = (action: string, started: number, error: EngineError | null = null) =>
@@ -53,7 +115,7 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
         else settings.set(args.key as string, structuredClone(args.value));
         return null;
       case "profiles_list":
-        return structuredClone(profiles);
+        return profiles.map(view);
       case "profile_save": {
         const d = args.draft as ProfileDraft;
         const existing = d.id ? profiles.find((p) => p.id === d.id) : undefined;
@@ -61,11 +123,24 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
           throw new EngineError("invalid", "paste the namespace's connection string");
         if (d.auth.kind === "entra" && !existing && !account)
           throw new EngineError("not_signed_in", "sign in with Entra ID first, then add the profile");
-        const p: Profile = {
+        // An Entra profile binds as in Rust; an edit rebinds only to the same person, or from a sign-in that no longer works.
+        let auth: StoredProfile["auth"] = { kind: "connection-string" };
+        if (d.auth.kind === "entra") {
+          const resolved = resolveSignIn(d.auth.tenant);
+          let bound = resolved;
+          if (existing?.auth.kind === "entra") {
+            const u = usable(existing.auth.sign_in_id, existing.auth.tenant);
+            const now = u.usable ?? u.bound;
+            if (!resolved || (now && u.usable && !sameIdentity(now, resolved))) bound = u.bound;
+          }
+          const id = bound?.id ?? (existing?.auth.kind === "entra" ? existing.auth.sign_in_id : "oid-1");
+          auth = { kind: "entra", sign_in_id: id, tenant: normalizeTenant(d.auth.tenant, bound?.tenant_id ?? null) };
+        }
+        const p: StoredProfile = {
           id: existing?.id ?? `p-${Math.random().toString(36).slice(2, 8)}`,
           name: d.name.trim(),
           host: d.auth.kind === "entra" ? (d.auth.namespace.includes(".") ? d.auth.namespace : `${d.auth.namespace}.servicebus.windows.net`) : existing?.host ?? hostFromConnectionString(d.auth.connection_string),
-          auth: d.auth.kind === "entra" ? { kind: "entra", sign_in_id: (d.auth.tenant && signedInTenants.get(d.auth.tenant)) || (account?.id ?? "oid-1"), tenant: d.auth.tenant ?? null } : { kind: "connection-string" },
+          auth,
           emulator: false,
           production: d.production,
           color: d.color ?? null,
@@ -80,7 +155,7 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
         }
         profiles = existing ? profiles.map((o) => (o.id === p.id ? p : o)) : [...profiles, p];
         activity(`Saved connection ${p.name}`, started);
-        return structuredClone(p);
+        return view(p);
       }
       case "profile_delete": {
         const p = profiles.find((o) => o.id === args.id);
@@ -123,23 +198,30 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
           activity("Sign-in cancelled", started);
           throw new EngineError("cancelled", "Sign-in cancelled.");
         }
-        // Signing in to one tenant satisfies its MFA and leaves the account as it is.
         const tenant = (args.tenant as string | null) || null;
+        // Another tenant: that tenant's own sign-in by the same person (its MFA is now satisfied); the account stays.
+        if (account && tenant && !same(tenant, account.tenant_id)) {
+          const s: MockSignIn = { id: `oid-${tenant.replace(/^tenant-/, "")}`, user_principal: account.user_principal, tenant_id: tenant };
+          records.set(s.id, s);
+          live.add(s.id);
+          activity(`Signed in to tenant ${tenant} as ${s.user_principal}`, started);
+          return { account, tenant_sign_in: { tenant_id: tenant, user_principal: s.user_principal, same_account: true } } satisfies SignInView;
+        }
+        // The current account's home tenant: the same account signs in again and stays current.
         if (account && tenant) {
-          signedInTenants.set(tenant, `oid-${tenant.replace(/^tenant-/, "")}`);
+          live.add(account.id);
           activity(`Signed in as ${account.user_principal}`, started);
-          return account;
+          return { account, tenant_sign_in: null } satisfies SignInView;
         }
         // Signing in again while signed in picks the other fixture account.
-        account = account?.id === "oid-1"
-          ? { id: "oid-2", user_principal: "dev@fabrikam.example", display_name: "Dev", tenant_id: "tenant-2" }
-          : { id: "oid-1", user_principal: "ops@contoso.example", display_name: "Ops", tenant_id: "tenant-1" };
+        account = { ...(account?.id === "oid-1" ? fx.accounts["oid-2"] : fx.accounts["oid-1"]) };
+        live.add(account.id);
         activity(`Signed in as ${account.user_principal}`, started);
-        return account;
+        return { account, tenant_sign_in: null } satisfies SignInView;
       }
       case "list_tenants": {
         if (!account) throw new EngineError("not_signed_in", "Sign in with Entra ID to list your namespaces.");
-        const tenants = fx.tenantsFor(account.tenant_id);
+        const tenants = fx.tenantsFor(account.tenant_id).map((t) => (t.home ? t : { ...t, sign_in_upn: tenantSignIn(t.tenant_id)?.user_principal ?? null }));
         activity(`Listed ${count(tenants.length, "tenant", "tenants")}`, started);
         return tenants;
       }
@@ -152,7 +234,7 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
           activity(action, started, e);
           return e;
         };
-        if (!home && asked === fx.GUEST_TENANT && !signedInTenants.has(asked))
+        if (!home && asked === fx.GUEST_TENANT && !tenantSignIn(asked))
           throw fail(new EngineError("mfa_required", "This tenant requires multi-factor sign-in. Sign in to it to list its namespaces."));
         if (scenario === "discovery-error") throw fail(new EngineError("network", "network error: connection reset by peer"));
         const found = !home
@@ -175,6 +257,20 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
           const e = new EngineError("invalid", `profile \`${p.name}\` has no stored connection string; edit the connection and paste it again`);
           activity(`Connecting to ${p.name} failed`, started, e);
           throw e;
+        }
+        if (p.auth.kind === "entra") {
+          const u = usable(p.auth.sign_in_id, p.auth.tenant).usable;
+          // A sign-in that no longer works, or a sign-in from elsewhere asking for the guest tenant, which wants its own (MFA) sign-in.
+          const asked = p.auth.tenant;
+          const e = !u
+            ? new EngineError("not_signed_in", `the sign-in used by profile \`${p.name}\` has expired; sign in again`)
+            : asked && same(asked, fx.GUEST_TENANT) && !same(u.tenant_id, asked)
+              ? new EngineError("not_signed_in", `${u.user_principal}: sign in again (interaction_required: AADSTS50076: you must use multi-factor authentication)`)
+              : null;
+          if (e) {
+            activity(`Connecting to ${p.name} failed`, started, e);
+            throw e;
+          }
         }
         active = p;
         activity(`Connected to ${p.name}`, started);
