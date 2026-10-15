@@ -1,10 +1,13 @@
 import { X } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Dialog } from "radix-ui";
-import type { ReactNode } from "react";
+import { useRef, type ReactNode } from "react";
 import { IconButton } from "./icon-button";
 
 const EASE = [0.16, 1, 0.3, 1] as const;
+
+/** The first field a person can type in or set. */
+const FIELD = 'input:not([type="hidden"]):not(:disabled), textarea:not(:disabled), select:not(:disabled), [role="combobox"]:not([data-disabled])';
 
 /** A right-edge side sheet. The app stays visible behind it (no dimming). */
 export function Sheet({
@@ -16,6 +19,7 @@ export function Sheet({
   footer,
   width = 420,
   dismissible = true,
+  initialFocus = "sheet",
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -26,8 +30,18 @@ export function Sheet({
   width?: number;
   /** false: no close button, and Escape or a click outside does nothing (a task that must finish first). */
   dismissible?: boolean;
+  /** Where focus goes on open: a form's first field, or the sheet itself (read-only sheets), without a ring. */
+  initialFocus?: "field" | "sheet";
 }) {
   const reduce = useReducedMotion();
+  const panel = useRef<HTMLDivElement>(null);
+  const focusOnOpen = (e: Event) => {
+    e.preventDefault();
+    const el = panel.current;
+    if (!el) return;
+    const field = initialFocus === "field" ? el.querySelector<HTMLElement>(`[data-sheet-body] :is(${FIELD})`) : null;
+    (field ?? el).focus();
+  };
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <AnimatePresence>
@@ -38,9 +52,12 @@ export function Sheet({
               asChild
               forceMount
               {...(description ? {} : { "aria-describedby": undefined })}
+              onOpenAutoFocus={focusOnOpen}
               {...(dismissible ? {} : { onEscapeKeyDown: (e: Event) => e.preventDefault(), onInteractOutside: (e: Event) => e.preventDefault() })}
             >
               <motion.div
+                ref={panel}
+                tabIndex={-1}
                 initial={reduce ? false : { x: 24, opacity: 0 }}
                 animate={{ x: 0, opacity: 1 }}
                 exit={reduce ? { opacity: 0 } : { x: 24, opacity: 0 }}
@@ -61,7 +78,7 @@ export function Sheet({
                     </Dialog.Close>
                   )}
                 </div>
-                <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">{children}</div>
+                <div data-sheet-body className="min-h-0 flex-1 overflow-y-auto px-4 py-4">{children}</div>
                 {footer && <div className="flex justify-end gap-2 border-t border-line px-4 py-3">{footer}</div>}
               </motion.div>
             </Dialog.Content>

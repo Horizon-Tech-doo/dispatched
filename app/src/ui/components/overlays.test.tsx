@@ -41,9 +41,16 @@ describe("Tabs overflow", () => {
     expect(list.scrollLeft).toBe(40);
   });
 
-  it("reveals the active tab when the selection changes", async () => {
+  it("reveals the active tab by scrolling the strip only, never the window", async () => {
     const scrollIntoView = vi.fn();
     Element.prototype.scrollIntoView = scrollIntoView;
+    const rect = (left: number, width: number) => ({ left, right: left + width, top: 0, bottom: 30, width, height: 30, x: left, y: 0, toJSON() {} });
+    const spy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.getAttribute("role") === "tablist") return rect(0, 100) as DOMRect;
+      // The tabs sit where they would after scrolling by the list's scrollLeft.
+      const list = this.closest<HTMLElement>('[role="tablist"]')!;
+      return rect((this.textContent === "audit" ? 150 : 0) - list.scrollLeft, 50) as DOMRect;
+    });
     render(
       <Tabs defaultValue="a">
         <TabsList variant="strip" aria-label="Open entities">
@@ -52,9 +59,39 @@ describe("Tabs overflow", () => {
         </TabsList>
       </Tabs>,
     );
-    scrollIntoView.mockClear();
+    const list = screen.getByRole("tablist");
+    expect(list.scrollLeft).toBe(0);
     await userEvent.click(screen.getByRole("tab", { name: "audit" }));
-    await vi.waitFor(() => expect(scrollIntoView).toHaveBeenCalledWith({ inline: "nearest", block: "nearest" }));
+    await vi.waitFor(() => expect(list.scrollLeft).toBe(100));
+    await userEvent.click(screen.getByRole("tab", { name: "orders" }));
+    await vi.waitFor(() => expect(list.scrollLeft).toBe(0));
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+});
+
+describe("Tabs focus", () => {
+  it("marks a tab pressed with the pointer so it shows its marker, not the keyboard ring", async () => {
+    render(
+      <Tabs defaultValue="a">
+        <TabsList aria-label="Drawer">
+          <TabsTrigger value="a">Jobs</TabsTrigger>
+          <TabsTrigger value="b">Activity</TabsTrigger>
+        </TabsList>
+      </Tabs>,
+    );
+    const jobs = screen.getByRole("tab", { name: "Jobs" });
+    expect(jobs.className).toContain("focus-visible:-outline-offset-2");
+    expect(jobs.className).toContain("data-[pointer]:focus-visible:outline-0");
+    fireEvent.mouseDown(jobs, { button: 0 });
+    expect(jobs).toHaveAttribute("data-pointer");
+    expect(jobs).toHaveFocus();
+    // The next key brings the ring back.
+    fireEvent.keyDown(jobs, { key: "ArrowRight" });
+    expect(jobs).not.toHaveAttribute("data-pointer");
+    fireEvent.mouseDown(jobs, { button: 0 });
+    fireEvent.blur(jobs);
+    expect(jobs).not.toHaveAttribute("data-pointer");
   });
 });
 

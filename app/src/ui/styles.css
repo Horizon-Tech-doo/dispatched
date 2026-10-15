@@ -1,6 +1,6 @@
 @import "tailwindcss";
-@import "@fontsource/jetbrains-mono/400.css";
-@import "@fontsource/jetbrains-mono/500.css";
+@import "@fontsource/jetbrains-mono/latin-400.css";
+@import "@fontsource/jetbrains-mono/latin-500.css";
 
 /* Only our roles exist as colours: palette utilities like bg-zinc-800 don't compile. */
 @theme {
@@ -63,6 +63,8 @@
     :root:not([data-theme]) { background: #ffffff; }
   }
   html, body, #root { height: 100%; }
+  /* The window never scrolls: anything that overflows by a pixel is clipped, not scrollable. */
+  html, #root { overflow: clip; }
   body {
     margin: 0;
     background: var(--c-content);
