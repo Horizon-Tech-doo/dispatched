@@ -1,9 +1,15 @@
-import { test, type Locator, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 /** Screens captured for impeccable finish reviews. Later tasks append entries.
  *  `scroll: true` marks a screen whose content scrolls inside an `[data-shot-scroller]` element
  *  (the page itself never scrolls), so the capture expands it to its full height.
  *  `prepare` runs after load and before the screenshot (open a sheet, a menu...). */
+const onScreen = async (page: Page, el: Locator) => {
+  const box = await el.boundingBox().catch(() => null);
+  const vp = page.viewportSize();
+  return box != null && vp != null && box.y >= 0 && box.x >= 0 && box.y + box.height <= vp.height && box.x + box.width <= vp.width;
+};
+
 export const shots: {
   name: string;
   path: string;
@@ -11,6 +17,10 @@ export const shots: {
   /** Content that must be on screen before the capture (so mock-data loading is never photographed). */
   ready?: (page: Page) => Locator;
   prepare?: (page: Page) => Promise<void>;
+  /** Transient UI (an open menu) that must be on screen at the moment of capture, and is re-opened if it closed. */
+  holds?: (page: Page) => Locator;
+  /** Capture the viewport only; for entries whose transient UI a full-page resize could dismiss. */
+  viewportOnly?: boolean;
 }[] = [
   { name: "catalogue", path: "/#catalogue", scroll: true },
   {
@@ -54,8 +64,9 @@ export const shots: {
     ready: (p) => p.getByRole("banner").getByText("PROD", { exact: true }),
     prepare: async (page) => {
       await page.getByRole("button", { name: /^Connection:/ }).click();
-      await page.getByRole("menu").waitFor();
     },
+    holds: (p) => p.getByRole("menu"),
+    viewportOnly: true,
   },
 ];
 
@@ -66,15 +77,29 @@ for (const colorScheme of ["dark", "light"] as const) {
       await page.goto(s.path);
       await page.waitForLoadState("networkidle");
       await s.ready?.(page).waitFor();
-      await s.prepare?.(page);
-      if (s.scroll) {
-        // body is overflow:hidden with a fixed-height root; let the page grow to the scroller's content.
-        await page.addStyleTag({
-          content:
-            "html, body, #root, [data-shot-scroller] { height: auto !important; overflow: visible !important; } html { background: var(--c-content) !important; }",
-        });
+      const capture = async () => {
+        await s.prepare?.(page);
+        if (s.scroll) {
+          // body is overflow:hidden with a fixed-height root; let the page grow to the scroller's content.
+          await page.addStyleTag({
+            content:
+              "html, body, #root, [data-shot-scroller] { height: auto !important; overflow: visible !important; } html { background: var(--c-content) !important; }",
+          });
+        }
+        if (s.holds) {
+          await expect(s.holds(page)).toBeVisible();
+          // Radix mounts a popper off-screen until it has measured it; "visible" alone can still photograph nothing.
+          await expect.poll(() => onScreen(page, s.holds!(page))).toBe(true);
+        }
+        await page.screenshot({ path: `test-results/shots/${s.name}-${colorScheme}.png`, fullPage: !s.viewportOnly });
+      };
+      await capture();
+      // A transient surface that vanished during the capture means the shot is wrong: retry, then fail loudly.
+      for (let attempt = 0; s.holds && !(await onScreen(page, s.holds(page))); attempt++) {
+        expect(attempt, `${s.name}: the held UI closed before the screenshot`).toBeLessThan(3);
+        await page.keyboard.press("Escape");
+        await capture();
       }
-      await page.screenshot({ path: `test-results/shots/${s.name}-${colorScheme}.png`, fullPage: true });
     });
   }
 }

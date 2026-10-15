@@ -12,7 +12,7 @@ export function Welcome() {
   if (profiles.isPending) {
     return (
       <div className="flex h-full w-full justify-center">
-        <div className="w-[480px] max-w-full px-4 py-16" aria-busy="true">
+        <div className="w-[480px] max-w-full py-16" aria-busy="true">
           <SkeletonRows rows={4} />
         </div>
       </div>

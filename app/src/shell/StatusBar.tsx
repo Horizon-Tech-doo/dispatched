@@ -20,9 +20,9 @@ export function StatusBar() {
   return (
     <footer className="flex h-[22px] shrink-0 items-center gap-4 border-t border-line bg-chrome px-3 text-11 text-muted">
       {conn.view && <span>{conn.view.transport === "websockets" ? "AMQP over WebSockets" : "AMQP"}</span>}
-      <span role="status" className="flex items-center gap-1.5">
+      <span className="flex items-center gap-1.5">
         {lost && <CircleAlert aria-hidden="true" className="size-3 text-accent" />}
-        <span className={lost ? "text-fg" : undefined}>{state}</span>
+        <span role="status" className={lost ? "text-fg" : undefined}>{state}</span>
         {lost && <Button size="sm" variant="quiet" onClick={conn.retry}>Reconnect</Button>}
       </span>
       {info?.startup_error && (
