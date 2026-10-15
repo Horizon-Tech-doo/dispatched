@@ -365,12 +365,14 @@ async fn find_last<S: PeekSource + ?Sized>(b: &mut Batches<'_, S>) -> Result<Opt
     Ok(Some(lo))
 }
 
-fn tail_page(kept: VecDeque<PeekedMessage>, scanned: u32) -> PeekPage {
+/// A [`peek_tail`] page. `reached_end` is false when the budget ran out before the first
+/// window was read to the end, so the messages are not the tail.
+fn tail_page(kept: VecDeque<PeekedMessage>, scanned: u32, reached_end: bool) -> PeekPage {
     PeekPage {
         messages: kept.into(),
         scanned,
         next_sequence: None,
-        exhausted: true,
+        exhausted: reached_end,
     }
 }
 
@@ -461,9 +463,13 @@ async fn scan_range<S: PeekSource + ?Sized>(
 /// messages in total. Each wider window reads only the range in front of the previous one and
 /// merges it with what that one found, so every message is examined at most once. When the
 /// budget runs out inside a range, that range is dropped in favour of what the previous windows
-/// found (the first window keeps its partial matches). Only the last `opts.max` matches are
-/// held, so memory stays bounded on large-body entities. Within a session, the session peek is
-/// tried once for the whole search. The page has no continuation.
+/// found. Only the last `opts.max` matches are held, so memory stays bounded on large-body
+/// entities. Within a session, the session peek is tried once for the whole search.
+///
+/// The page has no continuation (`next_sequence: None`). `exhausted` is true when the result is
+/// the tail as of the end that was found. It is false only when the budget ran out inside the
+/// first window: the page then holds that window's partial matches, which are not the last
+/// ones, and callers should say the scan did not reach the end.
 pub async fn peek_tail<S: PeekSource + ?Sized>(
     src: &mut S,
     address: &str,
@@ -472,7 +478,7 @@ pub async fn peek_tail<S: PeekSource + ?Sized>(
 ) -> Result<PeekPage> {
     let want = opts.max as usize;
     if want == 0 {
-        return Ok(tail_page(VecDeque::new(), 0));
+        return Ok(tail_page(VecDeque::new(), 0, true));
     }
     let mut b = Batches {
         src,
@@ -480,7 +486,7 @@ pub async fn peek_tail<S: PeekSource + ?Sized>(
         session: opts.filter.session_id.as_deref(),
     };
     let Some(last) = find_last(&mut b).await? else {
-        return Ok(tail_page(VecDeque::new(), 0));
+        return Ok(tail_page(VecDeque::new(), 0, true));
     };
     let mut window = (want as i64).max(64);
     let mut scanned: u32 = 0;
@@ -494,8 +500,13 @@ pub async fn peek_tail<S: PeekSource + ?Sized>(
         let r = scan_range(&mut b, view, &opts.filter, (start, end), budget, want).await?;
         scanned = scanned.saturating_add(r.scanned);
         if !r.complete {
-            // Out of budget (or stuck) before the range was read: keep the complete part.
-            return Ok(tail_page(found.unwrap_or(r.kept), scanned));
+            // Out of budget (or stuck) before the range was read: keep the complete part. When
+            // even the first window is incomplete, its matches are from the front of the window,
+            // not the tail, and the page says the end was not reached.
+            return Ok(match found {
+                Some(tail) => tail_page(tail, scanned, true),
+                None => tail_page(r.kept, scanned, false),
+            });
         }
         let mut merged = r.kept;
         merged.extend(found.take().unwrap_or_default());
@@ -503,7 +514,7 @@ pub async fn peek_tail<S: PeekSource + ?Sized>(
             merged.pop_front();
         }
         if merged.len() >= want || start == 0 || scanned >= opts.scan_limit {
-            return Ok(tail_page(merged, scanned));
+            return Ok(tail_page(merged, scanned, true));
         }
         found = Some(merged);
         end = start - 1;
@@ -554,6 +565,9 @@ pub async fn collect_sequences<S: PeekSource + ?Sized>(
     };
     let mut next = first;
     'outer: while out.scanned < budget {
+        // Wanted sequences behind the position were skipped over (received, expired or never
+        // there); drop them so they cannot hold back the jump. `missing` is computed below.
+        wanted = wanted.split_off(&next);
         // Skip the gap to the next wanted message, so the cost follows the selection.
         let Some(&target) = wanted.first() else {
             break;
@@ -1476,5 +1490,48 @@ mod tests {
             src.session_calls, 1,
             "the refusal is remembered for the whole search"
         );
+    }
+
+    #[tokio::test]
+    async fn collect_sequences_keeps_jumping_past_a_missing_sequence() {
+        // 4 was received: it is skipped over and must not hold back the next jump.
+        let mut src = entity(100_000, 0);
+        src.messages.retain(|m| m.sequence_number != 4);
+        let c = collect_sequences(
+            &mut src,
+            "q",
+            PeekView::Active,
+            &[4, 95_000],
+            1_000_000,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            c.messages
+                .iter()
+                .map(|m| m.sequence_number)
+                .collect::<Vec<_>>(),
+            [95_000]
+        );
+        assert_eq!(c.missing, [4]);
+        assert!(src.calls <= 3, "{} batches", src.calls);
+    }
+
+    #[tokio::test]
+    async fn tail_that_runs_out_of_budget_in_its_first_window_is_not_exhausted() {
+        // A budget of 10 cannot read the first window (64 messages) to the end.
+        let mut src = entity(1_000, 0);
+        let page = peek_tail(
+            &mut src,
+            "q",
+            PeekView::Active,
+            &PeekOptions::new(3).scan_limit(10),
+        )
+        .await
+        .unwrap();
+        assert!(!page.exhausted, "the scan did not reach the end");
+        assert_eq!(page.next_sequence, None, "a tail has no continuation");
+        assert!(page.scanned <= 10, "scanned {}", page.scanned);
     }
 }
