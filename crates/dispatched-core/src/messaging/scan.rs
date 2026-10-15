@@ -3,11 +3,13 @@
 use super::connection::ServiceBusConnection;
 use super::message::{MessageState, PeekedMessage};
 use super::peek::{self, MAX_PER_REQUEST};
-use crate::Result;
 use crate::filter::MessageFilter;
 use crate::namespace::PeekView;
+use crate::{Error, Result};
 use async_trait::async_trait;
+use horizon_azure_kit::safety::CancellationToken;
 use serde::Serialize;
+use std::collections::{BTreeSet, VecDeque};
 
 /// Messages examined per peek call unless the caller says otherwise.
 pub const DEFAULT_SCAN_LIMIT: u32 = 10_000;
@@ -22,6 +24,20 @@ pub trait PeekSource: Send {
         from: i64,
         max: u32,
     ) -> Result<Vec<PeekedMessage>>;
+
+    /// Peek within one session. Sources that cannot answer `Unsupported`; callers then peek
+    /// the whole entity and keep the session's messages themselves.
+    async fn peek_session_batch(
+        &mut self,
+        _address: &str,
+        _session_id: &str,
+        _from: i64,
+        _max: u32,
+    ) -> Result<Vec<PeekedMessage>> {
+        Err(Error::Unsupported {
+            capability: "peek within a session".into(),
+        })
+    }
 }
 
 #[async_trait]
@@ -33,6 +49,41 @@ impl PeekSource for ServiceBusConnection {
         max: u32,
     ) -> Result<Vec<PeekedMessage>> {
         peek::peek(self, address, from, max).await
+    }
+
+    async fn peek_session_batch(
+        &mut self,
+        address: &str,
+        session_id: &str,
+        from: i64,
+        max: u32,
+    ) -> Result<Vec<PeekedMessage>> {
+        peek::peek_session(self, address, session_id, from, max).await
+    }
+}
+
+/// Batches from `address`, within `session` while the source can peek by session.
+struct Batches<'a, S: PeekSource + ?Sized> {
+    src: &'a mut S,
+    address: &'a str,
+    session: Option<&'a str>,
+}
+
+impl<S: PeekSource + ?Sized> Batches<'_, S> {
+    async fn next(&mut self, from: i64, max: u32) -> Result<Vec<PeekedMessage>> {
+        if let Some(id) = self.session {
+            match self
+                .src
+                .peek_session_batch(self.address, id, from, max)
+                .await
+            {
+                // Not by session here: peek the whole entity from now on; the session
+                // condition of the filter keeps the result correct.
+                Err(Error::Unsupported { .. }) => self.session = None,
+                other => return other,
+            }
+        }
+        self.src.peek_batch(self.address, from, max).await
     }
 }
 
@@ -105,19 +156,27 @@ pub struct PeekPage {
 /// (which returns immediately). If a message without a sequence number is met
 /// after real progress, the continuation is the last good sequence plus one; the
 /// next call then examines nothing and ends with `None`.
-pub async fn scan_messages(
-    src: &mut (impl PeekSource + ?Sized),
+///
+/// With `opts.filter.session_id` set, batches are peeked within that session (no session
+/// lock); a source that cannot do that is asked once and then peeked whole.
+pub async fn scan_messages<S: PeekSource + ?Sized>(
+    src: &mut S,
     address: &str,
     view: PeekView,
     opts: &PeekOptions,
 ) -> Result<PeekPage> {
+    let mut batches = Batches {
+        src,
+        address,
+        session: opts.filter.session_id.as_deref(),
+    };
     let mut out: Vec<PeekedMessage> = Vec::new();
     let mut scanned: u32 = 0;
     let mut next = opts.from_sequence;
     let mut exhausted = false;
     'outer: while (out.len() as u32) < opts.max && scanned < opts.scan_limit {
         let want = (opts.scan_limit - scanned).min(MAX_PER_REQUEST);
-        let batch = src.peek_batch(address, next, want).await?;
+        let batch = batches.next(next, want).await?;
         if batch.is_empty() {
             exhausted = true;
             break;
@@ -232,11 +291,268 @@ pub async fn count_messages(
     Ok(counts)
 }
 
+/// Most one-message peeks [`last_sequence`] makes.
+pub const MAX_PROBES: u32 = 200;
+
+async fn first_at<S: PeekSource + ?Sized>(
+    b: &mut Batches<'_, S>,
+    from: i64,
+    probes: &mut u32,
+) -> Result<Option<i64>> {
+    *probes += 1;
+    if *probes > MAX_PROBES {
+        return Err(Error::Protocol(
+            "could not find the end of the entity: sequence numbers kept moving".into(),
+        ));
+    }
+    Ok(b.next(from, 1)
+        .await?
+        .into_iter()
+        .map(|m| m.sequence_number)
+        .find(|&s| s >= from))
+}
+
+/// The highest sequence number in `address` (within `session` when given), or `None` when it
+/// is empty. Uses one-message peeks: from the first message, the step doubles until a peek
+/// finds nothing, then the gap is bisected (about 2·log2(span) peeks, at most [`MAX_PROBES`]).
+/// Messages that arrive meanwhile can only raise the answer.
+pub async fn last_sequence<S: PeekSource + ?Sized>(
+    src: &mut S,
+    address: &str,
+    session: Option<&str>,
+) -> Result<Option<i64>> {
+    let mut b = Batches {
+        src,
+        address,
+        session,
+    };
+    let mut probes = 0;
+    let Some(mut lo) = first_at(&mut b, 0, &mut probes).await? else {
+        return Ok(None);
+    };
+    let mut step: i64 = 1;
+    let mut hi = loop {
+        let at = lo.saturating_add(step);
+        if at == lo {
+            return Ok(Some(lo));
+        }
+        match first_at(&mut b, at, &mut probes).await? {
+            Some(s) => {
+                lo = s;
+                step = step.saturating_mul(2);
+            }
+            None => break at,
+        }
+    };
+    // A message at `lo`, nothing at or after `hi`.
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        match first_at(&mut b, mid, &mut probes).await? {
+            Some(s) => {
+                lo = s;
+                if lo >= hi {
+                    hi = lo.saturating_add(1);
+                }
+            }
+            None => hi = mid,
+        }
+    }
+    Ok(Some(lo))
+}
+
+fn tail_page(kept: VecDeque<PeekedMessage>, scanned: u32) -> PeekPage {
+    PeekPage {
+        messages: kept.into(),
+        scanned,
+        next_sequence: None,
+        exhausted: true,
+    }
+}
+
+/// Most matches one page of a [`peek_tail`] window holds (besides the kept tail).
+const TAIL_PAGE: u32 = 1_000;
+
+/// One window of [`peek_tail`].
+struct Window {
+    /// The last `want` matches seen, oldest first.
+    kept: VecDeque<PeekedMessage>,
+    /// Messages examined.
+    scanned: u32,
+    /// The end of the entity was reached within the budget.
+    complete: bool,
+}
+
+/// Scan from `start` to the end of `view` within `budget`, keeping only the last `want` matches
+/// in a ring. A window over large bodies therefore holds at most `want` plus one page of
+/// matches, however many messages match in it.
+async fn scan_window<S: PeekSource + ?Sized>(
+    src: &mut S,
+    address: &str,
+    view: PeekView,
+    filter: &MessageFilter,
+    start: i64,
+    budget: u32,
+    want: usize,
+) -> Result<Window> {
+    let mut w = Window {
+        kept: VecDeque::with_capacity(want),
+        scanned: 0,
+        complete: false,
+    };
+    let mut opts = PeekOptions {
+        from_sequence: start,
+        max: TAIL_PAGE,
+        scan_limit: budget,
+        filter: filter.clone(),
+    };
+    while w.scanned < budget {
+        opts.scan_limit = budget - w.scanned;
+        let page = scan_messages(src, address, view, &opts).await?;
+        w.scanned = w.scanned.saturating_add(page.scanned);
+        for m in page.messages {
+            if w.kept.len() == want {
+                w.kept.pop_front();
+            }
+            w.kept.push_back(m);
+        }
+        match page.next_sequence {
+            None => {
+                w.complete = true;
+                break;
+            }
+            Some(n) if n > opts.from_sequence => opts.from_sequence = n,
+            // No progress: the end was not confirmed.
+            Some(_) => break,
+        }
+    }
+    Ok(w)
+}
+
+/// The last `opts.max` messages of `view` matching `opts.filter`, oldest first ("from the end").
+/// Finds the end with [`last_sequence`], then scans windows that start further back (×4 each
+/// time) until it has enough matches, starts at sequence 0, or has examined `opts.scan_limit`
+/// messages in total. A window that runs out of budget before the end is discarded in favour
+/// of the previous complete one. Each window keeps only its last `opts.max` matches, so memory
+/// stays bounded on large-body entities. The page has no continuation.
+pub async fn peek_tail<S: PeekSource + ?Sized>(
+    src: &mut S,
+    address: &str,
+    view: PeekView,
+    opts: &PeekOptions,
+) -> Result<PeekPage> {
+    let want = opts.max as usize;
+    if want == 0 {
+        return Ok(tail_page(VecDeque::new(), 0));
+    }
+    let Some(last) = last_sequence(src, address, opts.filter.session_id.as_deref()).await? else {
+        return Ok(tail_page(VecDeque::new(), 0));
+    };
+    let mut window = (want as i64).max(64);
+    let mut scanned: u32 = 0;
+    let mut best: Option<VecDeque<PeekedMessage>> = None;
+    loop {
+        let start = last.saturating_sub(window - 1).max(0);
+        let budget = opts.scan_limit.saturating_sub(scanned).max(1);
+        let w = scan_window(src, address, view, &opts.filter, start, budget, want).await?;
+        scanned = scanned.saturating_add(w.scanned);
+        if !w.complete {
+            // Out of budget before reaching the end: this window is incomplete.
+            return Ok(tail_page(best.unwrap_or(w.kept), scanned));
+        }
+        if w.kept.len() >= want || start == 0 || scanned >= opts.scan_limit {
+            return Ok(tail_page(w.kept, scanned));
+        }
+        best = Some(w.kept);
+        window = window.saturating_mul(4);
+    }
+}
+
+/// The message with sequence number `sequence` in `view` of `address`, if it is still there.
+pub async fn peek_one<S: PeekSource + ?Sized>(
+    src: &mut S,
+    address: &str,
+    view: PeekView,
+    sequence: i64,
+) -> Result<Option<PeekedMessage>> {
+    let batch = src.peek_batch(address, sequence, 1).await?;
+    Ok(batch
+        .into_iter()
+        .find(|m| m.sequence_number == sequence && view.accepts(m.state)))
+}
+
+/// Messages found by [`collect_sequences`].
+#[derive(Debug, Clone, Default)]
+pub struct SequenceCollection {
+    /// Found, in sequence order.
+    pub messages: Vec<PeekedMessage>,
+    /// Asked for but not found (received, expired, not in this view, or beyond the budget).
+    pub missing: Vec<i64>,
+    /// Messages examined.
+    pub scanned: u64,
+}
+
+/// The messages of `view` with the given sequence numbers, read by scanning from the smallest
+/// to the largest. Examines at most `budget` messages; stops early when all are found.
+pub async fn collect_sequences<S: PeekSource + ?Sized>(
+    src: &mut S,
+    address: &str,
+    view: PeekView,
+    sequences: &[i64],
+    budget: u64,
+    cancel: Option<&CancellationToken>,
+) -> Result<SequenceCollection> {
+    let mut wanted: BTreeSet<i64> = sequences.iter().copied().filter(|&s| s >= 0).collect();
+    let mut out = SequenceCollection::default();
+    let (Some(&first), Some(&last)) = (wanted.first(), wanted.last()) else {
+        return Ok(out);
+    };
+    let mut next = first;
+    'outer: while !wanted.is_empty() && out.scanned < budget {
+        if cancel.is_some_and(CancellationToken::is_cancelled) {
+            return Err(Error::Cancelled);
+        }
+        let batch = src.peek_batch(address, next, MAX_PER_REQUEST).await?;
+        let mut advanced = false;
+        for m in batch {
+            if m.sequence_number < next {
+                continue;
+            }
+            if m.sequence_number > last {
+                break 'outer;
+            }
+            out.scanned += 1;
+            next = m.sequence_number + 1;
+            advanced = true;
+            if wanted.remove(&m.sequence_number) && view.accepts(m.state) {
+                out.messages.push(m);
+            }
+            if out.scanned >= budget {
+                break 'outer;
+            }
+        }
+        if !advanced {
+            break;
+        }
+    }
+    // A wanted message in the wrong state was removed from `wanted` but not collected: report it.
+    let found: BTreeSet<i64> = out.messages.iter().map(|m| m.sequence_number).collect();
+    out.missing = sequences
+        .iter()
+        .copied()
+        .filter(|s| *s >= 0 && !found.contains(s))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Error;
     use crate::filter::PropertyFilter;
     use crate::messaging::{MessageState, test_message};
+    use horizon_azure_kit::safety::CancellationToken;
 
     struct Fake {
         messages: Vec<PeekedMessage>,
@@ -617,5 +933,289 @@ mod tests {
         };
         let c = count_messages(&mut src, "q", 100).await.unwrap();
         assert_eq!(c.total, 2);
+    }
+
+    /// A source that peeks within a session (or refuses to).
+    struct SessionFake {
+        messages: Vec<PeekedMessage>,
+        session_calls: u32,
+        plain_calls: u32,
+        supports_sessions: bool,
+    }
+
+    #[async_trait]
+    impl PeekSource for SessionFake {
+        async fn peek_batch(
+            &mut self,
+            _a: &str,
+            from: i64,
+            max: u32,
+        ) -> Result<Vec<PeekedMessage>> {
+            self.plain_calls += 1;
+            Ok(self
+                .messages
+                .iter()
+                .filter(|m| m.sequence_number >= from)
+                .take(max as usize)
+                .cloned()
+                .collect())
+        }
+        async fn peek_session_batch(
+            &mut self,
+            _a: &str,
+            s: &str,
+            from: i64,
+            max: u32,
+        ) -> Result<Vec<PeekedMessage>> {
+            self.session_calls += 1;
+            if !self.supports_sessions {
+                return Err(Error::Unsupported {
+                    capability: "peek within a session".into(),
+                });
+            }
+            Ok(self
+                .messages
+                .iter()
+                .filter(|m| m.sequence_number >= from && m.session_id.as_deref() == Some(s))
+                .take(max as usize)
+                .cloned()
+                .collect())
+        }
+    }
+
+    fn sessions(n: i64) -> Vec<PeekedMessage> {
+        (1..=n)
+            .map(|i| {
+                let mut m = test_message(i);
+                m.session_id = Some(if i % 2 == 0 { "even" } else { "odd" }.into());
+                m
+            })
+            .collect()
+    }
+
+    fn in_session(id: &str) -> PeekOptions {
+        PeekOptions::new(100).filter(MessageFilter {
+            session_id: Some(id.into()),
+            ..Default::default()
+        })
+    }
+
+    #[tokio::test]
+    async fn session_scan_asks_the_broker_for_that_session() {
+        let mut src = SessionFake {
+            messages: sessions(10),
+            session_calls: 0,
+            plain_calls: 0,
+            supports_sessions: true,
+        };
+        let page = scan_messages(&mut src, "q", PeekView::Active, &in_session("even"))
+            .await
+            .unwrap();
+        assert_eq!(seq_numbers(&page), [2, 4, 6, 8, 10]);
+        assert_eq!(src.plain_calls, 0);
+        assert_eq!(page.scanned, 5, "only the session's messages were examined");
+    }
+
+    #[tokio::test]
+    async fn session_scan_falls_back_when_the_source_cannot_peek_by_session() {
+        let mut src = SessionFake {
+            messages: sessions(10),
+            session_calls: 0,
+            plain_calls: 0,
+            supports_sessions: false,
+        };
+        let page = scan_messages(&mut src, "q", PeekView::Active, &in_session("odd"))
+            .await
+            .unwrap();
+        assert_eq!(seq_numbers(&page), [1, 3, 5, 7, 9]);
+        assert_eq!(src.session_calls, 1, "asked once, then fell back for good");
+        assert!(page.exhausted);
+    }
+
+    #[tokio::test]
+    async fn last_sequence_finds_the_end_of_sparse_sequences() {
+        for list in [
+            vec![1, 2, 3],
+            vec![5],
+            vec![1, 10, 1_000, 1_000_000],
+            vec![3, 4, (1i64 << 48) + 7],
+        ] {
+            let mut src = Fake {
+                messages: seqs(&list),
+                calls: 0,
+            };
+            assert_eq!(
+                last_sequence(&mut src, "q", None).await.unwrap(),
+                list.last().copied(),
+                "{list:?}"
+            );
+            assert!(src.calls <= 2 * 64 + 2, "{} probes for {list:?}", src.calls);
+        }
+        let mut empty = Fake {
+            messages: vec![],
+            calls: 0,
+        };
+        assert_eq!(last_sequence(&mut empty, "q", None).await.unwrap(), None);
+    }
+
+    /// Answers every peek with a message just past the request, as if messages kept arriving.
+    struct Endless {
+        calls: u32,
+    }
+
+    #[async_trait]
+    impl PeekSource for Endless {
+        async fn peek_batch(
+            &mut self,
+            _a: &str,
+            from: i64,
+            _max: u32,
+        ) -> Result<Vec<PeekedMessage>> {
+            self.calls += 1;
+            Ok(vec![test_message(from.saturating_add(1))])
+        }
+    }
+
+    #[tokio::test]
+    async fn last_sequence_terminates_on_a_source_that_never_ends() {
+        let mut src = Endless { calls: 0 };
+        let r = last_sequence(&mut src, "q", None).await;
+        assert!(src.calls <= MAX_PROBES, "{} probes", src.calls);
+        assert!(matches!(r, Ok(Some(_)) | Err(Error::Protocol(_))), "{r:?}");
+    }
+
+    #[tokio::test]
+    async fn tail_returns_the_last_matches_oldest_first() {
+        let mut src = entity(1_000, 0);
+        let opts = PeekOptions::new(3).scan_limit(100_000);
+        let page = peek_tail(&mut src, "q", PeekView::Active, &opts)
+            .await
+            .unwrap();
+        assert_eq!(seq_numbers(&page), [998, 999, 1000]);
+        assert!(page.exhausted && page.next_sequence.is_none());
+    }
+
+    #[tokio::test]
+    async fn tail_widens_until_the_filter_has_enough_matches() {
+        // Only every 100th message is scheduled; ask for the last 4 scheduled ones.
+        let mut src = entity(2_000, 100);
+        let opts = PeekOptions::new(4).scan_limit(100_000);
+        let page = peek_tail(&mut src, "q", PeekView::Scheduled, &opts)
+            .await
+            .unwrap();
+        assert_eq!(seq_numbers(&page), [1700, 1800, 1900, 2000]);
+    }
+
+    #[tokio::test]
+    async fn tail_window_spanning_several_pages_keeps_the_last_matches() {
+        // 1,500 wanted: the window is read in pages of at most 1,000 matches into a ring.
+        let mut src = entity(3_000, 0);
+        let page = peek_tail(
+            &mut src,
+            "q",
+            PeekView::Active,
+            &PeekOptions::new(1_500).scan_limit(100_000),
+        )
+        .await
+        .unwrap();
+        assert_eq!(seq_numbers(&page), (1_501..=3_000).collect::<Vec<i64>>());
+    }
+
+    #[tokio::test]
+    async fn tail_of_a_short_entity_is_all_of_it() {
+        let mut src = entity(5, 0);
+        let page = peek_tail(
+            &mut src,
+            "q",
+            PeekView::Active,
+            &PeekOptions::new(50).scan_limit(1_000),
+        )
+        .await
+        .unwrap();
+        assert_eq!(seq_numbers(&page), [1, 2, 3, 4, 5]);
+    }
+
+    #[tokio::test]
+    async fn tail_is_bounded_by_the_scan_budget() {
+        // Nothing matches; the search must stop near the budget, not read 50,000 messages.
+        let mut src = entity(50_000, 0);
+        let opts = PeekOptions::new(10).scan_limit(2_000);
+        let page = peek_tail(&mut src, "q", PeekView::Scheduled, &opts)
+            .await
+            .unwrap();
+        assert!(page.messages.is_empty());
+        assert!(page.scanned <= 2_000, "scanned {}", page.scanned);
+    }
+
+    #[tokio::test]
+    async fn peek_one_returns_the_message_or_none_when_the_sequence_is_gone() {
+        let mut src = Fake {
+            messages: seqs(&[1, 2, 5]),
+            calls: 0,
+        };
+        assert_eq!(
+            peek_one(&mut src, "q", PeekView::Active, 2)
+                .await
+                .unwrap()
+                .unwrap()
+                .sequence_number,
+            2
+        );
+        assert!(
+            peek_one(&mut src, "q", PeekView::Active, 3)
+                .await
+                .unwrap()
+                .is_none(),
+            "3 was received; 5 is not it"
+        );
+        assert!(
+            peek_one(&mut src, "q", PeekView::Scheduled, 1)
+                .await
+                .unwrap()
+                .is_none(),
+            "wrong view"
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_sequences_returns_found_and_reports_missing() {
+        let mut src = Fake {
+            messages: seqs(&[1, 2, 3, 5, 8, 13, 21]),
+            calls: 0,
+        };
+        let c = collect_sequences(
+            &mut src,
+            "q",
+            PeekView::Active,
+            &[21, 3, 4, 3, 8],
+            1_000,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            c.messages
+                .iter()
+                .map(|m| m.sequence_number)
+                .collect::<Vec<_>>(),
+            [3, 8, 21]
+        );
+        assert_eq!(c.missing, [4]);
+    }
+
+    #[tokio::test]
+    async fn collect_sequences_stops_at_the_budget_and_on_cancel() {
+        let mut src = entity(10_000, 0);
+        let c = collect_sequences(&mut src, "q", PeekView::Active, &[1, 9_999], 500, None)
+            .await
+            .unwrap();
+        assert_eq!(c.messages.len(), 1);
+        assert_eq!(c.missing, [9_999], "not reached within the budget");
+        let token = CancellationToken::new();
+        token.cancel();
+        let e = collect_sequences(&mut src, "q", PeekView::Active, &[1], 500, Some(&token))
+            .await
+            .unwrap_err();
+        assert!(matches!(e, Error::Cancelled));
     }
 }

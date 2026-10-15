@@ -19,7 +19,7 @@ pub use message::{
     MessageBody, MessageState, PeekedMessage, PropValue, decode_bytes, decode_message,
 };
 pub use scan::{
-    DEFAULT_SCAN_LIMIT, PeekOptions, PeekPage, PeekSource, StateCounts, count_messages,
-    scan_messages,
+    DEFAULT_SCAN_LIMIT, PeekOptions, PeekPage, PeekSource, SequenceCollection, StateCounts,
+    collect_sequences, count_messages, last_sequence, peek_one, peek_tail, scan_messages,
 };
 pub use summary::{DETAIL_BODY_CAP, MessageDetail, MessageSummary};

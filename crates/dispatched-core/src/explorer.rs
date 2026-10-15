@@ -1,13 +1,17 @@
 //! The facade every surface uses: one namespace, lazily-opened AMQP connection.
 
 use crate::messaging::{
-    PeekOptions, PeekPage, PeekSource, ServiceBusConnection, StateCounts, count_messages,
-    scan_messages,
+    PeekOptions, PeekPage, PeekSource, PeekedMessage, SequenceCollection, ServiceBusConnection,
+    StateCounts, collect_sequences, count_messages, peek_one, peek_tail, scan_messages,
 };
 use crate::mgmt::{EntityCounts, ManagementClient, QueueInfo, SubscriptionInfo, TopicInfo};
 use crate::namespace::{EntityPath, Namespace, PeekView, SubQueue};
 use crate::{Error, Result};
-use tokio::sync::Mutex;
+use async_trait::async_trait;
+use horizon_azure_kit::safety::CancellationToken;
+use tokio::sync::{Mutex, MutexGuard};
+
+type Guard<'a> = MutexGuard<'a, Option<ServiceBusConnection>>;
 
 /// Browse and (from M2) operate one namespace.
 pub struct Explorer {
@@ -101,18 +105,9 @@ impl Explorer {
     /// One counting attempt; drops the cached connection on connection-level
     /// failures, like [`Explorer::peek_once`].
     async fn count_once(&self, entity: &EntityPath, cap: u32) -> Result<EntityCounts> {
-        let mut guard = self.amqp.lock().await;
-        if guard.is_none() {
-            *guard = Some(ServiceBusConnection::open(&self.ns).await?);
-        }
-        let conn = guard.as_mut().expect("opened above");
-        let result = count_sub_queues(conn, entity, cap).await;
-        if result.as_ref().is_err_and(|e| retry_after(e, 0))
-            && let Some(conn) = guard.take()
-        {
-            let _ = conn.close().await;
-        }
-        result
+        let mut guard = self.connection().await?;
+        let result = count_sub_queues(guard.as_mut().expect("opened"), entity, cap).await;
+        Self::settle(&mut guard, result).await
     }
 
     /// Peek `view` of `entity` according to `opts`.
@@ -135,12 +130,77 @@ impl Explorer {
         view: PeekView,
         opts: &PeekOptions,
     ) -> Result<PeekPage> {
+        let mut guard = self.connection().await?;
+        let result = scan_messages(guard.as_mut().expect("opened"), address, view, opts).await;
+        Self::settle(&mut guard, result).await
+    }
+
+    /// The last `opts.max` matches of `view` ("from the end"); see [`peek_tail`]. Locks the
+    /// connection per batch ([`PerBatch`]), not for the whole search.
+    pub async fn peek_tail(
+        &self,
+        entity: &EntityPath,
+        view: PeekView,
+        opts: &PeekOptions,
+    ) -> Result<PeekPage> {
+        let address = entity.address(view.sub_queue());
+        with_one_retry(|_| async {
+            peek_tail(&mut PerBatch { explorer: self }, &address, view, opts).await
+        })
+        .await
+    }
+
+    /// One message by sequence number, if it is still in `view`.
+    pub async fn peek_message(
+        &self,
+        entity: &EntityPath,
+        view: PeekView,
+        sequence: i64,
+    ) -> Result<Option<PeekedMessage>> {
+        let address = entity.address(view.sub_queue());
+        with_one_retry(|_| async {
+            let mut guard = self.connection().await?;
+            let result = peek_one(guard.as_mut().expect("opened"), &address, view, sequence).await;
+            Self::settle(&mut guard, result).await
+        })
+        .await
+    }
+
+    /// Selected messages again, by sequence number; see [`collect_sequences`]. Not retried
+    /// (a retry would repeat a long scan); the caller reports the error. Locks the connection
+    /// per batch ([`PerBatch`]), so an export does not block browsing.
+    pub async fn collect_sequences(
+        &self,
+        entity: &EntityPath,
+        view: PeekView,
+        sequences: &[i64],
+        budget: u64,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<SequenceCollection> {
+        let address = entity.address(view.sub_queue());
+        collect_sequences(
+            &mut PerBatch { explorer: self },
+            &address,
+            view,
+            sequences,
+            budget,
+            cancel,
+        )
+        .await
+    }
+
+    /// The cached connection, opened on demand. Hold the guard for the whole operation.
+    async fn connection(&self) -> Result<Guard<'_>> {
         let mut guard = self.amqp.lock().await;
         if guard.is_none() {
             *guard = Some(ServiceBusConnection::open(&self.ns).await?);
         }
-        let conn = guard.as_mut().expect("opened above");
-        let result = scan_messages(conn, address, view, opts).await;
+        Ok(guard)
+    }
+
+    /// Pass `result` through, dropping the cached connection after a connection-level failure
+    /// (see [`retry_after`]) so the next attempt starts clean.
+    async fn settle<T>(guard: &mut Guard<'_>, result: Result<T>) -> Result<T> {
         if result.as_ref().is_err_and(|e| retry_after(e, 0))
             && let Some(conn) = guard.take()
         {
@@ -154,6 +214,47 @@ impl Explorer {
         if let Some(conn) = self.amqp.lock().await.take() {
             let _ = conn.close().await;
         }
+    }
+}
+
+/// The explorer's cached connection as a [`PeekSource`] that holds the connection lock for one
+/// batch only, so other operations interleave between the batches of a long scan. A
+/// connection-level failure drops the cached connection, as `settle` does.
+struct PerBatch<'a> {
+    explorer: &'a Explorer,
+}
+
+#[async_trait]
+impl PeekSource for PerBatch<'_> {
+    async fn peek_batch(
+        &mut self,
+        address: &str,
+        from: i64,
+        max: u32,
+    ) -> Result<Vec<PeekedMessage>> {
+        let mut guard = self.explorer.connection().await?;
+        let result = guard
+            .as_mut()
+            .expect("opened")
+            .peek_batch(address, from, max)
+            .await;
+        Explorer::settle(&mut guard, result).await
+    }
+
+    async fn peek_session_batch(
+        &mut self,
+        address: &str,
+        session_id: &str,
+        from: i64,
+        max: u32,
+    ) -> Result<Vec<PeekedMessage>> {
+        let mut guard = self.explorer.connection().await?;
+        let result = guard
+            .as_mut()
+            .expect("opened")
+            .peek_session_batch(address, session_id, from, max)
+            .await;
+        Explorer::settle(&mut guard, result).await
     }
 }
 
@@ -247,6 +348,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_send<T: Send>(_: &T) {}
+
+    /// Compile-time check: the browse futures can run on a multi-threaded runtime (Tauri
+    /// commands require it). Never called; nothing touches the network.
+    #[allow(dead_code)]
+    fn browse_futures_are_send(e: &Explorer, p: &EntityPath, o: &PeekOptions) {
+        assert_send(&e.peek_tail(p, PeekView::Active, o));
+        assert_send(&e.peek_message(p, PeekView::Active, 1));
+        assert_send(&e.collect_sequences(p, PeekView::Active, &[1], 10, None));
+        assert_send(&e.peek(p, PeekView::Active, o));
+    }
 
     #[test]
     fn retry_set_is_auth_and_connection_level_only() {
