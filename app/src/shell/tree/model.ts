@@ -25,6 +25,15 @@ export function entityIdOf(kind: EntityKind, name: string, topic?: string): stri
   return kind === "subscription" ? `${topic}/subscriptions/${name}` : name;
 }
 
+/** The tree row that shows an entity, and the rows above it that must be open for it to be visible. */
+export function treeRowOf(tab: { id: string; kind: EntityKind }, limited: boolean): { rowId: string; ancestors: string[] } {
+  if (limited) return { rowId: `k:${tab.id}`, ancestors: [] };
+  if (tab.kind === "queue") return { rowId: `q:${tab.id}`, ancestors: ["group:queues"] };
+  if (tab.kind === "topic") return { rowId: `t:${tab.id}`, ancestors: ["group:topics"] };
+  const [topic, , name] = tab.id.split("/");
+  return { rowId: `s:${topic}/${name}`, ancestors: ["group:topics", `t:${topic}`] };
+}
+
 const knownId = (k: EntityRef) => (k.subscription ? entityIdOf("subscription", k.subscription, k.entity) : k.entity);
 
 /** The visible rows of the namespace tree, flattened in display order. */

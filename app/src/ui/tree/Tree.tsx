@@ -53,6 +53,9 @@ export function Tree<N extends TreeNode>(props: TreeProps<N>) {
   useEffect(() => virtualizer.measure(), [rowHeight, virtualizer]);
 
   const index = nodes.findIndex((n) => n.id === selectedId);
+  const items = virtualizer.getVirtualItems();
+  // Nothing selected, filtered out or scrolled away: the mark falls back to the tree itself.
+  const selectedShown = index >= 0 && items.some((v) => v.index === index);
 
   const select = useCallback(
     (i: number) => {
@@ -65,6 +68,8 @@ export function Tree<N extends TreeNode>(props: TreeProps<N>) {
   );
 
   function onKeyDown(e: KeyboardEvent<HTMLDivElement>) {
+    // A control inside a row (a Retry button) keeps its own keys, and focus is not the tree's while it holds it.
+    if (e.target !== e.currentTarget) return;
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     setFocused(true); // keys pressed in the tree make its focus keyboard focus, even after a pointer focus
     const cur = nodes[index];
@@ -148,10 +153,14 @@ export function Tree<N extends TreeNode>(props: TreeProps<N>) {
         setFocused(visible);
       }}
       onBlur={(e) => e.target === e.currentTarget && setFocused(false)}
-      className={cn("relative h-full overflow-y-auto outline-none", className)}
+      className={cn(
+        "relative h-full overflow-y-auto outline-none",
+        focused && !selectedShown && "outline outline-1 -outline-offset-1 outline-fg",
+        className,
+      )}
     >
       <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
-        {virtualizer.getVirtualItems().map((v) => {
+        {items.map((v) => {
           const n = nodes[v.index];
           const selected = n.id === selectedId;
           return (

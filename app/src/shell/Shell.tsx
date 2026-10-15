@@ -1,6 +1,8 @@
 import type { ReactNode } from "react";
 import { Panel, PanelGroup, ResizeHandle } from "@/ui";
 import { useShell } from "./context";
+import { Hotkeys } from "./Hotkeys";
+import { CommandPalette } from "./palette/CommandPalette";
 import { SheetHost } from "./sheets/SheetHost";
 import { StatusBar } from "./StatusBar";
 import { TopBar } from "./TopBar";
@@ -47,6 +49,8 @@ export function Shell({ tree, workspace, drawer }: { tree?: ReactNode; workspace
       </div>
       <StatusBar />
       <SheetHost />
+      <Hotkeys />
+      <CommandPalette />
     </div>
   );
 }

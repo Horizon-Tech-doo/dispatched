@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import * as fx from "@/engine/mock/fixtures";
 import type { EntityListing } from "@/engine";
-import { buildNodes, type SubsState } from "./model";
+import { buildNodes, treeRowOf, type SubsState } from "./model";
 
 const listing: EntityListing = { queues: fx.queues, topics: fx.topics, limited: null, known: [] };
 const loaded = (topic: string): SubsState => ({ data: fx.subscriptions[topic], error: null, pending: false });
@@ -103,5 +103,17 @@ describe("buildNodes", () => {
     expect(n.find((x) => x.id === "group:topics")?.count).toBe(4);
     const f = buildNodes({ host: "h", listing, subs: {}, expanded: new Set(), filter: "label" });
     expect(f.find((x) => x.id === "group:queues")?.count).toBe(1);
+  });
+});
+
+describe("treeRowOf", () => {
+  it("names the row of an entity and the rows that must be open above it", () => {
+    expect(treeRowOf({ id: "invoice-generate", kind: "queue" }, false)).toEqual({ rowId: "q:invoice-generate", ancestors: ["group:queues"] });
+    expect(treeRowOf({ id: "shipment-events", kind: "topic" }, false)).toEqual({ rowId: "t:shipment-events", ancestors: ["group:topics"] });
+    expect(treeRowOf({ id: "shipment-events/subscriptions/tracking-sync", kind: "subscription" }, false)).toEqual({
+      rowId: "s:shipment-events/tracking-sync",
+      ancestors: ["group:topics", "t:shipment-events"],
+    });
+    expect(treeRowOf({ id: "orders", kind: "queue" }, true)).toEqual({ rowId: "k:orders", ancestors: [] });
   });
 });

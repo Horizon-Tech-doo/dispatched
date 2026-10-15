@@ -95,6 +95,13 @@ describe("entity tabs", () => {
     expect(screen.getByRole("tab", { name: /customs-docs/ })).toHaveAttribute("aria-selected", "true");
   });
 
+  it("moves focus to the tree after the last tab is closed with the close button", async () => {
+    renderShell("default", { last_profile: "p-logistics", "shell:p-logistics": { tabs: [{ id: "label-print", kind: "queue", subTab: "overview" }], activeTab: "label-print" } });
+    await userEvent.click(await screen.findByRole("button", { name: "Close label-print" }));
+    expect(await screen.findByRole("heading", { name: "Open an entity" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("tree", { name: "Namespace" })).toHaveFocus());
+  });
+
   it("subscription_of_missing_topic_shows_gone_state", async () => {
     renderShell("default", { last_profile: "p-logistics", "shell:p-logistics": { tabs: [{ id: "deleted-topic/subscriptions/x", kind: "subscription", subTab: "overview" }], activeTab: "deleted-topic/subscriptions/x" } });
     expect(await screen.findByRole("heading", { name: "This entity wasn't found" })).toBeInTheDocument();

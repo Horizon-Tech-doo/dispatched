@@ -145,4 +145,67 @@ describe("Tree", () => {
     await userEvent.keyboard("{ArrowUp}");
     expect(selected()).toHaveAccessibleName("shipment-events");
   });
+
+  describe("focus mark", () => {
+    const outlined = (el: HTMLElement) => el.className.includes("outline-fg");
+
+    it("outlines the tree itself when it has keyboard focus but nothing is selected", () => {
+      render(<Tree label="Namespace" nodes={NODES} selectedId={null} onSelect={() => {}} onActivate={() => {}} onToggle={() => {}} renderRow={(n) => <span>{n.label}</span>} rowHeight={22} initialRect={RECT} />);
+      const tree = screen.getByRole("tree");
+      expect(outlined(tree)).toBe(false);
+      act(() => tree.focus());
+      expect(outlined(tree)).toBe(true);
+      expect(screen.getAllByRole("treeitem").some(outlined)).toBe(false);
+      act(() => tree.blur());
+      expect(outlined(tree)).toBe(false);
+    });
+
+    it("outlines the tree when the selected row is filtered out", () => {
+      render(<Tree label="Namespace" nodes={NODES} selectedId="gone" onSelect={() => {}} onActivate={() => {}} onToggle={() => {}} renderRow={(n) => <span>{n.label}</span>} rowHeight={22} initialRect={RECT} />);
+      const tree = screen.getByRole("tree");
+      act(() => tree.focus());
+      expect(outlined(tree)).toBe(true);
+    });
+
+    it("outlines the tree when the selected row is scrolled out of the rendered window", () => {
+      const many = Array.from({ length: 5000 }, (_, i) => node(`q-${i}`, null, 0));
+      render(<Tree label="Namespace" nodes={many} selectedId="q-4000" onSelect={() => {}} onActivate={() => {}} onToggle={() => {}} renderRow={(n) => <span>{n.label}</span>} rowHeight={22} initialRect={RECT} />);
+      const tree = screen.getByRole("tree");
+      act(() => tree.focus());
+      expect(outlined(tree)).toBe(true);
+    });
+
+    it("does not outline the tree while a row is selected and shown", () => {
+      render(<Harness />);
+      const tree = screen.getByRole("tree");
+      act(() => tree.focus());
+      expect(outlined(tree)).toBe(false);
+      expect(outlined(selected()!)).toBe(true);
+    });
+
+    it("leaves the mark off, and the key to the control, when Enter is pressed on a control inside a row", async () => {
+      const onActivate = vi.fn();
+      const onRetry = vi.fn();
+      render(
+        <Tree
+          label="Namespace"
+          nodes={NODES}
+          selectedId="queues"
+          onSelect={() => {}}
+          onActivate={onActivate}
+          onToggle={() => {}}
+          renderRow={(n) => (n.id === "label-print" ? <button onClick={onRetry}>Retry</button> : <span>{n.label}</span>)}
+          rowHeight={22}
+          initialRect={RECT}
+        />,
+      );
+      const button = screen.getByRole("button", { name: "Retry" });
+      act(() => button.focus());
+      await userEvent.keyboard("{Enter}");
+      expect(onRetry).toHaveBeenCalledTimes(1);
+      expect(onActivate).not.toHaveBeenCalled();
+      expect(screen.getAllByRole("treeitem").some(outlined)).toBe(false);
+      expect(outlined(screen.getByRole("tree"))).toBe(false);
+    });
+  });
 });

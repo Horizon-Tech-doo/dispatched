@@ -1,23 +1,12 @@
 import { X } from "lucide-react";
-import { useEffect, useRef } from "react";
 import { IconButton, Tabs, TabsList, TabsTrigger } from "@/ui";
 import { useShell } from "../context";
 import { splitSubscription } from "./subtabs";
 
 export function EntityTabs() {
   const { shell, dispatch } = useShell();
-  const root = useRef<HTMLDivElement>(null);
-  const refocus = useRef(false);
-
-  // After a close button removes its tab, the focused element is gone: move focus to the tab that became active.
-  useEffect(() => {
-    if (!refocus.current) return;
-    refocus.current = false;
-    root.current?.querySelector<HTMLElement>('[role="tab"][data-state="active"]')?.focus();
-  }, [shell.tabs]);
-
   return (
-    <Tabs ref={root} value={shell.activeTab ?? ""} onValueChange={(id) => dispatch({ type: "activate", id })}>
+    <Tabs value={shell.activeTab ?? ""} onValueChange={(id) => dispatch({ type: "activate", id })}>
       <TabsList variant="strip" aria-label="Open entities" className="border-b border-line">
         {shell.tabs.map((t) => {
           const sub = t.kind === "subscription" ? splitSubscription(t.id) : null;
@@ -35,10 +24,7 @@ export function EntityTabs() {
               </TabsTrigger>
               <IconButton
                 label={sub ? `Close ${name} on ${sub.topic}` : `Close ${name}`}
-                onClick={() => {
-                  refocus.current = true;
-                  dispatch({ type: "close", id: t.id });
-                }}
+                onClick={() => dispatch({ type: "close", id: t.id })}
                 className="my-auto mr-1.5 size-4 opacity-0 group-hover/tab:opacity-100 focus-visible:opacity-100 group-has-[[data-state=active]]/tab:opacity-100"
               >
                 <X />

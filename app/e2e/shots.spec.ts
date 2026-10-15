@@ -146,6 +146,19 @@ export const shots: {
     )}`,
     ready: (p) => p.getByRole("heading", { name: "This entity wasn't found" }),
   },
+  ...(["palette", "palette-empty"] as const).map((name) => ({
+    name,
+    path: "/?scenario=default&autoconnect=p-logistics",
+    ready: (p: Page) => p.getByRole("tree", { name: "Namespace" }).getByRole("treeitem", { name: "invoice-generate" }),
+    prepare: async (page: Page) => {
+      await page.keyboard.press("Shift"); // keyboard modality so :focus-visible matches
+      await page.keyboard.press("ControlOrMeta+k");
+      await page.getByPlaceholder("Go to an entity or run a command").fill(name === "palette" ? "ship" : "zzzz");
+      await page.getByRole("dialog", { name: "Command palette" }).getByText(name === "palette" ? "Go to" : "No matching entity or command.").first().waitFor();
+    },
+    holds: (p: Page) => p.getByRole("dialog", { name: "Command palette" }),
+    viewportOnly: true,
+  })),
   {
     name: "workspace-empty",
     path: "/?scenario=default&autoconnect=p-logistics",
