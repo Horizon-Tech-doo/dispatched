@@ -54,7 +54,8 @@ test("first connection from an empty start", async ({ page }) => {
 
 test("limited listing explains itself and shows pinned entities", async ({ page }) => {
   await go(page, "scenario=forbidden&autoconnect=p-logistics");
-  await expect(page.getByText(/This identity can't list entities in .*, so only pinned entities are shown/)).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Showing pinned entities only" })).toBeVisible();
+  await expect(page.getByText(/This identity can't list entities in .*\. Grant it Manage rights/)).toBeVisible();
   await expect(tree(page).getByRole("treeitem", { name: "orders" })).toBeVisible();
 });
 
