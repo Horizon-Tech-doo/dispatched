@@ -14,7 +14,7 @@
       <EnableBatchedOperations>true</EnableBatchedOperations>
       <SizeInBytes>81920</SizeInBytes>
       <MessageCount>41</MessageCount>
-      <AuthorizationRules><AuthorizationRule><KeyName>secret-ish</KeyName></AuthorizationRule></AuthorizationRules>
+      <AuthorizationRules><AuthorizationRule><KeyName>secret-ish</KeyName><PrimaryKey>primary-secret-value</PrimaryKey><SecondaryKey>secondary-secret-value</SecondaryKey></AuthorizationRule></AuthorizationRules>
       <Status>Active</Status>
       <ForwardTo/>
       <UserMetadata/>

@@ -101,10 +101,15 @@ impl Explorer {
     pub async fn entity_details(&self, kind: EntityKind, path: &str) -> Result<EntityDetails> {
         let mut d = self.mgmt.entity_details(kind, path).await?;
         if d.counts.is_none() && kind != EntityKind::Topic {
-            let entity = EntityPath::parse(path)?;
-            match self.count_by_peek(&entity, Self::COUNT_CAP).await {
-                Ok(c) => d.counts = Some(c),
-                Err(e) => tracing::debug!(entity = %path, error = %e, "approximate count failed"),
+            // Counting is best effort: it never fails the details call.
+            match peek_target(kind, path) {
+                Ok(entity) => match self.count_by_peek(&entity, Self::COUNT_CAP).await {
+                    Ok(c) => d.counts = Some(c),
+                    Err(e) => {
+                        tracing::debug!(entity = %path, error = %e, "approximate count failed")
+                    }
+                },
+                Err(e) => tracing::debug!(entity = %path, error = %e, "no peek target"),
             }
         }
         Ok(d)
@@ -375,9 +380,39 @@ where
     }
 }
 
+/// The entity to count by peeking for `kind` at `path`. The known kind decides, so a queue named
+/// like a subscription path stays a queue. Topics have nothing to peek.
+fn peek_target(kind: EntityKind, path: &str) -> Result<EntityPath> {
+    match kind {
+        EntityKind::Queue => Ok(EntityPath::queue(path)),
+        EntityKind::Subscription => {
+            let e = EntityPath::parse(path)?;
+            if e.subscription.is_some() {
+                Ok(e)
+            } else {
+                Err(Error::Invalid(format!("`{path}` is not a subscription")))
+            }
+        }
+        EntityKind::Topic => Err(Error::Invalid("a topic has no messages to count".into())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn peek_target_follows_the_known_kind() {
+        let q = peek_target(EntityKind::Queue, "orders").unwrap();
+        assert_eq!(q, EntityPath::queue("orders"));
+        // A queue is a queue even when its name looks like a subscription path.
+        let odd = peek_target(EntityKind::Queue, "x/subscriptions/y").unwrap();
+        assert_eq!(odd, EntityPath::queue("x/subscriptions/y"));
+        let s = peek_target(EntityKind::Subscription, "events/Subscriptions/audit").unwrap();
+        assert_eq!(s, EntityPath::subscription("events", "audit"));
+        assert!(peek_target(EntityKind::Subscription, "events").is_err());
+        assert!(peek_target(EntityKind::Topic, "events").is_err());
+    }
 
     fn assert_send<T: Send>(_: &T) {}
 

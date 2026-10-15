@@ -578,7 +578,17 @@ mod tests {
         );
         assert!(!names.contains(&"CountDetails") && !names.contains(&"AuthorizationRules"));
         assert!(!names.contains(&"ForwardTo"), "empty leaves are left out");
-        assert!(!serde_json::to_string(&d).unwrap().contains("secret-ish"));
+        let json = serde_json::to_string(&d).unwrap();
+        for leaked in [
+            "secret-ish",
+            "primary-secret-value",
+            "secondary-secret-value",
+            "PrimaryKey",
+            "SecondaryKey",
+            "AuthorizationRule",
+        ] {
+            assert!(!json.contains(leaked), "{leaked} leaked into {json}");
+        }
     }
 
     #[tokio::test]
@@ -698,5 +708,43 @@ mod tests {
         );
         let json = serde_json::to_value(&rules[2]).unwrap();
         assert_eq!(json["filter"]["kind"], "correlation");
+    }
+
+    #[tokio::test]
+    async fn filters_we_cannot_read_are_unknown_not_invented() {
+        let mut server = mockito::Server::new_async().await;
+        let rule = |name: &str, filter: &str| {
+            format!(
+                r#"<entry><title>{name}</title><content><RuleDescription>{filter}<Name>{name}</Name></RuleDescription></content></entry>"#
+            )
+        };
+        let body = format!(
+            "<feed>{}{}{}{}</feed>",
+            rule("no-filter", ""),
+            rule(
+                "future",
+                r#"<Filter i:type="FancyFilter"><Mode>x</Mode></Filter>"#
+            ),
+            rule("empty-filter", "<Filter/>"),
+            rule(
+                "props-only",
+                "<Filter><Properties><KeyValueOfstringanyType><Key>k</Key><Value>v</Value></KeyValueOfstringanyType></Properties></Filter>"
+            ),
+        );
+        let _m = server
+            .mock("GET", "/events/Subscriptions/all/Rules")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(body)
+            .create_async()
+            .await;
+        let rules = client(&server).list_rules("events", "all").await.unwrap();
+        assert_eq!(rules.len(), 4);
+        for r in &rules[..3] {
+            assert_eq!(r.filter, RuleFilter::Unknown, "{}", r.name);
+        }
+        assert!(matches!(rules[3].filter, RuleFilter::Correlation { .. }));
+        let json = serde_json::to_value(&rules[0]).unwrap();
+        assert_eq!(json["filter"]["kind"], "unknown");
     }
 }

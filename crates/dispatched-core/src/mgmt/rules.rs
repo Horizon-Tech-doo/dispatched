@@ -42,6 +42,9 @@ pub enum RuleFilter {
         /// Expected user properties.
         properties: Vec<CorrelationProperty>,
     },
+    /// A filter this reader does not understand (missing, empty or of a type it does not know).
+    /// Shown as such rather than guessed at; the XML reader does not keep the `i:type` name.
+    Unknown,
 }
 
 /// A rule of a subscription.
@@ -61,45 +64,63 @@ fn text(n: &Node, name: &str) -> Option<String> {
     n.text_of(name).map(str::to_string)
 }
 
+fn correlation(f: &Node) -> RuleFilter {
+    let properties: Vec<CorrelationProperty> = f
+        .child("Properties")
+        .map(|p| {
+            p.children_named("KeyValueOfstringanyType")
+                .filter_map(|kv| {
+                    Some(CorrelationProperty {
+                        name: kv.text_of("Key")?.to_string(),
+                        value: kv
+                            .child("Value")
+                            .map(|v| v.text.clone())
+                            .unwrap_or_default(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let rule = RuleFilter::Correlation {
+        correlation_id: text(f, "CorrelationId"),
+        message_id: text(f, "MessageId"),
+        to: text(f, "To"),
+        reply_to: text(f, "ReplyTo"),
+        subject: text(f, "Label"),
+        session_id: text(f, "SessionId"),
+        reply_to_session_id: text(f, "ReplyToSessionId"),
+        content_type: text(f, "ContentType"),
+        properties,
+    };
+    match &rule {
+        RuleFilter::Correlation {
+            correlation_id: None,
+            message_id: None,
+            to: None,
+            reply_to: None,
+            subject: None,
+            session_id: None,
+            reply_to_session_id: None,
+            content_type: None,
+            properties,
+        } if properties.is_empty() => RuleFilter::Unknown,
+        _ => rule,
+    }
+}
+
 pub(crate) fn rule_from_entry(entry: &Node) -> Option<RuleInfo> {
     let name = entry.text_of("title")?.to_string();
     let d = entry.path(&["content", "RuleDescription"])?;
     // The element's i:type attribute is not kept by the XML reader; SQL-shaped filters
-    // (SqlFilter, TrueFilter, FalseFilter) carry SqlExpression, correlation filters do not.
+    // (SqlFilter, TrueFilter, FalseFilter) carry SqlExpression, correlation filters carry
+    // correlation fields. Anything else is unknown, never guessed.
     let filter = match d.child("Filter") {
+        None => RuleFilter::Unknown,
         Some(f) => match f.text_of("SqlExpression") {
             Some(expression) => RuleFilter::Sql {
                 expression: expression.to_string(),
             },
-            None => RuleFilter::Correlation {
-                correlation_id: text(f, "CorrelationId"),
-                message_id: text(f, "MessageId"),
-                to: text(f, "To"),
-                reply_to: text(f, "ReplyTo"),
-                subject: text(f, "Label"),
-                session_id: text(f, "SessionId"),
-                reply_to_session_id: text(f, "ReplyToSessionId"),
-                content_type: text(f, "ContentType"),
-                properties: f
-                    .child("Properties")
-                    .map(|p| {
-                        p.children_named("KeyValueOfstringanyType")
-                            .filter_map(|kv| {
-                                Some(CorrelationProperty {
-                                    name: kv.text_of("Key")?.to_string(),
-                                    value: kv
-                                        .child("Value")
-                                        .map(|v| v.text.clone())
-                                        .unwrap_or_default(),
-                                })
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            },
-        },
-        None => RuleFilter::Sql {
-            expression: "1=1".into(),
+            None => correlation(f),
         },
     };
     Some(RuleInfo {
