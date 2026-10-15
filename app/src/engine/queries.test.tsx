@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { setTransport } from "./ipc";
 import { createMockTransport } from "./mock/transport";
 import * as commands from "./commands";
-import { createQueryClient, useDeleteProfile, useProfiles, useSaveProfile } from "./queries";
+import { createQueryClient, useDeleteProfile, useEntities, useProfiles, useSaveProfile } from "./queries";
 
 function wrapper() {
   const client = createQueryClient();
@@ -40,5 +40,18 @@ describe("queries", () => {
     expect(client.getQueryData(["entities", "p-logistics"])).toBeUndefined();
     expect(client.getQueryData(["subscriptions", "p-logistics", "orders"])).toBeUndefined();
     expect(client.getQueryData(["entities", "p-partner"])).toBeDefined();
+  });
+
+  it("keeps the previous listing only while the same profile reloads, never another profile's", async () => {
+    const mock = createMockTransport("default");
+    setTransport(mock);
+    await commands.connect("p-logistics");
+    const { result, rerender } = renderHook(({ id }) => useEntities(id), { wrapper: wrapper(), initialProps: { id: "p-logistics" as string | null } });
+    await waitFor(() => expect(result.current.data?.queues.length).toBe(4));
+    await commands.connect("p-partner");
+    rerender({ id: "p-partner" });
+    expect(result.current.data).toBeUndefined();
+    expect(result.current.isPlaceholderData).toBe(false);
+    await waitFor(() => expect(result.current.data?.queues.length).toBe(4));
   });
 });

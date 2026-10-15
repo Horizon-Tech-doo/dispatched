@@ -1,6 +1,7 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
+import { setTransport } from "@/engine";
 import { renderShell } from "../test-utils";
 import { subTabsFor } from "./subtabs";
 
@@ -31,6 +32,29 @@ describe("entity tabs", () => {
     await focus(dl); // Radix activates a focused tab; the panels swallow the pointer-down a click starts with
     expect(await screen.findByRole("heading", { name: "Dead-letter isn't available yet" })).toBeInTheDocument();
     expect(screen.getByText(/Messages that could not be delivered or processed/)).not.toHaveTextContent("next update");
+  });
+
+  it("holds the place of sub-tab counts while they load", async () => {
+    const sub = "shipment-events/subscriptions/tracking-sync";
+    const { mock } = renderShell("default", { last_profile: "p-logistics", "shell:p-logistics": { tabs: [{ id: sub, kind: "subscription", subTab: "overview" }], activeTab: sub } });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    setTransport({
+      listen: mock.listen,
+      invoke: async <T,>(cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === "list_subscriptions") await gate;
+        return mock.invoke<T>(cmd, args);
+      },
+    });
+    const views = await screen.findByRole("tablist", { name: "Entity views" });
+    const messages = within(views).getByRole("tab", { name: /Messages/ });
+    await waitFor(() => expect(messages.querySelector("[data-count-placeholder]")).not.toBeNull());
+    expect(messages.querySelector("[data-count-placeholder]")).toHaveClass("min-w-[3ch]");
+    // Tabs without a count reserve nothing.
+    expect(within(views).getByRole("tab", { name: "Overview" }).querySelector("[data-count-placeholder]")).toBeNull();
+    await act(async () => release());
+    await waitFor(() => expect(within(messages).getByText("2,906")).toHaveClass("min-w-[3ch]"));
+    expect(messages.querySelector("[data-count-placeholder]")).toBeNull();
   });
 
   it("shows the kind word beside a queue or topic name, with no glyph, and the topic beside a subscription", async () => {
