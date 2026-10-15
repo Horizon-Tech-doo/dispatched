@@ -1,0 +1,52 @@
+import { Button, CountBadge, EmptyState, SkeletonRows, Tabs, TabsContent, TabsList, TabsTrigger } from "@/ui";
+import { useShell } from "../context";
+import type { OpenTab, SubTabId } from "../state";
+import { splitSubscription, subTabsFor, useEntityInfo } from "./subtabs";
+
+const KIND_LINE = { queue: "Queue", topic: "Topic", subscription: "Subscription" } as const;
+
+export function EntityView({ tab }: { tab: OpenTab }) {
+  const { dispatch } = useShell();
+  const info = useEntityInfo(tab);
+  const name = tab.kind === "subscription" ? splitSubscription(tab.id).name : tab.id;
+
+  if (info.status === "loading") return <SkeletonRows rows={6} />;
+  if (info.status === "gone")
+    return (
+      <EmptyState
+        tone="error"
+        title="This entity no longer exists"
+        body={`${name} may have been deleted or renamed. Refresh the tree to see what is there now.`}
+        action={<Button onClick={() => dispatch({ type: "close", id: tab.id })}>Close tab</Button>}
+      />
+    );
+
+  const defs = subTabsFor(tab.kind);
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 px-3.5 pt-2.5">
+        <h1 className="m-0 text-14 font-semibold">{name}</h1>
+        <span className="text-muted">{tab.kind === "subscription" ? `Subscription on ${info.parent}` : KIND_LINE[tab.kind]}</span>
+        {info.facts.length > 0 && <span className="text-faint">{info.facts.join(", ")}</span>}
+      </div>
+      <Tabs value={tab.subTab} onValueChange={(v) => dispatch({ type: "subTab", id: tab.id, subTab: v as SubTabId })} className="flex min-h-0 flex-1 flex-col">
+        <TabsList variant="underline" aria-label="Entity views" className="mt-1.5 border-b border-line">
+          {defs.map((d) => {
+            const c = d.count && info.counts ? d.count(info.counts) : null;
+            return (
+              <TabsTrigger key={d.id} value={d.id}>
+                <span>{d.label}</span>
+                {c && <CountBadge value={c.value} quality={info.counts ?? undefined} attention={c.attention} />}
+              </TabsTrigger>
+            );
+          })}
+        </TabsList>
+        {defs.map((d) => (
+          <TabsContent key={d.id} value={d.id} className="overflow-y-auto">
+            <EmptyState title={`${d.label} isn't available yet`} body={`${d.description} This view arrives in the next update.`} />
+          </TabsContent>
+        ))}
+      </Tabs>
+    </div>
+  );
+}

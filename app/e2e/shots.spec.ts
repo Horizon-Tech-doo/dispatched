@@ -114,6 +114,30 @@ export const shots: {
     path: "/?scenario=many&autoconnect=p-logistics",
     ready: (p) => p.getByRole("tree", { name: "Namespace" }).getByRole("treeitem", { name: "queue-0000" }),
   },
+  {
+    name: "entity",
+    path: "/?scenario=default&autoconnect=p-logistics",
+    ready: (p) => p.getByRole("tree", { name: "Namespace" }).getByRole("treeitem", { name: "invoice-generate" }),
+    prepare: async (page) => {
+      const tree = page.getByRole("tree", { name: "Namespace" });
+      await page.keyboard.press("Shift"); // keyboard modality so :focus-visible matches
+      await tree.getByRole("treeitem", { name: "invoice-generate" }).click();
+      await page.keyboard.press("Enter");
+      await tree.getByRole("treeitem", { name: "shipment-events", exact: true }).click();
+      await page.keyboard.press("ArrowRight");
+      await tree.getByRole("treeitem", { name: "tracking-sync" }).click();
+      await page.keyboard.press("Enter");
+      await page.getByRole("tablist", { name: "Open entities" }).getByRole("tab", { name: /tracking-sync/ }).waitFor();
+      await page.getByRole("tablist", { name: "Entity views" }).getByRole("tab", { name: /Dead-letter/ }).click();
+      await page.getByRole("heading", { name: "Dead-letter isn't available yet" }).waitFor();
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+    },
+  },
+  {
+    name: "workspace-empty",
+    path: "/?scenario=default&autoconnect=p-logistics",
+    ready: (p) => p.getByRole("heading", { name: "Open an entity" }),
+  },
 ];
 
 for (const colorScheme of ["dark", "light"] as const) {
