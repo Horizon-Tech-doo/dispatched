@@ -72,13 +72,13 @@ export function Tree<N extends TreeNode>(props: TreeProps<N>) {
     switch (e.key) {
       case "ArrowDown":
       case "j":
-        if (typing) break;
+        if (typing && e.key.length === 1) break;
         e.preventDefault();
         select(index < 0 ? 0 : index + 1);
         return;
       case "ArrowUp":
       case "k":
-        if (typing) break;
+        if (typing && e.key.length === 1) break;
         e.preventDefault();
         select(index < 0 ? 0 : index - 1);
         return;

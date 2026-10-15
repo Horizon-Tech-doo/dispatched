@@ -115,4 +115,13 @@ describe("Tree", () => {
     expect(onActivate).not.toHaveBeenCalled();
     expect(selected()).toHaveAccessibleName("queues");
   });
+
+  it("arrow keys still navigate right after typing", async () => {
+    render(<Harness />);
+    screen.getByRole("tree").focus();
+    await userEvent.keyboard("tr");
+    expect(selected()).toHaveAccessibleName("tracking-sync");
+    await userEvent.keyboard("{ArrowUp}");
+    expect(selected()).toHaveAccessibleName("shipment-events");
+  });
 });
