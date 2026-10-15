@@ -225,16 +225,19 @@ impl ProfileStore {
     }
 
     /// Create or edit a profile from a UI draft (see [`ProfileDraft`]).
+    /// `sign_in` is the sign-in an Entra profile binds to: required to create one; when editing, `Some`
+    /// rebinds the profile to it and `None` keeps the sign-in it has. The caller decides which sign-in
+    /// that is (the app never hands over another account's).
     pub fn save_draft(
         &self,
         draft: &ProfileDraft,
         secrets: &dyn CredentialStore,
-        current_sign_in: Option<&SignIn>,
+        sign_in: Option<&SignIn>,
     ) -> Result<Profile> {
         let pins = clean_pins(&draft.pinned_entities)?;
         match &draft.id {
-            None => self.create_from_draft(draft, pins, secrets, current_sign_in),
-            Some(id) => self.edit_from_draft(id, draft, pins, secrets),
+            None => self.create_from_draft(draft, pins, secrets, sign_in),
+            Some(id) => self.edit_from_draft(id, draft, pins, secrets, sign_in),
         }
     }
 
@@ -269,12 +272,8 @@ impl ProfileStore {
                     Error::NotSignedIn("sign in with Entra ID first, then add the profile".into())
                 })?;
                 let host = namespace_host(namespace)?;
-                let mut p = Profile::entra(
-                    &draft.name,
-                    &host,
-                    &sign_in.id,
-                    non_blank(tenant.as_deref()),
-                );
+                let tenant = normalize_tenant(tenant.as_deref(), Some(&sign_in.tenant_id));
+                let mut p = Profile::entra(&draft.name, &host, &sign_in.id, tenant.as_deref());
                 apply_draft_options(&mut p, draft, pins);
                 self.save_sign_in(sign_in)?;
                 self.insert(&p)?;
@@ -289,6 +288,7 @@ impl ProfileStore {
         draft: &ProfileDraft,
         pins: Vec<String>,
         secrets: &dyn CredentialStore,
+        sign_in: Option<&SignIn>,
     ) -> Result<Profile> {
         let mut p = self
             .get_by_id(id)?
@@ -320,9 +320,21 @@ impl ProfileStore {
             }
             (DraftAuth::Entra { namespace, tenant }, ProfileAuth::Entra { sign_in_id, .. }) => {
                 p.host = namespace_host(namespace)?;
+                let bound = match sign_in {
+                    Some(s) => {
+                        self.save_sign_in(s)?;
+                        Some(s.clone())
+                    }
+                    None => self.sign_in(sign_in_id)?,
+                };
                 p.auth = ProfileAuth::Entra {
-                    sign_in_id: sign_in_id.clone(),
-                    tenant: non_blank(tenant.as_deref()).map(str::to_string),
+                    sign_in_id: bound
+                        .as_ref()
+                        .map_or_else(|| sign_in_id.clone(), |s| s.id.clone()),
+                    tenant: normalize_tenant(
+                        tenant.as_deref(),
+                        bound.as_ref().map(|s| s.tenant_id.as_str()),
+                    ),
                 };
             }
             _ => {
@@ -474,7 +486,8 @@ impl ProfileStore {
 
     /// Every remembered sign-in whose own tenant is `tenant_id` (ids compare without regard to case),
     /// ordered by sign-in id. A guest-tenant sign-in is its own record, separate from the home one.
-    /// The caller picks the one whose refresh token still exists.
+    /// The caller picks the one whose refresh token still exists. A record that can't be read is
+    /// skipped, so one damaged row does not break every lookup.
     pub fn sign_ins_for_tenant(&self, tenant_id: &str) -> Result<Vec<SignIn>> {
         let conn = self.conn.lock().expect("profile db poisoned");
         let mut stmt = conn
@@ -485,19 +498,11 @@ impl ProfileStore {
             .map_err(|e| self.err(e))?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| self.err(e))?;
-        let mut found = Vec::new();
-        for record in records {
-            let s: SignIn = serde_json::from_str(&record).map_err(|e| self.err(e))?;
-            if s.tenant_id.eq_ignore_ascii_case(tenant_id) {
-                found.push(s);
-            }
-        }
-        Ok(found)
-    }
-
-    /// The first remembered sign-in for `tenant_id`, if any (see [`Self::sign_ins_for_tenant`]).
-    pub fn sign_in_for_tenant(&self, tenant_id: &str) -> Result<Option<SignIn>> {
-        Ok(self.sign_ins_for_tenant(tenant_id)?.into_iter().next())
+        Ok(records
+            .iter()
+            .filter_map(|r| serde_json::from_str::<SignIn>(r).ok())
+            .filter(|s| s.tenant_id.eq_ignore_ascii_case(tenant_id))
+            .collect())
     }
 
     /// Forget a sign-in record.
@@ -580,6 +585,20 @@ impl std::fmt::Display for CorruptProfile {
 }
 
 impl std::error::Error for CorruptProfile {}
+
+/// The tenant a profile stores: trimmed, a GUID in lowercase, and `None` when blank or when it is the
+/// bound sign-in's own (home) tenant, compared without regard to case.
+pub fn normalize_tenant(tenant: Option<&str>, home_tenant: Option<&str>) -> Option<String> {
+    let t = non_blank(tenant)?;
+    if home_tenant.is_some_and(|h| h.eq_ignore_ascii_case(t)) {
+        return None;
+    }
+    Some(if uuid::Uuid::parse_str(t).is_ok() {
+        t.to_ascii_lowercase()
+    } else {
+        t.to_string()
+    })
+}
 
 fn non_blank(s: Option<&str>) -> Option<&str> {
     s.map(str::trim).filter(|s| !s.is_empty())
@@ -956,10 +975,15 @@ mod tests {
         for s in [&home, &guest, &guest2] {
             store.save_sign_in(s).unwrap();
         }
-        assert_eq!(
-            store.sign_in_for_tenant("tenant-home").unwrap().unwrap().id,
-            "home-oid"
-        );
+        let ids_in = |t: &str| -> Vec<String> {
+            store
+                .sign_ins_for_tenant(t)
+                .unwrap()
+                .into_iter()
+                .map(|s| s.id)
+                .collect()
+        };
+        assert_eq!(ids_in("tenant-home"), ["home-oid"]);
         // Case-insensitive, and every match comes back in id order.
         let ids: Vec<_> = store
             .sign_ins_for_tenant("Tenant-Guest")
@@ -968,16 +992,107 @@ mod tests {
             .map(|s| s.id)
             .collect();
         assert_eq!(ids, ["a-guest-oid", "guest-oid"]);
-        assert_eq!(
-            store
-                .sign_in_for_tenant("tenant-guest")
-                .unwrap()
-                .unwrap()
-                .id,
-            "a-guest-oid"
-        );
-        assert!(store.sign_in_for_tenant("nobody").unwrap().is_none());
+        assert!(ids_in("nobody").is_empty());
         assert!(store.sign_ins_for_tenant("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_unreadable_sign_in_row_is_skipped_not_fatal() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        let mut good = sign_in("good-oid");
+        good.tenant_id = "tenant-x".into();
+        store.save_sign_in(&good).unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO sign_ins (id, record) VALUES ('bad', 'not json')",
+                [],
+            )
+            .unwrap();
+        let found = store.sign_ins_for_tenant("tenant-x").unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, "good-oid");
+    }
+
+    #[test]
+    fn tenants_are_stored_lowercase_and_the_home_tenant_as_none() {
+        const GUID: &str = "6F1B2C3D-4E5F-4A6B-8C7D-9E0F1A2B3C4D";
+        assert_eq!(
+            normalize_tenant(Some(&format!(" {GUID} ")), Some("tenant-home")).as_deref(),
+            Some(GUID.to_ascii_lowercase().as_str())
+        );
+        // Domains keep what was typed; the home tenant in any case is no tenant.
+        assert_eq!(
+            normalize_tenant(Some("contoso.onmicrosoft.com"), None).as_deref(),
+            Some("contoso.onmicrosoft.com")
+        );
+        assert_eq!(
+            normalize_tenant(Some(GUID), Some(&GUID.to_ascii_lowercase())),
+            None
+        );
+        assert_eq!(normalize_tenant(Some("  "), None), None);
+        // Saving goes through it, for a new profile and an edit.
+        let store = ProfileStore::open_in_memory().unwrap();
+        let secrets = MemoryStore::new();
+        let mut home = draft_sign_in();
+        home.tenant_id = GUID.to_ascii_lowercase();
+        let mut d = cs_draft("E", None);
+        d.auth = DraftAuth::Entra {
+            namespace: "myns".into(),
+            tenant: Some(GUID.into()),
+        };
+        let p = store.save_draft(&d, &secrets, Some(&home)).unwrap();
+        assert!(
+            matches!(&p.auth, ProfileAuth::Entra { tenant: None, .. }),
+            "{:?}",
+            p.auth
+        );
+        let mut edit = d.clone();
+        edit.id = Some(p.id.clone());
+        edit.auth = DraftAuth::Entra {
+            namespace: "myns".into(),
+            tenant: Some("0A1B2C3D-4E5F-4A6B-8C7D-9E0F1A2B3C4D".into()),
+        };
+        let p = store.save_draft(&edit, &secrets, None).unwrap();
+        assert!(
+            matches!(&p.auth, ProfileAuth::Entra { tenant: Some(t), .. } if t == "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"),
+            "{:?}",
+            p.auth
+        );
+    }
+
+    #[test]
+    fn editing_an_entra_profile_rebinds_only_when_given_a_sign_in() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        let secrets = MemoryStore::new();
+        let mut d = cs_draft("E", None);
+        d.auth = DraftAuth::Entra {
+            namespace: "myns".into(),
+            tenant: Some("tenant-guest".into()),
+        };
+        let first = draft_sign_in();
+        let p = store.save_draft(&d, &secrets, Some(&first)).unwrap();
+        let mut edit = d.clone();
+        edit.id = Some(p.id.clone());
+        let kept = store.save_draft(&edit, &secrets, None).unwrap();
+        assert!(
+            matches!(&kept.auth, ProfileAuth::Entra { sign_in_id, .. } if *sign_in_id == first.id)
+        );
+        let mut guest = draft_sign_in();
+        guest.id = "guest-oid".into();
+        guest.tenant_id = "tenant-guest".into();
+        let rebound = store.save_draft(&edit, &secrets, Some(&guest)).unwrap();
+        // Bound to the tenant's own sign-in, whose home is that tenant: no tenant to ask for.
+        assert_eq!(
+            rebound.auth,
+            ProfileAuth::Entra {
+                sign_in_id: "guest-oid".into(),
+                tenant: None
+            }
+        );
+        assert!(store.sign_in("guest-oid").unwrap().is_some());
     }
 
     #[test]
