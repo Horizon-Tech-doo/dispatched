@@ -1,7 +1,8 @@
-import { observeElementRect, useVirtualizer } from "@tanstack/react-virtual";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { ChevronRight } from "lucide-react";
 import { useCallback, useEffect, useId, useRef, type KeyboardEvent, type ReactNode } from "react";
 import { cn } from "../lib/cn";
+import { observeRectWithFloor } from "../lib/virtual";
 
 export interface TreeNode {
   id: string;
@@ -44,10 +45,7 @@ export function Tree<N extends TreeNode>(props: TreeProps<N>) {
     estimateSize: () => rowHeight,
     overscan: 12,
     initialRect,
-    // virtual-core overwrites `initialRect` with the first measurement; an unlaid-out element
-    // (jsdom, a hidden pane) measures 0x0, so keep `initialRect` as the floor in that case.
-    observeElementRect: (instance, cb) =>
-      observeElementRect(instance, (rect) => cb(initialRect && rect.height === 0 && rect.width === 0 ? initialRect : rect)),
+    observeElementRect: observeRectWithFloor(initialRect),
   });
 
   useEffect(() => virtualizer.measure(), [rowHeight, virtualizer]);

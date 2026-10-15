@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ColumnDef } from "@tanstack/react-table";
 import { useState } from "react";
@@ -13,7 +13,7 @@ const columns: ColumnDef<Msg, unknown>[] = [
 ];
 const rows = (n: number): Msg[] => Array.from({ length: n }, (_, i) => ({ seq: 48000 + i, subject: `Subject ${i}`, size: "1.8 KB" }));
 
-function Harness({ data = rows(20), onActivate = () => {}, ...rest }: { data?: Msg[]; onActivate?: (id: string) => void; loading?: boolean; empty?: React.ReactNode }) {
+function Harness({ data = rows(20), onActivate = () => {}, ...rest }: { data?: Msg[]; onActivate?: (id: string) => void; loading?: boolean; empty?: React.ReactNode; error?: React.ReactNode; rowHeight?: number }) {
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [focus, setFocus] = useState<string | null>(null);
   return (
@@ -83,5 +83,83 @@ describe("DataGrid", () => {
     expect(screen.getByRole("status", { name: "Loading" })).toBeInTheDocument();
     rerender(<Harness data={[]} empty={<p>No dead letters</p>} />);
     expect(screen.getByText("No dead letters")).toBeInTheDocument();
+  });
+
+  it("selects all with mod+A", async () => {
+    render(<Harness data={rows(12)} />);
+    screen.getByRole("grid").focus();
+    await userEvent.keyboard("j");
+    await userEvent.keyboard("{Control>}a{/Control}");
+    expect(selectedRows()).toHaveLength(12);
+  });
+
+  it("jumps with Home and End and moves up with k", async () => {
+    render(<Harness data={rows(12)} />);
+    screen.getByRole("grid").focus();
+    await userEvent.keyboard("{End}");
+    expect(selectedRows().map((r) => r.getAttribute("data-row-id"))).toEqual(["48011"]);
+    await userEvent.keyboard("k");
+    expect(selectedRows().map((r) => r.getAttribute("data-row-id"))).toEqual(["48010"]);
+    await userEvent.keyboard("{Home}");
+    expect(selectedRows().map((r) => r.getAttribute("data-row-id"))).toEqual(["48000"]);
+  });
+
+  it("extends upwards with Shift+ArrowUp", async () => {
+    render(<Harness data={rows(12)} />);
+    screen.getByRole("grid").focus();
+    await userEvent.keyboard("jjjjj"); // focus 48004
+    await userEvent.keyboard("{Shift>}{ArrowUp}{ArrowUp}{/Shift}");
+    expect(selectedRows().map((r) => r.getAttribute("data-row-id"))).toEqual(["48002", "48003", "48004"]);
+  });
+
+  it("points aria-activedescendant at the focused row", async () => {
+    render(<Harness data={rows(12)} />);
+    const grid = screen.getByRole("grid");
+    expect(grid).not.toHaveAttribute("aria-activedescendant");
+    grid.focus();
+    await userEvent.keyboard("jj");
+    const id = grid.getAttribute("aria-activedescendant");
+    expect(id).toBeTruthy();
+    const el = document.getElementById(id!);
+    expect(el).not.toBeNull();
+    expect(el).toHaveAttribute("data-row-id", "48001");
+  });
+
+  it("shows the error instead of rows", () => {
+    render(<Harness error={<p>Can&apos;t peek messages</p>} />);
+    expect(screen.getByText("Can't peek messages")).toBeInTheDocument();
+    expect(screen.queryByText("Subject 0")).not.toBeInTheDocument();
+  });
+
+  it("shapes loading rows to the grid's columns", () => {
+    render(<Harness data={[]} loading />);
+    const row = screen.getByRole("status").querySelector("[data-skeleton-row]") as HTMLElement;
+    expect(row.style.gridTemplateColumns).toBe("64px minmax(140px, 1fr) 60px");
+    expect(row.children).toHaveLength(3);
+    expect(row.style.height).toBe("22px");
+  });
+
+  it("re-measures when the row height changes", () => {
+    const { rerender } = render(<Harness data={rows(10)} rowHeight={22} />);
+    const third = () => screen.getAllByRole("row")[3] as HTMLElement;
+    expect(third().style.height).toBe("22px");
+    expect(third().style.transform).toBe("translateY(44px)");
+    act(() => { rerender(<Harness data={rows(10)} rowHeight={30} />); });
+    expect(third().style.height).toBe("30px");
+    expect(third().style.transform).toBe("translateY(60px)");
+    const body = third().parentElement as HTMLElement;
+    expect(body.style.height).toBe("300px");
+  });
+
+  it("outlines the focus row only when it is not the sole selection", async () => {
+    const user = userEvent.setup();
+    render(<Harness data={rows(12)} />);
+    const rowEls = () => screen.getAllByRole("row").slice(1);
+    await user.click(rowEls()[1]);
+    expect(rowEls()[1].className).not.toContain("outline-muted");
+    await user.keyboard("{Meta>}");
+    await user.click(rowEls()[3]);
+    await user.keyboard("{/Meta}");
+    expect(rowEls()[3].className).toContain("outline-muted");
   });
 });

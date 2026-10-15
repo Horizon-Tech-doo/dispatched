@@ -1,8 +1,9 @@
 import { flexRender, getCoreRowModel, useReactTable, type ColumnDef, type RowData } from "@tanstack/react-table";
-import { observeElementRect, useVirtualizer } from "@tanstack/react-virtual";
-import { useId, useRef, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
-import { SkeletonRows } from "../components/skeleton";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { useEffect, useId, useRef, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
+import { Skeleton } from "../components/skeleton";
 import { cn } from "../lib/cn";
+import { observeRectWithFloor } from "../lib/virtual";
 
 export interface GridColumnMeta {
   align?: "start" | "end";
@@ -34,6 +35,7 @@ export interface DataGridProps<R> {
 }
 
 const HEADER_HEIGHT = 24;
+const SKELETON_WIDTHS = ["w-[62%]", "w-[48%]", "w-[71%]", "w-[39%]", "w-[56%]", "w-[66%]", "w-[44%]", "w-[58%]"];
 
 export function DataGrid<R>(p: DataGridProps<R>) {
   const domId = useId();
@@ -55,11 +57,10 @@ export function DataGrid<R>(p: DataGridProps<R>) {
     // The sticky header sits above the rows inside the scroller.
     scrollMargin: HEADER_HEIGHT,
     scrollPaddingStart: HEADER_HEIGHT,
-    // virtual-core overwrites `initialRect` with the first measurement; an unlaid-out element
-    // (jsdom, a hidden pane) measures 0x0, so keep `initialRect` as the floor in that case.
-    observeElementRect: (instance, cb) =>
-      observeElementRect(instance, (rect) => cb(initialRect && rect.height === 0 && rect.width === 0 ? initialRect : rect)),
+    observeElementRect: observeRectWithFloor(initialRect),
   });
+
+  useEffect(() => virtualizer.measure(), [p.rowHeight, virtualizer]);
 
   const focusIndex = p.focusId ? rows.findIndex((r) => r.id === p.focusId) : -1;
   const idAt = (i: number) => rows[i]?.id;
@@ -123,7 +124,20 @@ export function DataGrid<R>(p: DataGridProps<R>) {
   }
 
   const header = table.getHeaderGroups()[0];
-  const body = p.error ?? (p.loading ? <SkeletonRows rows={10} columns={Math.min(leafColumns.length, 4)} /> : rows.length === 0 ? p.empty : null);
+  const loadingRows = (
+    <div role="status" aria-label="Loading">
+      {Array.from({ length: 10 }, (_, r) => (
+        <div key={r} data-skeleton-row className="grid items-center px-2.5" style={{ height: p.rowHeight, gridTemplateColumns: template }}>
+          {leafColumns.map((c, ci) => (
+            <div key={c.id} className="px-1">
+              <Skeleton className={cn(SKELETON_WIDTHS[(r + ci * 3) % SKELETON_WIDTHS.length], c.columnDef.meta?.align === "end" && "ml-auto")} />
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+  const body = p.error ?? (p.loading ? loadingRows : rows.length === 0 ? p.empty : null);
 
   return (
     <div
@@ -137,10 +151,12 @@ export function DataGrid<R>(p: DataGridProps<R>) {
       onKeyDown={onKeyDown}
       className="relative h-full overflow-auto focus-visible:outline focus-visible:outline-1 focus-visible:-outline-offset-1 focus-visible:outline-fg"
     >
+      {/* Sizes to the header's max-content so absolutely positioned rows span the full scroll width. */}
+      <div className="w-max min-w-full">
       <div
         role="row"
         aria-rowindex={1}
-        className="sticky top-0 z-10 grid min-w-max items-center border-b border-line bg-content px-2.5 text-12 text-muted"
+        className="sticky top-0 z-10 grid items-center border-b border-line bg-content px-2.5 text-12 text-muted"
         style={{ height: HEADER_HEIGHT, gridTemplateColumns: template }}
       >
         {header.headers.map((h) => (
@@ -150,7 +166,7 @@ export function DataGrid<R>(p: DataGridProps<R>) {
         ))}
       </div>
       {body ?? (
-        <div style={{ height: virtualizer.getTotalSize(), position: "relative" }} className="min-w-max">
+        <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
           {virtualizer.getVirtualItems().map((v) => {
             const row = rows[v.index];
             const selected = p.selectedIds.has(row.id);
@@ -168,7 +184,7 @@ export function DataGrid<R>(p: DataGridProps<R>) {
                 className={cn(
                   "absolute inset-x-0 grid items-center px-2.5 text-12",
                   selected ? "bg-selection" : "hover:bg-hover",
-                  focused && "outline outline-1 -outline-offset-1 outline-muted",
+                  focused && !(selected && p.selectedIds.size === 1) && "outline outline-1 -outline-offset-1 outline-muted",
                 )}
                 style={{ height: p.rowHeight, transform: `translateY(${v.start - HEADER_HEIGHT}px)`, gridTemplateColumns: template }}
               >
@@ -189,6 +205,7 @@ export function DataGrid<R>(p: DataGridProps<R>) {
           })}
         </div>
       )}
+      </div>
     </div>
   );
 }

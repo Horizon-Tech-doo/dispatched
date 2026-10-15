@@ -142,7 +142,7 @@ const DEAD_LETTER_COLUMNS: ColumnDef<DeadLetter, string>[] = [
   { accessorKey: "subject", header: "Subject", meta: { width: "140px" } },
   { accessorKey: "id", header: "Message ID", cell: (c) => dim(c.getValue()), meta: { mono: true, width: "120px" } },
   { accessorKey: "reason", header: "Dead-letter reason", meta: { width: "minmax(190px, 1fr)" } },
-  { accessorKey: "deliveries", header: "Del.", meta: { mono: true, align: "end", width: "44px" } },
+  { accessorKey: "deliveries", header: "Del.", meta: { align: "end", width: "44px" } },
   { accessorKey: "size", header: "Size", cell: (c) => dim(c.getValue()), meta: { mono: true, align: "end", width: "60px" } },
 ];
 
