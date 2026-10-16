@@ -6,7 +6,7 @@ import { Button, DataGrid, EmptyState, Input, formatNumber, rowHeight, type Grid
 import { useShell } from "../context";
 import { peekSession } from "../messages/peekSession";
 import type { EntityTab } from "../state";
-import { formatTimestamp } from "../time";
+import { formatShortTimestamp, yearOf } from "../time";
 
 /** Where the session list came from and what that means for it: the sentences that go in the status line. */
 export function sessionNote(l: Pick<SessionListing, "broker" | "scanned" | "truncated">): string[] {
@@ -24,6 +24,19 @@ export function sessionNote(l: Pick<SessionListing, "broker" | "scanned" | "trun
 
 const plural = (n: number, one: string) => `${formatNumber(n)} ${n === 1 ? one : `${one}s`}`;
 
+/** A timestamp column as the message grid draws one: compact local time, the full value on hover; sorts by the full value. */
+const time = (id: string, header: string, get: (s: SessionSummary) => string | null, withYear: boolean): ColumnDef<SessionSummary, unknown> => ({
+  id,
+  header,
+  accessorFn: (s) => get(s) ?? "",
+  meta: { mono: true, width: withYear ? "150px" : "118px" },
+  cell: (c) => {
+    const iso = get(c.row.original);
+    const shown = formatShortTimestamp(iso, withYear);
+    return shown === "" ? null : <span title={iso!}>{shown}</span>;
+  },
+});
+
 export function SessionsView({ tab, requiresSession }: { tab: EntityTab; requiresSession: boolean | null }) {
   const { conn, prefs, dispatch } = useShell();
   const qc = useQueryClient();
@@ -32,6 +45,11 @@ export function SessionsView({ tab, requiresSession }: { tab: EntityTab; require
   const [sorting, setSorting] = useState<GridSort | null>(null);
   const [sel, setSel] = useState<{ ids: Set<string>; focus: string | null }>({ ids: new Set(), focus: null });
   const truncated = q.data?.truncated ?? false;
+  // The year shows only when a session is from another year; the columns keep one width.
+  const withYear = useMemo(() => {
+    const year = new Date().getFullYear();
+    return (q.data?.sessions ?? []).some((x) => [x.first_enqueued, x.last_enqueued].some((t) => { const y = yearOf(t); return y !== null && y !== year; }));
+  }, [q.data]);
   const columns = useMemo<ColumnDef<SessionSummary, unknown>[]>(
     () => [
       { id: "id", header: "Session", accessorFn: (s) => s.id, meta: { mono: true, width: "minmax(160px, 280px)" } },
@@ -49,8 +67,8 @@ export function SessionsView({ tab, requiresSession }: { tab: EntityTab; require
           return n === 0 && in_broker ? <span title="No messages in the queue. The service still lists this session.">0</span> : formatNumber(n);
         },
       },
-      { id: "first", header: "First enqueued", accessorFn: (s) => s.first_enqueued ?? "", meta: { mono: true, width: "150px" }, cell: (c) => formatTimestamp(c.row.original.first_enqueued) },
-      { id: "last", header: "Last enqueued", accessorFn: (s) => s.last_enqueued ?? "", meta: { mono: true, width: "150px" }, cell: (c) => formatTimestamp(c.row.original.last_enqueued) },
+      time("first", "First enqueued", (x) => x.first_enqueued, withYear),
+      time("last", "Last enqueued", (x) => x.last_enqueued, withYear),
       {
         id: "listed",
         header: "Listed by service",
@@ -60,7 +78,7 @@ export function SessionsView({ tab, requiresSession }: { tab: EntityTab; require
         cell: (c) => (c.row.original.in_broker ? <span className="text-muted">Yes</span> : <span className="sr-only">Not listed by the service</span>),
       },
     ],
-    [truncated],
+    [truncated, withYear],
   );
   const needle = filter.trim().toLowerCase();
   const rows = useMemo(() => (q.data?.sessions ?? []).filter((s) => s.id.toLowerCase().includes(needle)), [q.data, needle]);

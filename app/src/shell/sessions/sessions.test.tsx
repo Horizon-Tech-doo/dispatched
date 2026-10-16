@@ -92,6 +92,18 @@ describe("sessions", () => {
     await waitFor(() => expect(status).toHaveTextContent("1 of 13 sessions"));
   });
 
+  it("draws enqueue times compactly with the full value on hover", async () => {
+    renderShell("default", seed("returns-intake", "queue", "sessions"));
+    const grid = await screen.findByRole("grid", { name: "Sessions" });
+    const row = await within(grid).findByRole("row", { name: /RMA-1001/ });
+    const cells = within(row).getAllByRole("gridcell");
+    // Session, Messages, First enqueued, Last enqueued, Listed by service.
+    const first = cells[2].querySelector("span")!;
+    expect(first.textContent).toMatch(/^\d{2} [A-Z][a-z]{2} (\d{4} )?\d{2}:\d{2}:\d{2}$/);
+    expect(first.getAttribute("title")).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(new Date(first.getAttribute("title")!).getTime()).not.toBeNaN();
+  });
+
   it("marks the sessions the service listed", async () => {
     renderShell("default", seed("returns-intake", "queue", "sessions"));
     const grid = await screen.findByRole("grid", { name: "Sessions" });
