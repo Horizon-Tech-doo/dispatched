@@ -779,7 +779,7 @@ describe("Entra discovery in the Add connection sheet", () => {
     await user.click(within(sheet).getByRole("button", { name: "Save" }));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Add connection" })).not.toBeInTheDocument());
     // It connects with the tenant's own sign-in; wait for the workbench before using the menu.
-    await within(await screen.findByRole("tree", { name: "Namespace" })).findByRole("treeitem", { name: /customs-docs/ });
+    await within(await screen.findByRole("tree", { name: /^Namespace(,|$)/ })).findByRole("treeitem", { name: /customs-docs/ });
     await chooseMenuItem(user, /Connection: nw-orders NW/, "Manage connections…");
     await user.click(within(await screen.findByRole("dialog", { name: "Connections" })).getByRole("button", { name: "Edit nw-orders NW" }));
     const edit = await screen.findByRole("dialog", { name: "Edit nw-orders NW" });

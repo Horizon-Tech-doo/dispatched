@@ -31,18 +31,15 @@ export function CountBadge({
   quality,
   attention,
   className,
-  title,
 }: {
   value: number | null | undefined;
   quality?: CountQuality;
   attention?: boolean;
   className?: string;
-  /** What is counted, as a tooltip, when several counts stand side by side. */
-  title?: string;
 }) {
   const hot = attention && value != null && value > 0;
   return (
-    <span title={title} className={cn("text-11 tabular-nums", hot ? "text-accent" : "text-muted", className)}>
+    <span className={cn("text-11 tabular-nums", hot ? "text-accent" : "text-muted", className)}>
       {formatCount(value, quality)}
     </span>
   );

@@ -82,4 +82,86 @@ describe("explorer options", () => {
     await typeInto(within(sheet).getByLabelText("Rule 1 value"), "^(a+)+$");
     expect(within(sheet).getByRole("button", { name: "Save" })).toBeEnabled();
   });
+
+  const open = async () => {
+    const r = renderShell("default", { last_profile: "p-logistics" });
+    await screen.findByRole("tree", { name: "Namespace" });
+    await userEvent.click(screen.getByRole("button", { name: "Explorer options" }));
+    return { ...r, sheet: screen.getByRole("dialog", { name: "Explorer options for Logistics" }) };
+  };
+
+  it("numbers the rules and moves them up and down", async () => {
+    const { sheet, mock } = await open();
+    await userEvent.click(within(sheet).getByRole("button", { name: "Add rule" }));
+    await userEvent.click(within(sheet).getByRole("button", { name: "Add rule" }));
+    await typeInto(within(sheet).getByLabelText("Rule 1 value"), "alpha");
+    await typeInto(within(sheet).getByLabelText("Rule 2 value"), "beta");
+    expect(within(sheet).getByRole("group", { name: "Rule 2" })).toBeInTheDocument();
+    expect(within(sheet).getByRole("button", { name: "Move rule 1 up" })).toBeDisabled();
+    expect(within(sheet).getByRole("button", { name: "Move rule 2 down" })).toBeDisabled();
+    await userEvent.click(within(sheet).getByRole("button", { name: "Move rule 2 up" }));
+    expect(within(sheet).getByLabelText("Rule 1 value")).toHaveValue("beta");
+    expect(within(sheet).getByLabelText("Rule 2 value")).toHaveValue("alpha");
+    await userEvent.click(within(sheet).getByRole("button", { name: "Move rule 1 down" }));
+    expect(within(sheet).getByLabelText("Rule 1 value")).toHaveValue("alpha");
+    await userEvent.click(within(sheet).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect((saved(mock)?.value.explorer.rules as { match: { pattern: string } }[]).map((r) => r.match.pattern)).toEqual(["alpha", "beta"]));
+  });
+
+  it("shows an empty pattern as a problem only after leaving the box or trying to save, and a bad pattern at once", async () => {
+    const { sheet, mock } = await open();
+    await userEvent.click(within(sheet).getByRole("button", { name: "Add rule" }));
+    expect(within(sheet).queryByText(/Enter a pattern/)).toBeNull();
+    expect(within(sheet).getByRole("button", { name: "Save" })).toBeEnabled();
+    await userEvent.click(within(sheet).getByRole("button", { name: "Save" }));
+    expect(await within(sheet).findByText(/Enter a pattern/)).toBeInTheDocument();
+    expect(mock.calls.some((c) => c.cmd === "settings_set" && (c.args as { key: string }).key === "shell:p-logistics" && "explorer" in (c.args as { value: object }).value)).toBe(false);
+    expect(within(sheet).getByRole("button", { name: "Save" })).toBeDisabled();
+    // Another rule, left by tabbing away.
+    await userEvent.click(within(sheet).getByRole("button", { name: "Add rule" }));
+    const second = within(sheet).getByLabelText("Rule 2 value");
+    await act(async () => second.focus());
+    expect(within(sheet).getAllByText(/Enter a pattern/)).toHaveLength(1);
+    await act(async () => second.blur());
+    expect(await within(sheet).findAllByText(/Enter a pattern/)).toHaveLength(2);
+  });
+
+  it("says how many loaded entities a valid rule matches", async () => {
+    const { sheet } = await open();
+    await userEvent.click(within(sheet).getByRole("button", { name: "Add rule" }));
+    const value = within(sheet).getByLabelText("Rule 1 value");
+    await typeInto(value, "^invoice");
+    expect(await within(sheet).findByText("Matches 1 loaded entity")).toBeInTheDocument();
+    await act(async () => value.focus());
+    await userEvent.clear(value);
+    await typeInto(value, "^(");
+    expect(within(sheet).queryByText(/Matches/)).toBeNull();
+    await act(async () => value.focus());
+    await userEvent.clear(value);
+    await typeInto(value, "zzzz");
+    expect(await within(sheet).findByText("Matches no loaded entities")).toBeInTheDocument();
+    await act(async () => value.focus());
+    await userEvent.clear(value);
+    await typeInto(value, "e");
+    expect(await within(sheet).findByText(/^Matches \d+ loaded entities$/)).toBeInTheDocument();
+  });
+
+  it("counts the loaded entities that a count rule reaches", async () => {
+    const { sheet } = await open();
+    await userEvent.click(within(sheet).getByRole("button", { name: "Add rule" }));
+    await userEvent.click(within(sheet).getByRole("combobox", { name: "Rule 1 match" }));
+    await userEvent.click(await screen.findByRole("option", { name: "Dead-letter at least" }));
+    const value = within(sheet).getByLabelText("Rule 1 value");
+    await act(async () => value.focus());
+    await userEvent.clear(value);
+    await typeInto(value, "100");
+    expect(await within(sheet).findByText("Matches 1 loaded entity")).toBeInTheDocument(); // returns-intake
+  });
+
+  it("marks the counts that are on with a check", async () => {
+    const { sheet } = await open();
+    const active = within(sheet).getByRole("button", { name: "Active" });
+    expect(active.querySelector("svg")).not.toBeNull();
+    expect(within(sheet).getByRole("button", { name: "Scheduled" }).querySelector("svg")).toBeNull();
+  });
 });

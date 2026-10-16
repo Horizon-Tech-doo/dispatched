@@ -59,7 +59,7 @@ describe("buildCommands", () => {
     const c = { ...ctx(), activeTab: { id: "shipment-events/subscriptions/tracking-sync", kind: "subscription" as const } };
     const cmds = buildCommands(c);
     cmds.find((x) => x.label === "Copy URL of tracking-sync")!.run();
-    expect(c.copy).toHaveBeenCalledWith("sb://sb-logistics-prod.servicebus.windows.net/shipment-events/Subscriptions/tracking-sync");
+    expect(c.copy).toHaveBeenCalledWith("sb://sb-logistics-prod.servicebus.windows.net/shipment-events/Subscriptions/tracking-sync", "Copied the URL for tracking-sync");
     cmds.find((x) => x.label === "Copy connection string of tracking-sync")!.run();
     expect(c.copyConnectionString).toHaveBeenCalledWith("shipment-events/subscriptions/tracking-sync");
   });
@@ -106,7 +106,7 @@ describe("palette", () => {
     await waitFor(() => expect(screen.getByRole("tab", { name: /label-print/ })).toHaveAttribute("aria-selected", "true"));
     expect(screen.queryByPlaceholderText("Go to entity or command")).not.toBeInTheDocument();
     // The tree follows: the opened entity is the selected row.
-    expect(screen.getByRole("treeitem", { name: "label-print" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("treeitem", { name: /^label-print(,|$)/ })).toHaveAttribute("aria-selected", "true");
   });
 
   it("groups commands, shows shortcuts and says so when nothing matches", async () => {
@@ -167,7 +167,7 @@ describe("palette", () => {
     await userEvent.type(input, "tracking");
     await userEvent.keyboard("{Enter}");
     await waitFor(() => expect(screen.getByRole("tab", { name: /tracking-sync/ })).toHaveAttribute("aria-selected", "true"));
-    expect(screen.getByRole("treeitem", { name: "tracking-sync" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("treeitem", { name: /^tracking-sync(,|$)/ })).toHaveAttribute("aria-selected", "true");
   });
 
   it("with more than 50 topics, loads no subscriptions and says collapsed topics are not searched", async () => {

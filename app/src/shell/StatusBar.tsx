@@ -8,7 +8,7 @@ import { useIsFetching, useQueryState } from "./queryState";
 import { troubleLabel, useConnectionTrouble } from "./trouble";
 
 export function StatusBar() {
-  const { conn, shell, live, dispatch, openSheet } = useShell();
+  const { conn, shell, live, dispatch, openSheet, notice } = useShell();
   const update = useUpdate().data;
   const info = useAppInfo().data;
   const running = useJobs().filter((j) => !j.finished).length;
@@ -30,6 +30,17 @@ export function StatusBar() {
         {trouble === "lost" && <Button size="sm" className="h-[18px]" onClick={conn.retry}>Reconnect</Button>}
         {trouble && trouble !== "lost" && <Button size="sm" className="h-[18px]" onClick={editConnection}>Edit connection</Button>}
       </span>
+      {notice && (
+        <span role="status" className="flex min-w-0 items-center gap-1.5 text-fg" title={notice.text}>
+          {notice.error && <CircleAlert aria-hidden="true" className="size-3 shrink-0 text-accent" />}
+          <span className="truncate">{notice.text}</span>
+          {notice.details && (
+            <Button size="sm" className="h-[18px] shrink-0" onClick={() => dispatch({ type: "layout", patch: { drawerOpen: true, drawerTab: "activity" } })}>
+              Details
+            </Button>
+          )}
+        </span>
+      )}
       {live && !shell.layout.drawerOpen && (
         <Button size="sm" variant="quiet" className="h-[18px] shrink-0" onClick={() => dispatch({ type: "layout", patch: { drawerOpen: true } })}>
           Show activity{running > 0 && <span className="tabular-nums"> · {running} running</span>}

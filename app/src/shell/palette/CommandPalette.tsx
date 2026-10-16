@@ -12,7 +12,7 @@ const MAX_PREFETCH_TOPICS = 50;
 const GROUPS = ["Go to", "This entity", "Connections", "App"] as const;
 
 export function CommandPalette() {
-  const { paletteOpen, setPaletteOpen, conn, shell, dispatch, openSheet, refresh, setPrefs, copyConnectionString } = useShell();
+  const { paletteOpen, setPaletteOpen, conn, shell, dispatch, openSheet, refresh, setPrefs, copyConnectionString, copyText } = useShell();
   const connected = conn.status === "connected";
   const profiles = useProfiles().data ?? [];
   const active = profiles.find((p) => p.id === conn.profileId);
@@ -40,7 +40,7 @@ export function CommandPalette() {
     host: active?.host ?? conn.view?.host ?? "",
     // Until the profile list is known an Entra profile can't be told from the others: offer no connection string.
     entra: active === undefined || active.auth.kind === "entra",
-    copy: (text) => void navigator.clipboard?.writeText(text).catch(() => {}),
+    copy: (text, message) => void copyText(text, message),
     copyConnectionString: (id) => void copyConnectionString(id),
     open: (tab) => {
       dispatch({ type: "open", tab });

@@ -1,12 +1,12 @@
-import { X } from "lucide-react";
-import { useState } from "react";
-import { useProfiles } from "@/engine";
+import { ChevronDown, ChevronUp, X } from "lucide-react";
+import { useMemo, useState } from "react";
+import { useEntities, useProfiles, useSubscriptionsFor, type EntityCounts } from "@/engine";
 import {
-  Button, Field, IconButton, Input, LabelSwatch, Segmented, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Sheet, ToggleGroup, labelColors, type LabelColor,
+  Button, Field, IconButton, Input, LabelSwatch, Segmented, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Sheet, ToggleGroup, formatNumber, labelColors, type LabelColor,
 } from "@/ui";
 import { useShell } from "../context";
 import { COUNT_KINDS, MAX_PATTERN_LENGTH, MAX_RULES, type CountKind, type ExplorerOptions, type HighlightRule } from "../state";
-import { ruleProblem } from "../tree/highlight";
+import { compileRules, ruleProblem } from "../tree/highlight";
 
 type MatchKey = "name" | CountKind;
 const MATCH: { value: MatchKey; label: string }[] = [
@@ -39,8 +39,41 @@ export function ExplorerOptionsSheet() {
   const [typed, setTyped] = useState<Record<string, string>>({});
   const forget = (id: string) => setTyped(({ [id]: _text, ...rest }) => rest);
   const setRule = (i: number, r: HighlightRule) => setO({ ...o, rules: o.rules.map((x, j) => (j === i ? r : x)) });
-  const blocked = o.rules.some((r) => ruleProblem(r));
+  // An empty pattern is a problem only once the person has left its box or tried to save; a bad one at once.
+  const [touched, setTouched] = useState<ReadonlySet<string>>(new Set());
+  const touch = (id: string) => setTouched((t) => (t.has(id) ? t : new Set(t).add(id)));
+  const problemOf = (r: HighlightRule) => (r.match.kind === "name" && !r.match.pattern.trim() && !touched.has(r.id) ? undefined : ruleProblem(r));
+  const blocked = o.rules.some((r) => problemOf(r));
+  const move = (i: number, by: -1 | 1) => {
+    const rules = [...o.rules];
+    [rules[i], rules[i + by]] = [rules[i + by], rules[i]];
+    setO({ ...o, rules });
+  };
+
+  // What each rule would mark among the entities already loaded (the tree's own queries, so nothing more is fetched).
+  const profileId = conn.profileId;
+  const listing = useEntities(profileId).data;
+  const topics = useMemo(
+    () => (listing ? shell.expanded.filter((e) => e.startsWith("t:") && listing.topics.some((t) => t.name === e.slice(2))).map((e) => e.slice(2)) : []),
+    [listing, shell.expanded],
+  );
+  const subQueries = useSubscriptionsFor(profileId, topics);
+  const loaded = useMemo(() => {
+    const all: { name: string; counts: EntityCounts | null }[] = [];
+    if (listing) {
+      for (const q of listing.queues) all.push({ name: q.name, counts: q.counts });
+      for (const t of listing.topics) all.push({ name: t.name, counts: null });
+      for (const k of listing.known) all.push({ name: k.subscription ?? k.entity, counts: null });
+    }
+    for (const q of subQueries) for (const sub of q.data ?? []) all.push({ name: sub.name, counts: sub.counts });
+    return all;
+  }, [listing, subQueries]);
+  const matchesOf = (r: HighlightRule) => {
+    const [rule] = compileRules([r]);
+    return rule ? loaded.filter((e) => rule.test(e.name, e.counts)).length : 0;
+  };
   const save = () => {
+    if (o.rules.some((r) => ruleProblem(r))) return setTouched(new Set(o.rules.map((r) => r.id))); // show what is wrong
     // The tree draws counts in its own order whatever order they were switched on in.
     dispatch({ type: "explorer", options: { ...o, counts: COUNT_KINDS.filter((k) => o.counts.includes(k)) } });
     closeSheet();
@@ -94,8 +127,9 @@ export function ExplorerOptionsSheet() {
           <span className="text-12 font-semibold text-muted">Highlight rules</span>
           <p className="m-0 text-11 text-muted">Mark a row with a coloured square. The first rule that matches a row wins. Name patterns ignore case.</p>
           {o.rules.map((r, i) => (
-            <div key={r.id} className="flex flex-col gap-1.5 border-t border-line pt-2">
+            <div key={r.id} role="group" aria-label={`Rule ${i + 1}`} className="flex flex-col gap-1.5 border-t border-line pt-2">
               <div className="flex items-center gap-2">
+                <span aria-hidden="true" className="w-3 shrink-0 text-11 tabular-nums text-muted">{i + 1}</span>
                 <Select value={r.color} onValueChange={(color) => setRule(i, { ...r, color: color as LabelColor })}>
                   <SelectTrigger aria-label={`Rule ${i + 1} colour`} className="w-[60px] shrink-0">
                     <SelectValue>
@@ -136,6 +170,12 @@ export function ExplorerOptionsSheet() {
                     ))}
                   </SelectContent>
                 </Select>
+                <IconButton label={`Move rule ${i + 1} up`} disabled={i === 0} onClick={() => move(i, -1)}>
+                  <ChevronUp />
+                </IconButton>
+                <IconButton label={`Move rule ${i + 1} down`} disabled={i === o.rules.length - 1} onClick={() => move(i, 1)}>
+                  <ChevronDown />
+                </IconButton>
                 <IconButton
                   label={`Remove rule ${i + 1}`}
                   onClick={() => {
@@ -146,7 +186,7 @@ export function ExplorerOptionsSheet() {
                   <X />
                 </IconButton>
               </div>
-              <Field label={`Rule ${i + 1} value`} hideLabel error={ruleProblem(r)}>
+              <Field label={`Rule ${i + 1} value`} hideLabel error={problemOf(r)}>
                 {(ids) => (
                   <Input
                     {...ids}
@@ -155,6 +195,7 @@ export function ExplorerOptionsSheet() {
                     maxLength={r.match.kind === "name" ? MAX_PATTERN_LENGTH : 9}
                     placeholder={r.match.kind === "name" ? "^orders- or -dlq$" : "100"}
                     value={r.match.kind === "name" ? r.match.pattern : (typed[r.id] ?? String(r.match.atLeast))}
+                    onBlur={() => touch(r.id)}
                     onChange={(e) => {
                       const text = e.target.value;
                       if (r.match.kind === "name") setRule(i, { ...r, match: { kind: "name", pattern: text } });
@@ -166,6 +207,10 @@ export function ExplorerOptionsSheet() {
                   />
                 )}
               </Field>
+              {!ruleProblem(r) && (() => {
+                const n = matchesOf(r);
+                return <p className="m-0 text-11 tabular-nums text-muted">{n === 0 ? "Matches no loaded entities" : n === 1 ? "Matches 1 loaded entity" : `Matches ${formatNumber(n)} loaded entities`}</p>;
+              })()}
             </div>
           ))}
           <Button

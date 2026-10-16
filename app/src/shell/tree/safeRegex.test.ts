@@ -48,4 +48,46 @@ describe("safe name patterns", () => {
     expect(test("(x+x+)+y", "x".repeat(80))).toBe(false);
     expect(Date.now() - started).toBeLessThan(500);
   });
+
+  it("charges the compile budget per emitted node, so nested empty repeats cannot hang", () => {
+    const started = performance.now();
+    const r = compilePattern("(((((){100}){100}){100}){100}){100}");
+    expect(performance.now() - started).toBeLessThan(50);
+    // Either refused as too large or compiled to something that runs at once.
+    if (!("error" in r)) expect(r.test("abc")).toBeDefined();
+  });
+
+  it("keeps a 161-character class fast on a long name", () => {
+    // The one character the name is made of sits last in the class, so a member-by-member scan reads all 161.
+    const chars = `${"b".repeat(160)}a`;
+    const pattern = `[${chars}]{100}x`;
+    const r = compilePattern(pattern);
+    if ("error" in r) throw new Error(r.error);
+    const name = "a".repeat(500);
+    r.test(name); // warm up
+    const started = performance.now();
+    for (let i = 0; i < 5; i++) expect(r.test(name)).toBe(false);
+    expect((performance.now() - started) / 5).toBeLessThan(8);
+  });
+});
+
+/** The matcher is a subset of JavaScript's patterns: wherever it accepts one, it must agree with `new RegExp(p, "i")`. */
+describe("agrees with RegExp on the names a pattern is tried against", () => {
+  const patterns = [
+    "[]", "[^]", "x{,3}", "x{3", "x{3}", "x{2,}", "x{1,2}y", "[\\d-z]", "[a-]", "[-a]", "[a\\-z]", "[\\b]", "(|a)b", "a*?b", "a+?", "\\B", "\\b", "\\bsync\\b",
+    "orders", "^orders", "orders$", "^orders-(eu|us)$", "^(a|b)*c$", "^$", "^", "$", ".", "^.$", "a.c", "\\.", "^\\w+-\\d+$", "[A-Z]{2}", "[^a-c]+", "(?:ab)+", "^(?:ab){2}$",
+    "a|b|", "|", "()", "(a)(b)", "^[\\w.-]+$", "\\s", "\\S+", "\\D", "[\\s\\d]", "-dlq$", "^invoice-", "x*", "^x*$", "é", "[à-ü]", "ß", "\\t", "[\\n]",
+  ];
+  const names = [
+    "", "a", "b", "ab", "abc", "aab", "abab", "c", "bc", "xxx", "x", "x{,3}", "x{3", "xx", "xxy", "5", "-", "z", "\b", "Orders", "orders-eu", "ORDERS-US", "orders-ap", "x-orders", "invoice-generate", "label-print",
+    "a.c", "abc.", "tracking-sync", "sync", "synchro", "AB", "AB12", "ab-12", "A1", "dlq", "orders-dlq", "orders-dlq-x", "é", "É", "ß", "ü", " ", "a b", "a\tb", "a\nb", "-a-", "a-z", "3-z",
+  ];
+  for (const p of patterns) {
+    it(`/${p}/i`, () => {
+      const mine = compilePattern(p);
+      if ("error" in mine) throw new Error(`refused: ${mine.error}`);
+      const re = new RegExp(p, "i");
+      for (const n of names) expect(mine.test(n), `${JSON.stringify(n)}`).toBe(re.test(n));
+    });
+  }
 });

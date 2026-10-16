@@ -19,9 +19,13 @@ export type SheetState =
   | { kind: "export"; entity: string; view: PeekView; filter: FilterSpec; selected: number[]; total: number | null; scope?: "all" | "selected"; format?: ExportFormat }
   | null;
 
-/** The outcome of the last "copy connection string": the string itself never reaches the webview, only whether it worked. */
-export type CopyNotice = { entity: string; failure?: string } | null;
-const COPIED_MS = 3000;
+/** A short line in the status bar about what the user just did (a copy). `details` offers the activity log, where a failed
+ *  engine call is recorded. */
+export type Notice = { text: string; error?: boolean; details?: boolean } | null;
+const NOTICE_MS = 3000;
+const ERROR_NOTICE_MS = 8000;
+/** What a connection string copy came to. The string itself never reaches the webview: only whether it worked. */
+export type CopyResult = { ok: true } | { ok: false; message: string };
 
 interface ShellContextValue {
   prefs: Prefs;
@@ -40,10 +44,14 @@ interface ShellContextValue {
   paletteOpen: boolean;
   setPaletteOpen: (open: boolean) => void;
   refresh: () => void;
-  /** Asks the engine to put the entity's connection string on the clipboard; the result is in `copyNotice`. */
-  copyConnectionString: (entity: string) => Promise<void>;
-  copyNotice: CopyNotice;
-  dismissCopyNotice: () => void;
+  /** The one path for copying text from the shell: writes the clipboard and says `message` in the status bar, or that it
+   *  could not (unless `inline`: the caller shows the failure where the action was taken). */
+  copyText: (text: string, message: string, opts?: { inline?: boolean }) => Promise<boolean>;
+  /** Asks the engine to put the entity's connection string on the clipboard (Rust writes it; nothing comes back). The
+   *  status bar says so; a result that arrives after the connection changed is dropped. */
+  copyConnectionString: (entity: string, opts?: { inline?: boolean }) => Promise<CopyResult>;
+  notice: Notice;
+  dismissNotice: () => void;
 }
 
 const ShellContext = createContext<ShellContextValue | null>(null);
@@ -81,28 +89,43 @@ export function ShellProvider({ children }: { children: ReactNode }) {
   }, [shellProfileId]);
   const [sheet, setSheet] = useState<SheetState>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [copyNotice, setCopyNotice] = useState<CopyNotice>(null);
-  const dismissCopyNotice = useCallback(() => setCopyNotice(null), []);
+  const [notice, setNotice] = useState<Notice>(null);
+  const dismissNotice = useCallback(() => setNotice(null), []);
   useEffect(() => {
-    if (!copyNotice || copyNotice.failure) return;
-    const t = setTimeout(() => setCopyNotice(null), COPIED_MS);
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(null), notice.error ? ERROR_NOTICE_MS : NOTICE_MS);
     return () => clearTimeout(t);
-  }, [copyNotice]);
+  }, [notice]);
   // A notice is about one connection's entity.
-  useEffect(() => setCopyNotice(null), [shellProfileId]);
-  const copyConnectionString = useCallback(
-    async (entity: string) => {
-      if (!conn.profileId) return;
-      setCopyNotice(null);
-      try {
-        await commands.copyEntityConnectionString(conn.profileId, entity);
-        setCopyNotice({ entity });
-      } catch (e) {
-        setCopyNotice({ entity, failure: String((e as { message?: string } | null)?.message ?? e) });
-      }
-    },
-    [conn.profileId],
-  );
+  useEffect(() => setNotice(null), [shellProfileId]);
+  const profileNow = useRef<string | null>(null);
+  profileNow.current = conn.profileId;
+  const copyText = useCallback(async (text: string, message: string, opts?: { inline?: boolean }) => {
+    try {
+      if (!navigator.clipboard) throw new Error("no clipboard");
+      await navigator.clipboard.writeText(text);
+      setNotice({ text: message });
+      return true;
+    } catch {
+      if (!opts?.inline) setNotice({ text: "Couldn't copy to the clipboard", error: true });
+      return false;
+    }
+  }, []);
+  const copyConnectionString = useCallback(async (entity: string, opts?: { inline?: boolean }): Promise<CopyResult> => {
+    const profileId = profileNow.current;
+    if (!profileId) return { ok: false, message: "Not connected." };
+    setNotice(null);
+    try {
+      await commands.copyEntityConnectionString(profileId, entity);
+      // Rust has already put it on the clipboard; if the connection changed meanwhile, say nothing about the old one.
+      if (profileNow.current === profileId) setNotice({ text: `Copied the connection string for ${entity}. It is scoped to that entity and was never shown.` });
+      return { ok: true };
+    } catch (e) {
+      const message = String((e as { message?: string } | null)?.message ?? e);
+      if (!opts?.inline && profileNow.current === profileId) setNotice({ text: "Couldn't copy the connection string", error: true, details: true });
+      return { ok: false, message };
+    }
+  }, []);
   const qc = useQueryClient();
   const refresh = useCallback(() => {
     void qc.invalidateQueries({ queryKey: ["entities"] });
@@ -120,7 +143,7 @@ export function ShellProvider({ children }: { children: ReactNode }) {
         // While an update installs, its sheet stays put: other sheets would hide the progress.
         openSheet: (s) => { if (!installStore.busy() || s.kind === "update") setSheet(s); },
         closeSheet: () => setSheet(null),
-        paletteOpen, setPaletteOpen, refresh, copyConnectionString, copyNotice, dismissCopyNotice,
+        paletteOpen, setPaletteOpen, refresh, copyText, copyConnectionString, notice, dismissNotice,
       }}
     >
       {children}

@@ -32,7 +32,8 @@ export interface PaletteContext {
   host: string;
   /** The active connection signs in with Entra ID, so it has no connection string to copy. */
   entra: boolean;
-  copy(text: string): void;
+  /** Copies `text` and says `message` in the status bar. */
+  copy(text: string, message: string): void;
   copyConnectionString(entityId: string): void;
   open(tab: { id: string; kind: EntityKind } | { id: string; kind: "dashboard" }): void;
   connect(profileId: string): void;
@@ -85,7 +86,7 @@ export function buildCommands(c: PaletteContext): PaletteCommand[] {
   const tab = c.activeTab;
   if (tab && c.activeProfileId !== null) {
     const name = tab.kind === "subscription" ? splitSubscriptionId(tab.id).name : tab.id;
-    if (c.host) out.push({ id: "entity:url", group: "This entity", label: `Copy URL of ${name}`, keywords: ["address", "sb://"], run: () => c.copy(entityUrl(c.host, tab.id, tab.kind)) });
+    if (c.host) out.push({ id: "entity:url", group: "This entity", label: `Copy URL of ${name}`, keywords: ["address", "sb://"], run: () => c.copy(entityUrl(c.host, tab.id, tab.kind), `Copied the URL for ${name}`) });
     if (!c.entra) out.push({ id: "entity:string", group: "This entity", label: `Copy connection string of ${name}`, keywords: ["key", "secret"], run: () => c.copyConnectionString(tab.id) });
   }
   return out;

@@ -15,7 +15,8 @@ export const MAX_PATTERN = 200;
 /** Names are far shorter (260 characters at most); anything beyond is not examined. */
 const MAX_NAME = 512;
 const MAX_REPEAT = 100;
-const MAX_PROGRAM = 2000;
+/** Compiled size, in instructions and in nodes emitted (a repeat of an empty group emits nodes but no instructions). */
+const MAX_PROGRAM = 1000;
 const MAX_DEPTH = 50;
 
 export type Compiled = { test(name: string): boolean };
@@ -43,9 +44,28 @@ const CONTROL_ESCAPES: Record<string, string> = { n: "\n", r: "\r", t: "\t", f: 
 /** Escapes with a meaning this matcher does not give them: refused, so a rule never silently means something else. */
 const UNSUPPORTED_ESCAPES = new Set(["1", "2", "3", "4", "5", "6", "7", "8", "9", "k", "p", "P", "c", "u", "x"]);
 
+/** JavaScript's case-insensitive canonical form (non-unicode mode): the upper-case letter when that is one character,
+ *  and never a non-ASCII character folded into ASCII (so `ß`, `ı` and the Kelvin sign keep their own identity). */
+const canon = (ch: string): string => {
+  const up = ch.toUpperCase();
+  if (up.length !== ch.length) return ch;
+  return ch.charCodeAt(0) >= 128 && up.charCodeAt(0) < 128 ? ch : up;
+};
+
+/** A test answered from a table for ASCII, where names are almost always written: a class of a hundred characters is
+ *  then no slower than a single one. Other characters go through `test`. */
+const fast = (test: Test): Test => {
+  const table = new Uint8Array(128);
+  for (let i = 0; i < 128; i++) table[i] = test(String.fromCharCode(i)) ? 1 : 0;
+  return (c) => {
+    const code = c.charCodeAt(0);
+    return code < 128 && c.length === 1 ? table[code] === 1 : test(c);
+  };
+};
+
 const literal = (ch: string): Test => {
-  const lower = ch.toLowerCase();
-  return (c) => c === ch || c.toLowerCase() === lower;
+  const want = canon(ch);
+  return fast((c) => c === ch || canon(c) === want);
 };
 
 class Parser {
@@ -137,7 +157,7 @@ class Parser {
       case "[":
         return this.charClass();
       case ".":
-        return { t: "set", test: (ch) => ch !== "\n" && ch !== "\r" };
+        return { t: "set", test: (ch) => ch !== "\n" && ch !== "\r" && ch !== "\u2028" && ch !== "\u2029" };
       case "^":
         return { t: "assert", kind: "start" };
       case "$":
@@ -163,7 +183,7 @@ class Parser {
     if (c === undefined) return fail("the pattern ends with a backslash");
     if (c === "b") return { t: "assert", kind: "word" };
     if (c === "B") return { t: "assert", kind: "notword" };
-    if (c in CLASS_ESCAPES) return { t: "set", test: CLASS_ESCAPES[c] };
+    if (c in CLASS_ESCAPES) return { t: "set", test: fast(CLASS_ESCAPES[c]) };
     if (c in CONTROL_ESCAPES) return { t: "set", test: literal(CONTROL_ESCAPES[c]) };
     if (UNSUPPORTED_ESCAPES.has(c)) return fail(/\d/.test(c) ? "back-references aren't supported" : `\\${c} isn't supported`);
     return { t: "set", test: literal(c) };
@@ -217,9 +237,13 @@ class Parser {
       tests.push(literal(a.ch));
     }
     const inClass: Test = (ch) => tests.some((t) => t(ch));
-    // Case-insensitive: a character matches when it, or its other-case form, is in the class.
-    const matches: Test = (ch) => inClass(ch) || inClass(ch.toLowerCase()) || inClass(ch.toUpperCase());
-    return { t: "set", test: negated ? not(matches) : matches };
+    // Case-insensitive: a character matches when it, or its other-case form, is in the class (as JavaScript folds it).
+    const lowerOf = (ch: string) => {
+      const l = ch.toLowerCase();
+      return l.length === ch.length ? l : ch;
+    };
+    const matches: Test = (ch) => inClass(ch) || inClass(lowerOf(ch)) || inClass(canon(ch));
+    return { t: "set", test: fast(negated ? not(matches) : matches) };
   }
 }
 
@@ -232,12 +256,15 @@ type Op =
 
 function compile(root: Node): Op[] {
   const prog: Op[] = [];
+  let budget = MAX_PROGRAM;
   const push = (o: Op): number => {
     if (prog.length >= MAX_PROGRAM) fail("the pattern is too large to run");
     prog.push(o);
     return prog.length - 1;
   };
   const emit = (n: Node): void => {
+    // Charged per node, not per instruction: `(){100}` repeated inside itself emits nothing at all, ten billion times over.
+    if (--budget < 0) fail("the pattern is too large to run");
     switch (n.t) {
       case "set":
         push({ op: "char", test: n.test });
@@ -350,6 +377,6 @@ export function compilePattern(pattern: string): PatternResult {
     return { test: (name) => run(prog, name) };
   } catch (e) {
     if (e instanceof PatternError) return { error: e.message };
-    throw e;
+    return { error: "the pattern can't be run" }; // e.g. a stack overflow: a bad rule never breaks the tree
   }
 }

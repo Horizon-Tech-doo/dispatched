@@ -20,7 +20,7 @@ describe("entity tabs", () => {
   it("open from the tree with Enter and show counts on sub-tabs", async () => {
     renderShell("default", { last_profile: "p-logistics" });
     const tree = await screen.findByRole("tree", { name: "Namespace" });
-    await userEvent.click(await within(tree).findByRole("treeitem", { name: "invoice-generate" }));
+    await userEvent.click(await within(tree).findByRole("treeitem", { name: /^invoice-generate(,|$)/ }));
     await focus(tree);
     await userEvent.keyboard("{Enter}");
     const strip = await screen.findByRole("tablist", { name: "Open entities" });

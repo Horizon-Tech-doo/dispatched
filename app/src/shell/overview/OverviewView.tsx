@@ -1,6 +1,6 @@
 import { Check, Copy, KeyRound } from "lucide-react";
 import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { commands, useEntityDetails, useProfiles, useSubscriptionsFor, type EntityCounts, type EntityDetails, type SubscriptionInfo } from "@/engine";
+import { useEntityDetails, useProfiles, useSubscriptionsFor, type EntityCounts, type EntityDetails, type SubscriptionInfo } from "@/engine";
 import { Button, CountBadge, EmptyState, Hint, IconButton, Problem, Skeleton, SkeletonRows, cn, formatBytes, formatClock, formatNumber } from "@/ui";
 import { useShell } from "../context";
 import { copyFailureBody } from "../copyFailure";
@@ -56,12 +56,13 @@ function SizeRow({ bytes, maxMb }: { bytes: number; maxMb: number | null }) {
 }
 
 /** One address: its name and copy button on a line, the address below it where a long one can wrap. */
-function Address({ label, copyLabel, value }: { label: string; copyLabel: string; value: string | null }) {
+function Address({ label, copyLabel, value, said }: { label: string; copyLabel: string; value: string | null; /** What the status bar says after a copy. */ said: string }) {
   const [state, flash] = useFlash();
+  const { copyText } = useShell();
   const copy = () => {
     if (value === null) return;
-    if (!navigator.clipboard) return flash("failed");
-    navigator.clipboard.writeText(value).then(() => flash("copied"), () => flash("failed"));
+    // The failure is shown here, beside the button, so the status bar stays quiet about it.
+    void copyText(value, said, { inline: true }).then((ok) => flash(ok ? "copied" : "failed"));
   };
   return (
     <div className="py-1">
@@ -93,7 +94,8 @@ function Address({ label, copyLabel, value }: { label: string; copyLabel: string
   );
 }
 
-function ConnectionStringCopy({ profileId, entity, eligible, entra }: { profileId: string | null; entity: string; eligible: boolean; entra: boolean }) {
+function ConnectionStringCopy({ entity, eligible, entra }: { entity: string; eligible: boolean; entra: boolean }) {
+  const { copyConnectionString } = useShell();
   const [state, setState] = useState<{ kind: "idle" | "copied" } | { kind: "failed"; message: string }>({ kind: "idle" });
   useEffect(() => {
     if (state.kind !== "copied") return;
@@ -101,14 +103,10 @@ function ConnectionStringCopy({ profileId, entity, eligible, entra }: { profileI
     return () => clearTimeout(t);
   }, [state]);
   const copy = async () => {
-    if (!profileId) return;
     setState({ kind: "idle" });
-    try {
-      await commands.copyEntityConnectionString(profileId, entity);
-      setState({ kind: "copied" });
-    } catch (e) {
-      setState({ kind: "failed", message: String((e as { message?: string } | null)?.message ?? e) });
-    }
+    // The status bar says it was copied; a failure is a Problem right here, where the button is.
+    const r = await copyConnectionString(entity, { inline: true });
+    setState(r.ok ? { kind: "copied" } : { kind: "failed", message: r.message });
   };
   return (
     <div className="mt-2 flex flex-col gap-1.5">
@@ -309,9 +307,9 @@ export function OverviewView({ tab }: { tab: EntityTab }) {
         )}
         <section aria-label="Addresses">
           <h2 className={H2}>Addresses</h2>
-          <Address label="URL" copyLabel="Copy URL" value={url} />
-          {kind !== "topic" && <Address label="Dead-letter URL" copyLabel="Copy dead-letter URL" value={dlq} />}
-          <ConnectionStringCopy profileId={conn.profileId} entity={tab.id} eligible={eligible} entra={entra} />
+          <Address label="URL" copyLabel="Copy URL" value={url} said={`Copied the URL for ${tab.id}`} />
+          {kind !== "topic" && <Address label="Dead-letter URL" copyLabel="Copy dead-letter URL" value={dlq} said={`Copied the dead-letter URL for ${tab.id}`} />}
+          <ConnectionStringCopy entity={tab.id} eligible={eligible} entra={entra} />
         </section>
       </div>
       <div className="flex min-w-[320px] max-w-[680px] flex-1 flex-col">

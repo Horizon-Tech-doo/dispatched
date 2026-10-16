@@ -39,6 +39,16 @@ describe("overview", () => {
     await userEvent.click(within(addresses).getByRole("button", { name: "Copy connection string" }));
     await waitFor(() => expect(mock.calls.some((c) => c.cmd === "copy_entity_connection_string")).toBe(true));
     expect(screen.queryByText(/SharedAccessKey/)).toBeNull();
+    // The same status bar line as the tree's and the palette's.
+    expect(await within(screen.getByRole("contentinfo")).findByText("Copied the connection string for invoice-generate. It is scoped to that entity and was never shown.")).toBeInTheDocument();
+  });
+
+  it("says in the status bar which URL was copied", async () => {
+    const user = userEvent.setup();
+    renderShell("default", seed("invoice-generate", "queue"));
+    const addresses = await screen.findByRole("region", { name: "Addresses" });
+    await user.click(within(addresses).getByRole("button", { name: "Copy URL" }));
+    expect(await within(screen.getByRole("contentinfo")).findByText("Copied the URL for invoice-generate")).toBeInTheDocument();
   });
 
   it("reading the details logs nothing unless it fails", async () => {

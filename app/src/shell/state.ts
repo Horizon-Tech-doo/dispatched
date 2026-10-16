@@ -107,7 +107,7 @@ function parseRule(v: unknown): HighlightRule | null {
   const m = v.match;
   if (!isObj(m)) return null;
   if (m.kind === "name") return typeof m.pattern === "string" && m.pattern.length <= MAX_PATTERN_LENGTH ? { id: v.id, color, match: { kind: "name", pattern: m.pattern } } : null;
-  if (m.kind === "count" && COUNT_KINDS.includes(m.count as CountKind) && typeof m.atLeast === "number" && Number.isFinite(m.atLeast) && m.atLeast >= 0)
+  if (m.kind === "count" && COUNT_KINDS.includes(m.count as CountKind) && typeof m.atLeast === "number" && Number.isInteger(m.atLeast) && m.atLeast >= 0)
     return { id: v.id, color, match: { kind: "count", count: m.count as CountKind, atLeast: m.atLeast } };
   return null;
 }
@@ -115,7 +115,12 @@ function parseRule(v: unknown): HighlightRule | null {
 function parseExplorer(v: unknown): ExplorerOptions {
   if (!isObj(v)) return defaultExplorer;
   const known = Array.isArray(v.counts) ? COUNT_KINDS.filter((k) => (v.counts as unknown[]).includes(k)) : [];
-  const rules = (Array.isArray(v.rules) ? v.rules : []).map(parseRule).filter((r): r is HighlightRule => r !== null).slice(0, MAX_RULES);
+  const seen = new Set<string>();
+  const rules = (Array.isArray(v.rules) ? v.rules : [])
+    .map(parseRule)
+    // A repeated id is a hand-edit: the first rule keeps it, the rest go (ids key the options sheet's rows).
+    .filter((r): r is HighlightRule => r !== null && !seen.has(r.id) && !!seen.add(r.id))
+    .slice(0, MAX_RULES);
   return {
     // Kept in the tree's own order (active, scheduled, transfer DLQ, dead-letter); none known means the default.
     counts: known.length ? known : defaultExplorer.counts,

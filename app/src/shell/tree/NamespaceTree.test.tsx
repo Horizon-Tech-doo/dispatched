@@ -18,7 +18,7 @@ describe("NamespaceTree", () => {
   it("lists queues and topics with counts, amber only on dead letters", async () => {
     renderShell("default", { last_profile: "p-logistics" });
     const t = await tree();
-    const row = await within(t).findByRole("treeitem", { name: "invoice-generate" });
+    const row = await within(t).findByRole("treeitem", { name: /^invoice-generate(,|$)/ });
     expect(within(row).getByText("1,284").className).not.toContain("text-accent");
     expect(within(row).getByText("37").className).toContain("text-accent");
   });
@@ -26,26 +26,26 @@ describe("NamespaceTree", () => {
   it("renders a dead-letter count only when it is above zero, and keeps a zero active count", async () => {
     renderShell("default", { last_profile: "p-logistics" });
     const t = await tree();
-    const none = await within(t).findByRole("treeitem", { name: "customs-docs" });
+    const none = await within(t).findByRole("treeitem", { name: /^customs-docs(,|$)/ });
     expect(within(none).getByText("112")).toBeInTheDocument();
     expect(within(none).queryByText("0")).not.toBeInTheDocument();
-    const dead = within(t).getByRole("treeitem", { name: "returns-intake" });
+    const dead = within(t).getByRole("treeitem", { name: /^returns-intake(,|$)/ });
     expect(within(dead).getByText("211").className).toContain("text-accent");
     // A zero active count stays (billing: 0 active, 0 dead letters).
-    await userEvent.click(within(t).getByRole("treeitem", { name: "shipment-events" }));
+    await userEvent.click(within(t).getByRole("treeitem", { name: /^shipment-events(,|$)/ }));
     await focus(t);
     await userEvent.keyboard("{ArrowRight}");
-    const empty = await within(t).findByRole("treeitem", { name: "billing" });
+    const empty = await within(t).findByRole("treeitem", { name: /^billing(,|$)/ });
     expect(within(empty).getByText("0").className).toContain("text-muted");
   });
 
   it("counts are 12px and flush right, group rows are semibold muted", async () => {
     renderShell("default", { last_profile: "p-logistics" });
     const t = await tree();
-    const row = await within(t).findByRole("treeitem", { name: "invoice-generate" });
+    const row = await within(t).findByRole("treeitem", { name: /^invoice-generate(,|$)/ });
     expect(within(row).getByText("1,284").className).toContain("text-12");
     expect(within(row).getByText("37").className).not.toContain("min-w");
-    const group = within(t).getByRole("treeitem", { name: "Queues" });
+    const group = within(t).getByRole("treeitem", { name: /^Queues(,|$)/ });
     const label = within(group).getByText("Queues");
     expect(label.className).toContain("font-semibold");
     expect(label.className).toContain("text-muted");
@@ -54,7 +54,7 @@ describe("NamespaceTree", () => {
   it("marks a production namespace with plain amber text, not the filled badge", async () => {
     renderShell("default", { last_profile: "p-logistics" });
     const t = await tree();
-    const ns = await within(t).findByRole("treeitem", { name: "sb-logistics-prod" });
+    const ns = await within(t).findByRole("treeitem", { name: /^sb-logistics-prod(,|$)/ });
     const prod = within(ns).getByText("PROD");
     expect(prod.className).toContain("text-accent");
     expect(prod.className).not.toContain("bg-accent");
@@ -63,30 +63,30 @@ describe("NamespaceTree", () => {
   it("has no PROD mark on a non-production namespace", async () => {
     renderShell("default", { last_profile: "p-logistics-dev" });
     const t = await tree();
-    const ns = await within(t).findByRole("treeitem", { name: "sb-logistics-dev" });
+    const ns = await within(t).findByRole("treeitem", { name: /^sb-logistics-dev(,|$)/ });
     expect(within(ns).queryByText("PROD")).not.toBeInTheDocument();
   });
 
   it("loads subscriptions when a topic expands", async () => {
     const { mock } = renderShell("default", { last_profile: "p-logistics" });
     const t = await tree();
-    const row = await within(t).findByRole("treeitem", { name: "shipment-events" });
+    const row = await within(t).findByRole("treeitem", { name: /^shipment-events(,|$)/ });
     await userEvent.click(row);
     await focus(t);
     await userEvent.keyboard("{ArrowRight}");
-    expect(await within(t).findByRole("treeitem", { name: "tracking-sync" })).toBeInTheDocument();
+    expect(await within(t).findByRole("treeitem", { name: /^tracking-sync(,|$)/ })).toBeInTheDocument();
     expect(mock.calls).toContainEqual({ cmd: "list_subscriptions", args: { profileId: "p-logistics", topic: "shipment-events" } });
   });
 
   it("does not load subscriptions of collapsed topics", async () => {
     const { mock } = renderShell("default", { last_profile: "p-logistics" });
-    await within(await tree()).findByRole("treeitem", { name: "shipment-events" });
+    await within(await tree()).findByRole("treeitem", { name: /^shipment-events(,|$)/ });
     expect(mock.calls.filter((c) => c.cmd === "list_subscriptions")).toEqual([]);
   });
 
   it("selects a row on click", async () => {
     renderShell("default", { last_profile: "p-logistics" });
-    const row = await within(await tree()).findByRole("treeitem", { name: "label-print" });
+    const row = await within(await tree()).findByRole("treeitem", { name: /^label-print(,|$)/ });
     await userEvent.click(row);
     expect(row).toHaveAttribute("aria-selected", "true");
   });
@@ -94,16 +94,16 @@ describe("NamespaceTree", () => {
   it("filters across loaded entities", async () => {
     renderShell("default", { last_profile: "p-logistics" });
     const t = await tree();
-    await within(t).findByRole("treeitem", { name: "label-print" });
+    await within(t).findByRole("treeitem", { name: /^label-print(,|$)/ });
     await focus(screen.getByRole("searchbox", { name: "Filter entities" }));
     await userEvent.keyboard("LABEL");
-    await waitFor(() => expect(within(t).queryByRole("treeitem", { name: "invoice-generate" })).not.toBeInTheDocument());
-    expect(within(t).getByRole("treeitem", { name: "label-print" })).toBeInTheDocument();
+    await waitFor(() => expect(within(t).queryByRole("treeitem", { name: /^invoice-generate(,|$)/ })).not.toBeInTheDocument());
+    expect(within(t).getByRole("treeitem", { name: /^label-print(,|$)/ })).toBeInTheDocument();
   });
 
   it("says so when nothing matches the filter", async () => {
     renderShell("default", { last_profile: "p-logistics" });
-    await within(await tree()).findByRole("treeitem", { name: "label-print" });
+    await within(await tree()).findByRole("treeitem", { name: /^label-print(,|$)/ });
     await focus(screen.getByRole("searchbox", { name: "Filter entities" }));
     await userEvent.keyboard("zzz");
     expect(await screen.findByRole("heading", { name: "No matches" })).toBeInTheDocument();
@@ -116,12 +116,12 @@ describe("NamespaceTree", () => {
       sentence("This identity can't list entities in sb-logistics-prod. Grant it Manage rights to see everything, or edit this connection to pin more."),
     ).toBeInTheDocument();
     expect(screen.queryByText(/needs Manage,EntityRead/)).not.toBeInTheDocument(); // the engine's wording is not echoed
-    expect(within(await tree()).getByRole("treeitem", { name: "orders" })).toBeInTheDocument();
+    expect(within(await tree()).getByRole("treeitem", { name: /^orders(,|$)/ })).toBeInTheDocument();
   });
 
   it("shows pinned subscriptions by name with their topic beside it", async () => {
     renderShell("forbidden", { last_profile: "p-logistics" });
-    const row = await within(await tree()).findByRole("treeitem", { name: "tracking-sync" });
+    const row = await within(await tree()).findByRole("treeitem", { name: /^tracking-sync(,|$)/ });
     expect(within(row).getByText("shipment-events").className).toContain("text-muted");
   });
 
@@ -181,7 +181,7 @@ describe("NamespaceTree", () => {
     const user = userEvent.setup();
     renderShell("default", { last_profile: "p-logistics" });
     const t = await tree();
-    await user.click(await within(t).findByRole("treeitem", { name: "label-print" }));
+    await user.click(await within(t).findByRole("treeitem", { name: /^label-print(,|$)/ }));
     fireEvent.contextMenu(t, { button: 0 });
     const menu = await screen.findByRole("menu");
     expect(within(menu).getByRole("menuitem", { name: "Copy entity path" })).not.toHaveAttribute("aria-disabled", "true");
@@ -193,7 +193,7 @@ describe("NamespaceTree", () => {
     const user = userEvent.setup();
     renderShell("default", { last_profile: "p-logistics" });
     const t = await tree();
-    await user.click(await within(t).findByRole("treeitem", { name: "label-print" }));
+    await user.click(await within(t).findByRole("treeitem", { name: /^label-print(,|$)/ }));
     fireEvent.contextMenu(t, { button: 2 });
     expect(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Open" })).toHaveAttribute("aria-disabled", "true");
   });
@@ -202,20 +202,20 @@ describe("NamespaceTree", () => {
     const user = userEvent.setup();
     renderShell("default", { last_profile: "p-logistics" });
     const t = await tree();
-    await user.click(await within(t).findByRole("treeitem", { name: "shipment-events" }));
+    await user.click(await within(t).findByRole("treeitem", { name: /^shipment-events(,|$)/ }));
     await focus(t);
     await user.keyboard("{ArrowRight}");
-    await within(t).findByRole("treeitem", { name: "tracking-sync" });
+    await within(t).findByRole("treeitem", { name: /^tracking-sync(,|$)/ });
     await focus(screen.getByRole("searchbox", { name: "Filter entities" }));
     await user.keyboard("shipment");
-    expect(within(t).getByRole("treeitem", { name: "billing" })).toBeInTheDocument();
-    expect(within(t).getByRole("treeitem", { name: "warehouse-notify" })).toBeInTheDocument();
+    expect(within(t).getByRole("treeitem", { name: /^billing(,|$)/ })).toBeInTheDocument();
+    expect(within(t).getByRole("treeitem", { name: /^warehouse-notify(,|$)/ })).toBeInTheDocument();
   });
 
   it("offers open, copy and refresh in the context menu", async () => {
     const user = userEvent.setup();
     const { mock } = renderShell("default", { last_profile: "p-logistics" });
-    const row = await within(await tree()).findByRole("treeitem", { name: "invoice-generate" });
+    const row = await within(await tree()).findByRole("treeitem", { name: /^invoice-generate(,|$)/ });
     fireEvent.contextMenu(row);
     const menu = await screen.findByRole("menu");
     expect(row).toHaveAttribute("aria-selected", "true");
@@ -230,7 +230,7 @@ describe("NamespaceTree", () => {
 
   it("disables entity actions on a group row", async () => {
     renderShell("default", { last_profile: "p-logistics" });
-    const group = await within(await tree()).findByRole("treeitem", { name: "Queues" });
+    const group = await within(await tree()).findByRole("treeitem", { name: /^Queues(,|$)/ });
     fireEvent.contextMenu(group);
     const menu = await screen.findByRole("menu");
     expect(within(menu).getByRole("menuitem", { name: "Open" })).toHaveAttribute("aria-disabled", "true");
@@ -265,10 +265,10 @@ describe("NamespaceTree", () => {
       },
     });
     const t = await tree();
-    const row = await within(t).findByRole("treeitem", { name: "invoice-generate" });
+    const row = await within(t).findByRole("treeitem", { name: /^invoice-generate(,|$)/ });
     expect(within(row).queryByText("1,284")).not.toBeInTheDocument();
     expect(within(row).getByText("37").className).toContain("text-accent");
-    const quiet = within(t).getByRole("treeitem", { name: "label-print" });
+    const quiet = within(t).getByRole("treeitem", { name: /^label-print(,|$)/ });
     expect(quiet.textContent).toBe("label-print");
   });
 
@@ -282,7 +282,7 @@ describe("NamespaceTree", () => {
       },
     });
     const t = await tree();
-    const topic = await within(t).findByRole("treeitem", { name: "shipment-events" });
+    const topic = await within(t).findByRole("treeitem", { name: /^shipment-events(,|$)/ });
     expect(topic.querySelector('[style*="--label-violet"]')).not.toBeNull();
   });
 
@@ -300,28 +300,47 @@ describe("NamespaceTree", () => {
     await menuOn(/invoice-generate/);
     await user.click(await screen.findByRole("menuitem", { name: "Copy connection string" }));
     await waitFor(() => expect(mock.calls.some((c) => c.cmd === "copy_entity_connection_string")).toBe(true));
-    // The string never reaches the webview: only the outcome is shown.
-    expect(await screen.findByText(/Copied the connection string for invoice-generate/)).toBeInTheDocument();
+    // The string never reaches the webview: only the outcome is shown, in the status bar.
+    const bar = screen.getByRole("contentinfo");
+    expect(await within(bar).findByText("Copied the connection string for invoice-generate. It is scoped to that entity and was never shown.")).toBeInTheDocument();
     expect(screen.queryByText(/SharedAccessKey/)).toBeNull();
+    expect(within(t).queryByRole("status")).toBeNull();
   });
 
-  it("says why the connection string could not be copied", async () => {
+  it("says in the status bar which URL was copied, without moving the tree", async () => {
     const user = userEvent.setup();
-    renderShell("copy-scoped", { last_profile: "p-logistics" });
+    renderShell("default", { last_profile: "p-logistics" });
+    const t = await tree();
+    const before = within(t).getByRole("treeitem", { name: /invoice-generate/ }).parentElement!.style.height;
+    fireEvent.contextMenu(await within(t).findByRole("treeitem", { name: /invoice-generate/ }));
+    await user.click(await screen.findByRole("menuitem", { name: "Copy dead-letter URL" }));
+    expect(await within(screen.getByRole("contentinfo")).findByText("Copied the dead-letter URL for invoice-generate")).toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "Namespace" }).querySelector("[role=alert], [role=status]")).toBeNull();
+    expect(within(t).getByRole("treeitem", { name: /invoice-generate/ }).parentElement!.style.height).toBe(before);
+  });
+
+  it("says in the status bar that the connection string could not be copied, with a way to the details", async () => {
+    const user = userEvent.setup();
+    renderShell("copy-scoped", {
+      last_profile: "p-logistics",
+      "shell:p-logistics": { tabs: [], activeTab: null, expanded: ["group:queues"], selected: null, layout: { treeSize: 18, drawerOpen: false, drawerSize: 18, drawerTab: "jobs" } },
+    });
     const t = await tree();
     fireEvent.contextMenu(await within(t).findByRole("treeitem", { name: /invoice-generate/ }));
     await user.click(await screen.findByRole("menuitem", { name: "Copy connection string" }));
-    const alert = await screen.findByRole("alert");
-    expect(within(alert).getByText("Couldn't copy the connection string")).toBeInTheDocument();
-    expect(within(alert).getByText(/scoped to another entity/)).toBeInTheDocument();
-    await user.click(within(alert).getByRole("button", { name: "Dismiss" }));
-    expect(screen.queryByRole("alert")).toBeNull();
+    const bar = screen.getByRole("contentinfo");
+    expect(await within(bar).findByText(/Couldn't copy the connection string/)).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Jobs and activity" })).toBeNull();
+    await user.click(within(bar).getByRole("button", { name: "Details" }));
+    const drawer = await screen.findByRole("region", { name: "Jobs and activity" });
+    expect(within(drawer).getByRole("tab", { name: /Activity/, selected: true })).toBeInTheDocument();
+    expect(within(drawer).getByText(/Copying the connection string for invoice-generate failed/)).toBeInTheDocument();
   });
 
   it("offers no dead-letter URL for a topic", async () => {
     renderShell("default", { last_profile: "p-logistics" });
     const t = await tree();
-    fireEvent.contextMenu(await within(t).findByRole("treeitem", { name: "shipment-events" }));
+    fireEvent.contextMenu(await within(t).findByRole("treeitem", { name: /^shipment-events(,|$)/ }));
     expect(await screen.findByRole("menuitem", { name: "Copy dead-letter URL" })).toHaveAttribute("aria-disabled", "true");
     expect(screen.getByRole("menuitem", { name: "Copy URL" })).not.toHaveAttribute("aria-disabled", "true");
   });
@@ -344,5 +363,122 @@ describe("NamespaceTree", () => {
       const saved = mock.calls.filter((c) => c.cmd === "settings_set" && (c.args as { key: string }).key === "shell:p-logistics").at(-1);
       expect((saved?.args as { value: { treeFilter: string } } | undefined)?.value.treeFilter).toBe("invoice");
     });
+  });
+
+  const seeded = (explorer: Record<string, unknown>, extra: Record<string, unknown> = {}, scenario = "default") =>
+    renderShell(scenario as "default", {
+      last_profile: "p-logistics",
+      "shell:p-logistics": {
+        tabs: [], activeTab: null, expanded: ["group:queues", "group:topics", "t:shipment-events"], selected: null,
+        layout: { treeSize: 18, drawerOpen: false, drawerSize: 18, drawerTab: "activity" },
+        explorer, ...extra,
+      },
+    });
+  const COUNTS = { counts: ["active", "scheduled", "dead-letter"], rules: [{ id: "r", color: "rose", match: { kind: "count", count: "dead-letter", atLeast: 100 } }], openOn: "overview" };
+
+  it("names a row with its counts and its highlight, for a screen reader", async () => {
+    seeded(COUNTS);
+    const t = await tree();
+    expect(await within(t).findByRole("treeitem", { name: "returns-intake, 48 active, 211 dead-letter, highlighted rose: dead-letter at least 100" })).toBeInTheDocument();
+    expect(within(t).getByRole("treeitem", { name: "invoice-generate, 1,284 active, 3 scheduled, 37 dead-letter" })).toBeInTheDocument();
+    expect(within(t).getAllByRole("treeitem", { name: /highlighted/ })).toHaveLength(2); // returns-intake and tracking-sync (3,417)
+    expect(within(t).getByRole("treeitem", { name: "label-print, 6 active" })).toBeInTheDocument();
+    expect(within(t).getByRole("treeitem", { name: /^shipment-events(,|$)/ })).toBeInTheDocument();
+  });
+
+  it("shows the scheduled count of a queue when scheduled counts are on", async () => {
+    seeded(COUNTS);
+    const t = await tree();
+    const row = await within(t).findByRole("treeitem", { name: /^invoice-generate/ });
+    expect(within(row).getByText("3")).toBeInTheDocument();
+  });
+
+  it("gives each chosen count a fixed slot as wide as its widest value, so position tells the kind", async () => {
+    seeded(COUNTS);
+    const t = await tree();
+    await within(t).findByRole("treeitem", { name: /^invoice-generate/ });
+    const widths = (kind: string) => [...new Set([...t.querySelectorAll<HTMLElement>(`[data-count-slot="${kind}"]`)].map((e) => e.style.getPropertyValue("--w")))];
+    expect(widths("active")).toEqual(["5ch"]); // 1,284
+    expect(widths("scheduled")).toEqual(["1ch"]);
+    expect(widths("dead-letter")).toEqual(["5ch"]); // 3,417 (a subscription below)
+    expect(t.querySelector('[data-count-slot="transfer-dlq"]')).toBeNull();
+    // A zero is a blank slot, not a missing one.
+    const quiet = within(t).getByRole("treeitem", { name: /^label-print/ });
+    expect(quiet.querySelector('[data-count-slot="dead-letter"]')?.textContent).toBe("");
+    expect(quiet.querySelectorAll("[data-count-slot]")).toHaveLength(3);
+  });
+
+  it("keeps active and dead-letter counts below 230px and gives way with scheduled and transfer DLQ first", async () => {
+    seeded({ ...COUNTS, counts: ["active", "scheduled", "transfer-dlq", "dead-letter"] });
+    const t = await tree();
+    const row = await within(t).findByRole("treeitem", { name: /^invoice-generate/ });
+    const slot = (k: string) => row.querySelector<HTMLElement>(`[data-count-slot="${k}"]`)!;
+    expect(slot("scheduled").className).toContain("@[230px]:");
+    expect(slot("transfer-dlq").className).toContain("@[230px]:");
+    expect(slot("active").className).not.toContain("hidden");
+    expect(slot("dead-letter").className).not.toContain("hidden");
+    // Names truncate, but never to less than 6 characters from 230px up (2 below: there the counts come first).
+    expect(within(row).getByText("invoice-generate").className).toContain("@[230px]:min-w-[6ch]");
+    expect(slot("active").className).toContain("@[230px]:min-w-[var(--w)]");
+  });
+
+  it("explains a count in a tooltip", async () => {
+    seeded(COUNTS);
+    const t = await tree();
+    const row = await within(t).findByRole("treeitem", { name: /^invoice-generate/ });
+    expect(row.querySelector("[data-count-slot] [title], [data-count-slot][title]")).toBeNull(); // no native titles on counts
+    fireEvent.pointerMove(within(row).getByText("3").parentElement!);
+    expect(await screen.findByRole("tooltip", {}, { timeout: 2000 })).toHaveTextContent("Scheduled");
+  });
+
+  it("reserves a swatch slot at the right edge of every row when the connection has a rule", async () => {
+    seeded(COUNTS);
+    const t = await tree();
+    await within(t).findByRole("treeitem", { name: /^invoice-generate/ });
+    const rows = within(t).getAllByRole("treeitem").filter((r) => !/^(sb-|Queues|Topics)/.test(r.getAttribute("aria-label") ?? ""));
+    expect(rows.length).toBeGreaterThan(6);
+    for (const r of rows) expect(r.querySelector("[data-swatch-slot]"), r.getAttribute("aria-label") ?? "").not.toBeNull();
+    const returns = within(t).getByRole("treeitem", { name: /^returns-intake/ });
+    const slot = returns.querySelector("[data-swatch-slot]")!;
+    expect(slot.querySelector('[style*="--label-rose"]')).not.toBeNull();
+    // The swatch is the last thing in the row and sits clear of the dead-letter count.
+    expect(slot.parentElement!.className).toContain("gap-1"); // 4px between slots, and 2px more before the swatch: 6px clear of the count
+    expect(slot.className).toContain("ml-0.5");
+    expect(slot.parentElement!.lastElementChild).toBe(slot);
+    expect(slot.previousElementSibling?.getAttribute("data-count-slot")).toBe("dead-letter");
+    expect(within(t).getByRole("treeitem", { name: /^label-print/ }).querySelector("[data-swatch-slot]")?.children).toHaveLength(0);
+    fireEvent.pointerMove(slot);
+    expect(await screen.findByRole("tooltip", {}, { timeout: 2000 })).toHaveTextContent("Rose: dead-letter at least 100");
+  });
+
+  it("reserves no swatch slot without rules", async () => {
+    seeded({ ...COUNTS, rules: [] });
+    const t = await tree();
+    await within(t).findByRole("treeitem", { name: /^invoice-generate/ });
+    expect(t.querySelector("[data-swatch-slot]")).toBeNull();
+  });
+
+  it("says nothing about a connection string copy that finishes after the connection was switched", async () => {
+    function Probe() {
+      const sh = useShell();
+      return (
+        <>
+          <button onClick={() => void sh.copyConnectionString("invoice-generate")}>probe copy</button>
+          <button onClick={() => void sh.conn.connect("p-partner")}>probe switch</button>
+        </>
+      );
+    }
+    const { mock } = renderShell("default", { last_profile: "p-logistics" }, <Probe />);
+    await tree();
+    let release: () => void = () => {};
+    const real = mock.invoke.bind(mock);
+    mock.invoke = ((cmd: string, args?: Record<string, unknown>) =>
+      cmd === "copy_entity_connection_string" ? new Promise((res) => (release = () => res(real(cmd, args)))) : real(cmd, args)) as typeof mock.invoke;
+    await userEvent.click(screen.getByRole("button", { name: "probe copy" }));
+    await userEvent.click(screen.getByRole("button", { name: "probe switch" }));
+    await waitFor(() => expect(screen.getByRole("banner")).toHaveTextContent("Partner gateway"));
+    release();
+    await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
+    expect(within(screen.getByRole("contentinfo")).queryByText(/connection string/)).toBeNull();
   });
 });

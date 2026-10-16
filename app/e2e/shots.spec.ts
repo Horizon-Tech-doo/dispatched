@@ -474,9 +474,47 @@ function explorerShots(): Shot[] {
       viewportOnly: true,
     },
     {
+      // Valid rules: each says how many loaded entities it would mark; the checks show which counts are on.
+      name: "explorer-options-preview",
+      path: path({
+        counts: ["active", "scheduled", "dead-letter"],
+        rules: [rules[0], rules[1], { id: "r4", color: "green", match: { kind: "name", pattern: "-sync$" } }],
+        openOn: "overview",
+      }),
+      ready,
+      prepare: async (page) => {
+        await page.getByRole("button", { name: "Explorer options" }).click();
+        const sheet = page.getByRole("dialog", { name: "Explorer options for Logistics" });
+        await sheet.getByText("Matches 1 loaded entity").first().waitFor();
+      },
+      holds: (p) => p.getByRole("dialog", { name: "Explorer options for Logistics" }),
+      viewportOnly: true,
+    },
+    {
+      // The connection string went to the clipboard from Rust: the status bar says so, and nothing in the tree moved.
+      name: "copy-feedback",
+      path: path({ counts: ["active", "dead-letter"], rules: [], openOn: "overview" }),
+      ready,
+      prepare: async (page) => {
+        await tree(page).getByRole("treeitem", { name: /^invoice-generate/ }).click({ button: "right" });
+        await page.getByRole("menuitem", { name: "Copy connection string" }).click();
+        await page.getByRole("contentinfo").getByText(/^Copied the connection string for invoice-generate/).waitFor();
+      },
+    },
+    {
+      name: "copy-feedback-failed",
+      path: path({ counts: ["active", "dead-letter"], rules: [], openOn: "overview" }).replace("scenario=default", "scenario=copy-scoped"),
+      ready,
+      prepare: async (page) => {
+        await tree(page).getByRole("treeitem", { name: /^invoice-generate/ }).click({ button: "right" });
+        await page.getByRole("menuitem", { name: "Copy connection string" }).click();
+        await page.getByRole("contentinfo").getByRole("button", { name: "Details" }).waitFor();
+      },
+    },
+    {
       // A narrow tree: counts never truncate, the names give way.
       name: "tree-highlights-narrow",
-      path: path({ counts: ["active", "scheduled", "dead-letter"], rules, openOn: "overview" }, 11),
+      path: path({ counts: ["active", "scheduled", "transfer-dlq", "dead-letter"], rules, openOn: "overview" }, 11),
       ready,
     },
   ];

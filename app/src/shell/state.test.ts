@@ -119,6 +119,21 @@ describe("explorer options", () => {
     expect(many.explorer.rules).toHaveLength(20);
   });
 
+  it("drops a count rule with a fractional threshold and repeated rule ids", () => {
+    const s = parseProfileShell({
+      explorer: {
+        rules: [
+          rule({ id: "frac", match: { kind: "count", count: "active", atLeast: 1.5 } }),
+          rule({ id: "dup" }),
+          rule({ id: "dup", color: "blue", match: { kind: "name", pattern: "x" } }),
+          rule({ id: "ok", match: { kind: "count", count: "active", atLeast: 0 } }),
+        ],
+      },
+    });
+    expect(s.explorer.rules.map((r) => r.id)).toEqual(["dup", "ok"]);
+    expect(s.explorer.rules[0].color).toBe("rose");
+  });
+
   it("keeps the counts that are known, and openOn only from its three values", () => {
     expect(parseProfileShell({ explorer: { counts: ["scheduled", "transfer", "dead-letter", 4] } }).explorer.counts).toEqual(["scheduled", "dead-letter"]);
     expect(parseProfileShell({ explorer: { counts: ["bogus"] } }).explorer.counts).toEqual(["active", "dead-letter"]);
