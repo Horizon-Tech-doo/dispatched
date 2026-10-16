@@ -395,15 +395,21 @@ function dashboardShots(): Shot[] {
       path: path(),
       ready: (p) => grid(p).getByText("tracking-sync"),
       prepare: async (p) => {
-        await p.getByRole("button", { name: "Only with dead letters" }).click();
+        await p.getByRole("radio", { name: /^With dead letters/ }).click();
         await expect(grid(p).getByText("customs-docs")).toHaveCount(0);
       },
     },
     {
-      // The identity can't list the namespace: pinned entities only, no counts, and no kind claimed for any of them.
+      // The identity can't list the namespace: pinned entities only, no counts, and no kind claimed for them (dashed glyph).
       name: "dashboard-limited",
       path: path("forbidden"),
-      ready: (p) => p.getByRole("main").getByText("Showing pinned entities only"),
+      ready: (p) => p.getByText(/pinned entities · Counts are unavailable/),
+    },
+    {
+      // The service reported no counts: `?` cells, and the status line counts the entities.
+      name: "dashboard-unknown-counts",
+      path: path("counts-unknown"),
+      ready: (p) => p.getByText(/entities with unknown counts/),
     },
     {
       // Counts read by peeking: `~N`, and the status line says so.

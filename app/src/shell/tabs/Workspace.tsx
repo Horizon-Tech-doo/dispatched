@@ -31,7 +31,7 @@ export function Workspace() {
       {shell.tabs.length > 0 && <EntityTabs />}
       <div className="min-h-0 flex-1">
         {active ? (
-          isEntityTab(active) ? <EntityView key={active.id} tab={active} /> : <DashboardView key={active.id} />
+          isEntityTab(active) ? <EntityView key={active.id} tab={active} /> : <DashboardView key={shellProfileId} />
         ) : (
           <EmptyState
             title="Open an entity"

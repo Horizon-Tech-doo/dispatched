@@ -16,6 +16,9 @@ const errorKind = (e: Error) => (e as { kind?: string }).kind ?? "";
 
 const glyphOf = { namespace: "namespace", queue: "queue", topic: "topic", subscription: "subscription" } as const;
 
+/** A pinned entity is known by name only: unless it is a subscription (the id says so), its kind is not known. */
+const glyphKind = (n: NsNode) => (n.kind === "known" && n.entity?.kind !== "subscription" ? "unknown" : (n.entity?.kind ?? glyphOf[n.kind as keyof typeof glyphOf]));
+
 /** Unlaid-out panes measure 0x0; the tree renders a screenful until it is measured. */
 const FLOOR = { width: 280, height: 640 };
 
@@ -63,7 +66,7 @@ function Row({ n, production, onRetry }: { n: NsNode; production: boolean; onRet
     default:
       return (
         <>
-          <EntityGlyph kind={n.entity?.kind ?? glyphOf[n.kind as keyof typeof glyphOf]} className="shrink-0 text-icon" />
+          <EntityGlyph kind={glyphKind(n)} className="shrink-0 text-icon" />
           {n.kind === "known" && n.topic ? (
             // Name first, topic after it as secondary text: only the topic gives way when the row is narrow.
             <>
