@@ -42,6 +42,21 @@ export const shots: {
     },
   },
   {
+    name: "catalogue-grid-sorted",
+    path: "/#catalogue",
+    prepare: async (page) => {
+      await page.getByRole("heading", { name: "Grid" }).first().evaluate((el) => el.scrollIntoView({ block: "start" }));
+      // The catalogue renders a dark and a light copy side by side: sort both.
+      for (const grid of await page.getByRole("grid", { name: "Dead-lettered messages", exact: true }).all()) {
+        const seq = grid.getByRole("button", { name: "Seq" });
+        await seq.click();
+        await seq.click();
+      }
+      await page.keyboard.press("Shift"); // keyboard modality so :focus-visible matches
+      await page.getByRole("grid", { name: "Dead-lettered messages" }).first().focus();
+    },
+  },
+  {
     name: "catalogue-overlays",
     path: "/#catalogue",
     prepare: async (page) => {

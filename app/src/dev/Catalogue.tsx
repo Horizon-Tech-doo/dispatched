@@ -7,7 +7,7 @@ import {
   EmptyState, EntityGlyph, Problem, Field, Hint, IconButton, Input, Kbd, LabelSwatch, MenuShortcut, Panel, PanelGroup, ProdBadge,
   ResizeHandle, Segmented, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Sheet, SkeletonRows, Textarea,
   DataGrid, Tabs, TabsList, TabsTrigger, ThemeScope, TooltipProvider, Tree,
-  labelColors, rowHeight, shortcutLabel, type Density, type EntityKind, type ThemeName, type TreeNode,
+  labelColors, rowHeight, shortcutLabel, type Density, type EntityKind, type GridSort, type ThemeName, type TreeNode,
 } from "@/ui";
 
 const SUB_TABS = ["Overview", "Messages", "Dead-letter", "Subscriptions", "Rules", "Properties", "Metrics", "Access", "Settings"];
@@ -149,6 +149,7 @@ const DEAD_LETTER_COLUMNS: ColumnDef<DeadLetter, string>[] = [
 function GridDemo({ density }: { density: Density }) {
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set(["48199"]));
   const [focusId, setFocusId] = useState<string | null>("48199");
+  const [sorting, setSorting] = useState<GridSort | null>(null);
   const common = { columns: DEAD_LETTER_COLUMNS, getRowId: (r: DeadLetter) => r.seq, rowHeight: rowHeight[density] };
   return (
     <div className="flex w-full flex-col gap-3">
@@ -157,6 +158,9 @@ function GridDemo({ density }: { density: Density }) {
           {...common}
           label="Dead-lettered messages"
           rows={DEAD_LETTERS}
+          rowNumbers
+          sorting={sorting}
+          onSortingChange={setSorting}
           selectedIds={selected}
           focusId={focusId}
           onSelectionChange={(ids, f) => { setSelected(ids); setFocusId(f); }}
