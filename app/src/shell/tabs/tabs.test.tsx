@@ -180,3 +180,10 @@ describe("entity tabs", () => {
     expect(await within(views).findByText("3,417")).toBeInTheDocument();
   });
 });
+
+describe("sub-tab descriptions", () => {
+  it("Sessions promises message counts, not session state (parked for M2)", () => {
+    const sessions = subTabsFor("queue").find((d) => d.id === "sessions")!;
+    expect(sessions.description).toBe("Sessions and their message counts, for session-enabled entities.");
+  });
+});

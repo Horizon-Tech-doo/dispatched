@@ -20,7 +20,7 @@ const DEFS: Record<SubTabId, SubTabDef> = {
   "transfer-dlq": { id: "transfer-dlq", label: "Transfer DLQ", description: "Messages that failed to forward to another entity.", count: (c) => ({ value: c.transfer_dead_letter, attention: true }) },
   scheduled: { id: "scheduled", label: "Scheduled", description: "Messages waiting for their scheduled enqueue time.", count: (c) => ({ value: c.scheduled }) },
   deferred: { id: "deferred", label: "Deferred", description: "Messages a receiver set aside to process later." },
-  sessions: { id: "sessions", label: "Sessions", description: "Sessions and their state, for session-enabled entities." },
+  sessions: { id: "sessions", label: "Sessions", description: "Sessions and their message counts, for session-enabled entities." },
   rules: { id: "rules", label: "Rules", description: "Filter rules that decide which messages reach this subscription." },
   listener: { id: "listener", label: "Listener", description: "New messages as they arrive." },
 };
