@@ -95,6 +95,7 @@ export function SignInProgress({ flow }: { flow: SignInFlow }) {
           <p className="m-0 text-11 text-muted">Waiting for you to finish signing in…</p>
           <div className="flex gap-2">
             <Button size="sm" onClick={() => copy(prompt.user_code ?? "")}>{copied ? "Copied" : "Copy code"}</Button>
+            <Button size="sm" onClick={() => void commands.openSignInPage().catch(() => {})}>Open sign-in page</Button>
             <Button size="sm" variant="quiet" onClick={cancel}>Cancel sign-in</Button>
           </div>
         </>

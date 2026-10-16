@@ -24,6 +24,71 @@ describe("SettingsSheet", () => {
   });
 });
 
+describe("Accounts in Settings", () => {
+  async function openSettings(user: ReturnType<typeof userEvent.setup>) {
+    await screen.findByRole("button", { name: /Connection: / });
+    await user.keyboard("{Control>},{/Control}");
+    return screen.findByRole("dialog", { name: "Settings" });
+  }
+
+  it("lists sign-ins and signs one out after confirming in place", async () => {
+    const user = userEvent.setup();
+    const { mock } = renderShell("default");
+    await mock.invoke("sign_in", { tenant: null, deviceCode: false });
+    const sheet = await openSettings(user);
+    const accounts = await within(sheet).findByRole("list", { name: "Accounts" });
+    const row = await within(accounts).findByRole("listitem", { name: /ops@contoso.example/ });
+    expect(within(row).getByText("Current")).toBeInTheDocument();
+    expect(within(row).getByText(/Used by Logistics dev/)).toBeInTheDocument();
+    // The mock remembers the second account too: kept, signed out, and not the user's own.
+    const other = within(accounts).getByRole("listitem", { name: /dev@fabrikam.example/ });
+    expect(within(other).getByText("Another account")).toBeInTheDocument();
+    expect(within(other).getByText("Signed out")).toBeInTheDocument();
+    expect(within(other).getByRole("button", { name: "Sign in again" })).toBeInTheDocument();
+    await user.click(within(row).getByRole("button", { name: "Sign out" }));
+    expect(mock.calls.some((c) => c.cmd === "sign_out")).toBe(false);
+    expect(within(row).getByText(/will need a new sign-in/)).toBeInTheDocument();
+    await user.click(within(row).getByRole("button", { name: "Sign out ops@contoso.example" }));
+    await waitFor(() => expect(mock.calls.some((c) => c.cmd === "sign_out")).toBe(true));
+    await waitFor(() => expect(within(accounts).queryByRole("listitem", { name: /ops@contoso.example/ })).not.toBeInTheDocument());
+  });
+
+  it("cancels a sign-out without calling the engine", async () => {
+    const user = userEvent.setup();
+    const { mock } = renderShell("default");
+    await mock.invoke("sign_in", { tenant: null, deviceCode: false });
+    const sheet = await openSettings(user);
+    const row = await within(sheet).findByRole("listitem", { name: /ops@contoso.example/ });
+    await user.click(within(row).getByRole("button", { name: "Sign out" }));
+    await user.click(within(row).getByRole("button", { name: "Cancel" }));
+    expect(within(row).getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+    expect(mock.calls.some((c) => c.cmd === "sign_out")).toBe(false);
+  });
+
+  it("signs out the sign-in the open connection uses, which closes the connection", async () => {
+    const user = userEvent.setup();
+    const { mock } = renderShell("default", { last_profile: "p-logistics-dev" });
+    await mock.invoke("sign_in", { tenant: null, deviceCode: false });
+    await screen.findByRole("button", { name: /Connection: Logistics dev/ });
+    const sheet = await openSettings(user);
+    const row = await within(sheet).findByRole("listitem", { name: /ops@contoso.example/ });
+    await user.click(within(row).getByRole("button", { name: "Sign out" }));
+    await user.click(within(row).getByRole("button", { name: "Sign out ops@contoso.example" }));
+    await waitFor(() => expect(mock.calls.some((c) => c.cmd === "sign_out")).toBe(true));
+    await waitFor(() => expect(screen.queryByRole("button", { name: /Connection: Logistics dev/ })).not.toBeInTheDocument());
+  });
+
+  it("signs in again to a signed-out sign-in's own tenant", async () => {
+    const user = userEvent.setup();
+    const { mock } = renderShell("default");
+    await mock.invoke("sign_in", { tenant: null, deviceCode: false });
+    const sheet = await openSettings(user);
+    const other = await within(sheet).findByRole("listitem", { name: /dev@fabrikam.example/ });
+    await user.click(within(other).getByRole("button", { name: "Sign in again" }));
+    await waitFor(() => expect(mock.calls.filter((c) => c.cmd === "sign_in").at(-1)?.args).toEqual({ tenant: "tenant-2", deviceCode: false }));
+  });
+});
+
 const INFO: UpdateInfo = { version: "0.1.0", notes: "Faster tree loading.", date: "2026-10-20" };
 const NEVER = () => new Promise<void>(() => {});
 

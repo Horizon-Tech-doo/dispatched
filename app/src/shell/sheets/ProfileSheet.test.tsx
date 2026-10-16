@@ -92,7 +92,7 @@ describe("ProfileSheet", () => {
     expect(await within(sheet).findByText("Management works")).toBeInTheDocument();
     expect(within(sheet).getByText("Messaging works")).toBeInTheDocument();
     expect(within(sheet).getByText(/listed 4 queues/)).toBeInTheDocument();
-    expect(within(sheet).getByText("Tested with saved settings.")).toBeInTheDocument();
+    expect(within(sheet).getByText("Tested with these settings.")).toBeInTheDocument();
     await user.click(within(sheet).getByRole("button", { name: "Delete…" }));
     await user.click(within(sheet).getByRole("button", { name: "Delete Logistics" }));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Edit Logistics" })).not.toBeInTheDocument());
@@ -158,6 +158,31 @@ describe("ProfileSheet", () => {
     expect(error.compareDocumentPosition(within(sheet).getByLabelText("Namespace")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(within(sheet).getByLabelText("Name").compareDocumentPosition(error) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
+  it("tests a new connection before it is saved and never shows the string again", async () => {
+    const user = userEvent.setup();
+    const { mock } = renderShell("empty");
+    await user.click(await screen.findByRole("button", { name: "Add connection string" }));
+    const sheet = await screen.findByRole("dialog", { name: "Add connection" });
+    await user.type(within(sheet).getByLabelText("Name"), "Orders");
+    await user.type(within(sheet).getByLabelText("Connection string"), CS);
+    await user.click(within(sheet).getByRole("button", { name: "Test connection" }));
+    expect(await within(sheet).findByText("Tested with these settings.")).toBeInTheDocument();
+    expect(within(sheet).getByText(/Management works/)).toBeInTheDocument();
+    expect(mock.calls.some((c) => c.cmd === "profile_test_draft")).toBe(true);
+    expect(mock.calls.some((c) => c.cmd === "profile_save")).toBe(false);
+    expect(within(sheet).queryByText(/Save to test/)).toBeNull();
+    expect(document.body.textContent).not.toContain("c2VjcmV0");
+  });
+
+  it("device-code sign-in can open the sign-in page", async () => {
+    const user = userEvent.setup();
+    const { mock } = renderShell("empty");
+    await user.click(await screen.findByRole("button", { name: "Sign in with Entra ID" }));
+    const sheet = await screen.findByRole("dialog", { name: "Add connection" });
+    await user.click(within(sheet).getByRole("button", { name: "Use a device code instead" }));
+    await user.click(await within(sheet).findByRole("button", { name: "Open sign-in page" }));
+    expect(mock.calls.some((c) => c.cmd === "open_sign_in_page")).toBe(true);
+  });
 });
 
 describe("ProfileSheet details", () => {
@@ -186,18 +211,61 @@ describe("ProfileSheet details", () => {
     expect(within(sheet).queryByText("Stored in the system keychain.")).not.toBeInTheDocument();
   });
 
-  it("disables Test connection while the form differs from the saved profile", async () => {
+  it("tests an edit as edited, without saving it, and drops a result the form no longer matches", async () => {
     const user = userEvent.setup();
-    renderShell("default");
+    const { mock } = renderShell("default");
     const sheet = await openEdit(user, "Logistics");
     const test = within(sheet).getByRole("button", { name: "Test connection" });
     expect(test).toBeEnabled();
-    expect(within(sheet).queryByText("Save to test these changes.")).not.toBeInTheDocument();
+    await user.clear(within(sheet).getByLabelText("Name"));
+    await user.type(within(sheet).getByLabelText("Name"), "Logistics EU");
     await user.type(within(sheet).getByLabelText("Proxy"), "http://p:1");
-    expect(test).toBeDisabled();
-    expect(within(sheet).getByText("Save to test these changes.")).toBeInTheDocument();
-    await user.clear(within(sheet).getByLabelText("Proxy"));
     expect(test).toBeEnabled();
+    expect(within(sheet).queryByText(/Save to test/)).not.toBeInTheDocument();
+    await user.click(test);
+    expect(await within(sheet).findByText("Tested with these settings.")).toBeInTheDocument();
+    const sent = mock.calls.find((c) => c.cmd === "profile_test_draft")!.args as { draft: { id: string; name: string; proxy: string; auth: { connection_string: string | null } } };
+    expect(sent.draft).toMatchObject({ id: "p-logistics", name: "Logistics EU", proxy: "http://p:1" });
+    expect(sent.draft.auth.connection_string).toBeNull(); // the engine uses the stored string
+    expect(mock.calls.some((c) => c.cmd === "profile_save")).toBe(false);
+    await user.type(within(sheet).getByLabelText("Proxy"), "0");
+    expect(within(sheet).queryByText("Tested with these settings.")).not.toBeInTheDocument();
+  });
+
+  it("keeps Test connection off until the form has what a test needs", async () => {
+    const user = userEvent.setup();
+    renderShell("empty");
+    await user.click(await screen.findByRole("button", { name: "Add connection string" }));
+    const sheet = await screen.findByRole("dialog", { name: "Add connection" });
+    const test = within(sheet).getByRole("button", { name: "Test connection" });
+    expect(test).toBeDisabled();
+    await user.type(within(sheet).getByLabelText("Name"), "Orders");
+    expect(test).toBeDisabled();
+    await user.type(within(sheet).getByLabelText("Connection string"), CS);
+    expect(test).toBeEnabled();
+  });
+
+  it("does not keep the typed connection string in the test mutation", async () => {
+    const user = userEvent.setup();
+    const { client } = renderShell("empty");
+    await user.click(await screen.findByRole("button", { name: "Add connection string" }));
+    const sheet = await screen.findByRole("dialog", { name: "Add connection" });
+    await user.type(within(sheet).getByLabelText("Name"), "Orders");
+    await user.type(within(sheet).getByLabelText("Connection string"), CS);
+    await user.click(within(sheet).getByRole("button", { name: "Test connection" }));
+    await within(sheet).findByText("Tested with these settings.");
+    await waitFor(() => expect(JSON.stringify(client.getMutationCache().getAll().map((m) => m.state))).not.toContain("c2VjcmV0"));
+  });
+
+  it("tells an edited Entra connection whose sign-in is gone to save first", async () => {
+    const user = userEvent.setup();
+    const { mock, client } = renderShell("tenant-sign-in");
+    await screen.findByRole("button", { name: /Connection: Choose a connection/ });
+    await mock.invoke("sign_out", { id: "oid-1" });
+    await client.invalidateQueries({ queryKey: ["profiles"] });
+    const sheet = await openEdit(user, "Northwind orders");
+    await user.click(within(sheet).getByRole("button", { name: "Test connection" }));
+    expect(await within(sheet).findByText(/Save the connection/)).toBeInTheDocument();
   });
 
   it("forces WebSockets while a proxy is set", async () => {

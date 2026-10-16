@@ -69,6 +69,15 @@ export const shots: {
     },
   },
   {
+    name: "catalogue-viewer-states",
+    path: "/#catalogue",
+    prepare: async (page) => {
+      await page.getByRole("heading", { name: "Viewer states", exact: true }).first().evaluate((el) => el.scrollIntoView({ block: "start" }));
+      await page.keyboard.press("Shift"); // keyboard modality so :focus-visible matches
+      await page.getByRole("region", { name: "Long line" }).first().focus();
+    },
+  },
+  {
     name: "catalogue-overlays",
     path: "/#catalogue",
     prepare: async (page) => {
@@ -250,6 +259,19 @@ export const shots: {
     viewportOnly: true,
   },
   {
+    name: "sign-in-device-code",
+    path: "/?scenario=empty",
+    ready: (p) => p.getByRole("heading", { name: "Add a connection" }),
+    prepare: async (page) => {
+      await page.getByRole("button", { name: "Sign in with Entra ID" }).click();
+      const sheet = page.getByRole("dialog", { name: "Add connection" });
+      await sheet.getByRole("button", { name: "Use a device code instead" }).click();
+      await sheet.getByRole("button", { name: "Open sign-in page" }).waitFor();
+    },
+    holds: (p) => p.getByRole("dialog", { name: "Add connection" }),
+    viewportOnly: true,
+  },
+  {
     name: "profile-entra-signed-in",
     path: "/?scenario=empty",
     ready: (p) => p.getByRole("heading", { name: "Add a connection" }),
@@ -315,6 +337,21 @@ export const shots: {
     viewportOnly: true,
   },
   {
+    name: "profile-test-draft",
+    path: "/?scenario=empty",
+    ready: (p) => p.getByRole("heading", { name: "Add a connection" }),
+    prepare: async (page) => {
+      await page.getByRole("button", { name: "Add connection string" }).click();
+      const sheet = page.getByRole("dialog", { name: "Add connection" });
+      await sheet.getByLabel("Name", { exact: true }).fill("Orders production");
+      await sheet.getByLabel("Connection string").fill("Endpoint=sb://orders.servicebus.windows.net/;SharedAccessKeyName=reader;SharedAccessKey=c2VjcmV0");
+      await sheet.getByRole("button", { name: "Test connection" }).click();
+      await sheet.getByText("Tested with these settings.").waitFor();
+    },
+    holds: (p) => p.getByRole("dialog", { name: "Add connection" }),
+    viewportOnly: true,
+  },
+  {
     name: "profile-edit-tenant",
     path: "/?scenario=tenant-sign-in",
     ready: (p) => p.getByRole("list", { name: "Saved connections" }),
@@ -371,7 +408,8 @@ export const shots: {
       await page.getByRole("dialog", { name: "Connections" }).getByRole("button", { name: "Edit Logistics", exact: true }).click();
       const sheet = page.getByRole("dialog", { name: "Edit Logistics", exact: true });
       await sheet.getByLabel("Proxy").fill("http://proxy.corp:8080");
-      await sheet.getByText("Save to test these changes.").waitFor();
+      await sheet.getByRole("button", { name: "Test connection" }).click();
+      await sheet.getByText("Tested with these settings.").waitFor();
     },
     holds: (p) => p.getByRole("dialog", { name: "Edit Logistics", exact: true }),
     viewportOnly: true,
@@ -412,6 +450,23 @@ export const shots: {
       await page.keyboard.press("Shift"); // keyboard modality so :focus-visible matches
       await page.keyboard.press("ControlOrMeta+,");
       await page.getByRole("dialog", { name: "Settings" }).getByText("Row height in the tree and grids.").waitFor();
+    },
+    holds: (p) => p.getByRole("dialog", { name: "Settings" }),
+    viewportOnly: true,
+  },
+  {
+    name: "settings-accounts",
+    // Two kept sign-ins: the current account's (used by two connections) and another, signed-out account's.
+    path: "/?scenario=tenant-sign-in",
+    ready: (p) => p.getByRole("list", { name: "Saved connections" }),
+    prepare: async (page) => {
+      await page.keyboard.press("Shift"); // keyboard modality so :focus-visible matches
+      await page.keyboard.press("ControlOrMeta+,");
+      const sheet = page.getByRole("dialog", { name: "Settings" });
+      const row = sheet.getByRole("listitem", { name: "ops@contoso.example" });
+      await row.getByText(/Used by/).waitFor();
+      await row.getByRole("button", { name: "Sign out" }).click();
+      await row.getByRole("button", { name: "Sign out ops@contoso.example" }).waitFor();
     },
     holds: (p) => p.getByRole("dialog", { name: "Settings" }),
     viewportOnly: true,
