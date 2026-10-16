@@ -161,7 +161,12 @@ describe("message views", () => {
     await waitFor(() => expect(status).toHaveTextContent("500 of 5,000 · reading…"));
     const toolbar = screen.getByRole("toolbar", { name: "Peek options" });
     expect(within(toolbar).queryByRole("button", { name: "Peek again" })).toBeNull();
-    await userEvent.click(within(toolbar).getByRole("button", { name: "Stop" }));
+    const stop = within(toolbar).getByRole("button", { name: "Stop" });
+    // A filled square (a stop symbol), not an outlined one that reads like a checkbox; and the slot is wide enough
+    // for the longer label, so Columns does not move.
+    expect(stop.querySelector("svg")).toHaveClass("fill-current");
+    expect(stop.closest("[data-peek-slot]")).toHaveClass("min-w-[104px]");
+    await userEvent.click(stop);
     release();
     await waitFor(() => expect(status).toHaveTextContent("1,000 messages · stopped"));
     expect(within(toolbar).getByRole("button", { name: "Peek again" })).toBeInTheDocument();
@@ -221,6 +226,20 @@ describe("message views", () => {
     await waitFor(() => expect(within(g).queryByRole("columnheader", { name: "Subject" })).toBeNull());
     await userEvent.click(screen.getByRole("menuitem", { name: "Reset columns" }));
     await waitFor(() => expect(within(g).getByRole("columnheader", { name: "Subject" })).toBeInTheDocument());
+  });
+
+  it("keeps a saved column this entity cannot show, so another entity of the group still gets it", async () => {
+    // Columns are saved per view group: Session was added from a session entity's Messages view.
+    const { mock } = renderShell("default", { ...seedTab("invoice-generate", "queue", "messages"), columns: { active: ["seq", "session", "subject", "prop:region"] } });
+    const g = await grid();
+    await waitFor(() => expect(within(g).getByRole("columnheader", { name: "Subject" })).toBeInTheDocument());
+    expect(within(g).queryByRole("columnheader", { name: "Session" })).toBeNull();
+    act(() => screen.getByRole("button", { name: "Columns" }).focus());
+    await userEvent.keyboard("{Enter}");
+    await userEvent.click(await screen.findByRole("menuitemcheckbox", { name: "Subject" }));
+    await waitFor(() => expect(within(g).queryByRole("columnheader", { name: "Subject" })).toBeNull());
+    const saved = mock.calls.filter((c) => c.cmd === "settings_set" && (c.args as { key: string }).key === "columns").at(-1)!.args as { value: { active: string[] } };
+    expect(saved.value.active).toEqual(["seq", "session", "prop:region"]);
   });
 
   it("clears the selection when the peek starts again", async () => {

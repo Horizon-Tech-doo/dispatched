@@ -62,12 +62,47 @@ const isProp = (v: string) => v.startsWith("prop:") && v.length > 5;
 // lib, which this project's TypeScript target does not include.)
 const isId = (v: unknown): v is ColumnId => typeof v === "string" && (Object.prototype.hasOwnProperty.call(COLUMN_LABEL, v) || isProp(v));
 
-/** A saved column list for this view: unknown entries (or none) fall back to the defaults, and columns the view
- *  can't fill are left out. */
-export function parseColumns(saved: unknown, view: PeekView, sessions: boolean): ColumnId[] {
-  if (!Array.isArray(saved) || saved.length === 0 || !saved.every(isId)) return defaultColumns(view, sessions);
+/** The saved list as written: every known column, including ones this entity cannot fill. `null` when there is
+ *  nothing usable (not a list, empty, or an unknown entry), which means the defaults. */
+function savedList(saved: unknown): ColumnId[] | null {
+  return Array.isArray(saved) && saved.length > 0 && saved.every(isId) ? (saved as ColumnId[]) : null;
+}
+
+/** The columns of `list` this view can fill. */
+function fillable(list: ColumnId[], view: PeekView, sessions: boolean): ColumnId[] {
   const offered = new Set<string>(["seq", ...optionalColumns(view, sessions)]);
-  return (saved as ColumnId[]).filter((id) => isProp(id) || offered.has(id));
+  return list.filter((id) => isProp(id) || offered.has(id));
+}
+
+/** The columns to show for this view from a saved list: unknown entries (or none) fall back to the defaults, and
+ *  columns the view can't fill are left out of what is shown (they stay in the saved list: see `mergeColumns`). */
+export function parseColumns(saved: unknown, view: PeekView, sessions: boolean): ColumnId[] {
+  const list = savedList(saved);
+  return list ? fillable(list, view, sessions) : defaultColumns(view, sessions);
+}
+
+/** What to save when the columns shown change to `next`. A saved list belongs to a view group, not to one entity:
+ *  columns this entity can't show (Session, on an entity without sessions) stay in it, where they were, so
+ *  changing columns here doesn't drop them for the entities that do show them. */
+export function mergeColumns(saved: unknown, next: ColumnId[], view: PeekView, sessions: boolean): ColumnId[] {
+  const list = savedList(saved);
+  if (!list) return next;
+  const shown = new Set<ColumnId>(fillable(list, view, sessions));
+  const out = [...next];
+  list.forEach((id, i) => {
+    if (shown.has(id) || out.includes(id)) return;
+    // After the nearest column before it in the saved list that is in the result, else first.
+    let at = 0;
+    for (let j = i - 1; j >= 0; j--) {
+      const k = out.indexOf(list[j]);
+      if (k >= 0) {
+        at = k + 1;
+        break;
+      }
+    }
+    out.splice(at, 0, id);
+  });
+  return out;
 }
 
 /** A property value as text: `""` when absent, `nullText` for an explicit null. The detail pane uses this one
@@ -188,12 +223,12 @@ export function useColumnPrefs(view: PeekView, sessions: boolean): [ColumnId[], 
       // Read the latest value from the cache so two quick changes compose.
       const current = qc.getQueryData(keys.setting("columns"));
       const all: Record<string, unknown> = { ...(current && typeof current === "object" && !Array.isArray(current) ? (current as Record<string, unknown>) : {}) };
-      if (next) all[group] = next;
+      if (next) all[group] = mergeColumns(all[group], next, view, sessions);
       else delete all[group];
       qc.setQueryData(keys.setting("columns"), all);
       void commands.settingsSet("columns", all).catch(() => {});
     },
-    [qc, group],
+    [qc, group, view, sessions],
   );
   const set = useCallback((next: ColumnId[]) => write(next), [write]);
   const reset = useCallback(() => write(null), [write]);

@@ -157,11 +157,12 @@ export function Toolbar(p: {
           </DropdownMenuContent>
         </DropdownMenu>
         {p.exportMenu}
-        {/* One slot, as wide as its wider label, so swapping Peek again and Stop never moves Columns. */}
-        <div className="flex min-w-[96px] justify-end">
+        {/* One slot, as wide as its wider label ("Peek again", with its icon and padding), so swapping it with Stop
+            never moves Columns. */}
+        <div data-peek-slot className="flex min-w-[104px] justify-end">
         {p.streaming ? (
           <Button variant="quiet" onClick={p.onStop}>
-            <Square aria-hidden="true" className="text-icon" />
+            <Square aria-hidden="true" className="fill-current text-icon" />
             Stop
           </Button>
         ) : (

@@ -6,10 +6,10 @@ import { splitSubscription, subTabsFor, useEntityInfo, validSubTab, viewOf, type
 
 const KIND_LINE = { queue: "Queue", topic: "Topic", subscription: "Subscription" } as const;
 
-/** A sub-tab count's reserved width: room for "99,999" in tabular numerals (five digit-wide ch plus a
- *  narrower comma), so counts up to that size, and the placeholder before them, never move the row. The count
- *  starts right after its label (the button would centre it), and the spare width trails. */
-const COUNT_SLOT = "min-w-[6ch] text-left tabular-nums";
+/** Width held for a sub-tab's count while it loads, so the tab row moves as little as it can when the count
+ *  arrives. Once loaded the count takes only the room it needs: a slot sized for the largest count leaves wide gaps
+ *  after short ones ("Transfer DLQ 0    Scheduled"). */
+const COUNT_PLACEHOLDER = "min-w-[3ch]";
 
 /** One sub-tab's content. Message views load on their own; only the entity's own facts wait for its info. */
 function SubTabBody({ tab, def, info }: { tab: EntityTab; def: SubTabDef; info: EntityInfo }) {
@@ -56,10 +56,10 @@ export function EntityView({ tab }: { tab: EntityTab }) {
               <TabsTrigger key={d.id} value={d.id}>
                 <span>{d.label}</span>
                 {c ? (
-                  <CountBadge value={c.value} quality={info.counts ?? undefined} attention={c.attention} className={COUNT_SLOT} />
+                  <CountBadge value={c.value} quality={info.counts ?? undefined} attention={c.attention} />
                 ) : (
-                  // Hold the count's place while it loads, so the row does not shift when it arrives.
-                  d.count && info.status === "loading" && <span aria-hidden="true" data-count-placeholder className={COUNT_SLOT} />
+                  // Hold some of the count's place while it loads.
+                  d.count && info.status === "loading" && <span aria-hidden="true" data-count-placeholder className={COUNT_PLACEHOLDER} />
                 )}
               </TabsTrigger>
             );

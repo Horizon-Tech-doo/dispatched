@@ -167,22 +167,23 @@ test("the tab marker moves with the click, also with reduced motion", async ({ p
   await expectMarkerOn("Entity views", /^Dead-letter/);
 });
 
-test("sub-tab counts up to 12,345 keep the row still", async ({ page }) => {
+test("sub-tab counts take only their own width, so short counts leave no gap before the next tab", async ({ page }) => {
   await go(page, logistics);
   await tree(page).getByRole("treeitem", { name: "invoice-generate" }).dblclick();
   const views = page.getByRole("tablist", { name: "Entity views" });
   const count = views.getByText("1,284", { exact: true });
   await expect(count).toBeVisible();
-  // Put counts of every width up to 12,345 in the slot and read where the next tab starts each time.
-  const starts = await count.evaluate((el) => {
-    const next = el.closest('[role="tab"]')!.nextElementSibling as HTMLElement;
+  // The room between a count and the end of its tab is the tab's padding, whatever the count's width.
+  const gaps = await count.evaluate((el) => {
+    const tab = el.closest('[role="tab"]')!;
     const original = el.textContent;
-    const out = ["0", "999", "2,906", "12,345", "99,999"].map((t) => {
+    const out = ["0", "37", "2,906", "99,999"].map((t) => {
       el.textContent = t;
-      return next.getBoundingClientRect().left;
+      return Math.round(tab.getBoundingClientRect().right - el.getBoundingClientRect().right);
     });
     el.textContent = original;
     return out;
   });
-  expect(new Set(starts).size).toBe(1);
+  expect(new Set(gaps).size).toBe(1);
+  expect(gaps[0]).toBeLessThanOrEqual(12);
 });

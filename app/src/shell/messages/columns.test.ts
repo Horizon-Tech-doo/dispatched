@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { defaultColumns, formatTtl, optionalColumns, parseColumns, propText, seqWidth } from "./columns";
+import { defaultColumns, formatTtl, mergeColumns, optionalColumns, parseColumns, propText, seqWidth } from "./columns";
 
 describe("message columns", () => {
   it("default per view, with Session only for session entities", () => {
@@ -43,7 +43,20 @@ describe("message columns", () => {
     expect(parseColumns(["seq", "constructor"], "active", false)).toEqual(defaultColumns("active", false));
     expect(parseColumns([], "active", false)).toEqual(defaultColumns("active", false));
     expect(parseColumns("seq", "active", false)).toEqual(defaultColumns("active", false));
-    // A column saved for the group that this entity cannot fill is left out, not shown blank.
+    // A column saved for the group that this entity cannot fill is not shown blank.
     expect(parseColumns(["seq", "session", "prop:region"], "dead-letter", false)).toEqual(["seq", "prop:region"]);
+  });
+  it("keep the columns an entity cannot show when it changes the saved list", () => {
+    const saved = ["seq", "session", "subject", "prop:region"];
+    // A non-session entity shows [seq, subject, prop:region]; hiding Subject must not drop Session for session entities.
+    expect(mergeColumns(saved, ["seq", "prop:region"], "active", false)).toEqual(["seq", "session", "prop:region"]);
+    // Adding a column to what is shown leaves the hidden ones where they were.
+    expect(mergeColumns(saved, ["seq", "subject", "size", "prop:region"], "active", false)).toEqual(["seq", "session", "subject", "size", "prop:region"]);
+    // A session entity can show everything: nothing is hidden, so the shown list is the saved list.
+    expect(mergeColumns(saved, ["seq", "subject"], "active", true)).toEqual(["seq", "subject"]);
+    // Nothing saved yet: the shown list is saved as it is.
+    expect(mergeColumns(undefined, ["seq", "subject"], "active", false)).toEqual(["seq", "subject"]);
+    // A hidden column at the front stays at the front.
+    expect(mergeColumns(["session", "seq"], ["seq", "size"], "active", false)).toEqual(["session", "seq", "size"]);
   });
 });
