@@ -8,6 +8,7 @@ import { ShellProvider } from "./context";
 import { activityStore, jobStore } from "./drawer/activity";
 import { resetViewStates } from "./messages/viewStore";
 import { installStore } from "./sheets/installState";
+import { forgetCounts } from "./tabs/subtabs";
 import { Workbench } from "./Workbench";
 
 /** `extra` renders beside the workbench inside the providers (a probe for shell state). */
@@ -16,6 +17,7 @@ export function renderShell(scenario: Scenario = "default", seed: Record<string,
   jobStore.clear();
   installStore.reset();
   resetViewStates();
+  forgetCounts();
   const mock = createMockTransport(scenario, 0, seed);
   setTransport(mock);
   const client = createQueryClient();

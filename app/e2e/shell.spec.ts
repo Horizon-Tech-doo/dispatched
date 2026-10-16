@@ -187,3 +187,30 @@ test("sub-tab counts take only their own width, so short counts leave no gap bef
   expect(new Set(gaps).size).toBe(1);
   expect(gaps[0]).toBeLessThanOrEqual(12);
 });
+
+test("filter bar: Apply, Clear filter and the body segments take one click while the property field has focus", async ({ page }) => {
+  await go(page, logistics);
+  await tree(page).getByRole("treeitem", { name: "invoice-generate" }).dblclick();
+  await page.getByRole("tablist", { name: "Entity views" }).getByRole("tab", { name: /^Dead-letter/ }).click();
+  await expect(page.getByRole("status", { name: "Peek status" })).toContainText("37 messages");
+  await page.getByRole("button", { name: "Filter", exact: true }).click();
+  const bar = page.getByRole("search", { name: "Message filter" });
+  const properties = bar.getByLabel("Properties");
+
+  // Focus in Properties shows the syntax help. Pressing a control moves focus and hides it: the control must not
+  // move between the pointer going down and coming up, or the click is lost.
+  await properties.click();
+  await properties.fill("attempt >= 2");
+  await expect(bar.getByText("sys.MessageId")).toBeVisible();
+  await bar.getByRole("button", { name: "Apply" }).click();
+  await expect(page.getByRole("button", { name: "Filter 1", exact: true })).toBeVisible();
+
+  await properties.click();
+  await bar.getByRole("radio", { name: "Regex" }).click();
+  await expect(bar.getByRole("radio", { name: "Regex" })).toBeChecked();
+
+  await properties.click();
+  await bar.getByRole("button", { name: "Clear filter" }).click();
+  await expect(page.getByRole("button", { name: "Filter", exact: true })).toBeVisible();
+  await expect(properties).toHaveValue("");
+});

@@ -96,12 +96,17 @@ export function FilterBar({
   const blocked = current && (checked.data?.length ?? 0) > 0;
   const dirty = !sameFilter(draft, applied);
 
+  // An Apply that is waiting on a check: another Enter meanwhile is the same request.
+  const waiting = useRef(false);
   const apply = async () => {
-    if (blocked) return;
+    if (blocked || waiting.current) return;
     const submitted = draft;
     // Not checked yet (typed a moment ago, or the check is on its way): wait for the answer rather than send a bad filter.
     if ((!current || checked.isFetching) && !nothingToCheck(submitted)) {
-      const found = await checkFilterNow(qc, submitted);
+      waiting.current = true;
+      const found = await checkFilterNow(qc, submitted).finally(() => {
+        waiting.current = false;
+      });
       // Typed on while waiting: what is in the fields is no longer what was checked.
       if (found.length > 0 || latest.current !== submitted) return;
     }
@@ -130,26 +135,15 @@ export function FilterBar({
   const bodyLabel = mode === "contains" ? "Body contains" : mode === "regex" ? "Body regex" : "JSONPath";
   const announced = [propertyProblem, bodyProblem, equalsProblem].filter(Boolean).map((p) => p!.sentence).join(" ");
   const equalsId = `${uid}-equals`;
+  const syntaxId = `${uid}-syntax`;
 
   return (
-    <div id={id} role="search" aria-label="Message filter" className="flex shrink-0 flex-col gap-1.5 border-b border-line bg-side px-3 py-2" onKeyDown={onKeyDown}>
-      <Field
-        inline={LABEL_W}
-        label="Properties"
-        hint={
-          propertyFocused || propertyProblem ? (
-            <>
-              <Code>sys.MessageId</Code> <Code>sys.Subject</Code> <Code>sys.SessionId</Code> <Code>sys.DeliveryCount</Code> <Code>sys.EnqueuedTime</Code>{" "}
-              <Code>sys.DeadLetterReason</Code>, or an application property by name. Operators: <Code>= {"<>"} {"<"} {">"} {"<="} {">="} LIKE IN IS NULL AND OR NOT</Code>
-            </>
-          ) : undefined
-        }
-        error={propertyProblem?.sentence}
-        detail={propertyProblem?.detail}
-      >
+    <div id={id} role="search" aria-label="Message filter" className="relative flex shrink-0 flex-col gap-1.5 border-b border-line bg-side px-3 py-2" onKeyDown={onKeyDown}>
+      <Field inline={LABEL_W} label="Properties" error={propertyProblem?.sentence} detail={propertyProblem?.detail}>
         {(ids) => (
           <Input
             {...ids}
+            aria-describedby={[ids["aria-describedby"], propertyFocused ? syntaxId : undefined].filter(Boolean).join(" ") || undefined}
             ref={propertyRef}
             mono
             autoFocus={autoFocus}
@@ -236,6 +230,17 @@ export function FilterBar({
           )}
         </div>
       </div>
+      {/* The syntax help hangs under the bar and takes no room, and lets clicks through: hiding it when focus moves
+          (for instance by pressing Apply) must never move the controls between pointer-down and pointer-up. */}
+      {propertyFocused && (
+        <p
+          id={syntaxId}
+          className="pointer-events-none absolute inset-x-3 top-full z-20 m-0 rounded-ctl border border-line bg-side px-2 py-1 text-11 text-muted shadow-float"
+        >
+          <Code>sys.MessageId</Code> <Code>sys.Subject</Code> <Code>sys.SessionId</Code> <Code>sys.DeliveryCount</Code> <Code>sys.EnqueuedTime</Code>{" "}
+          <Code>sys.DeadLetterReason</Code>, or an application property by name. Operators: <Code>= {"<>"} {"<"} {">"} {"<="} {">="} LIKE IN IS NULL AND OR NOT</Code>
+        </p>
+      )}
       <span role="status" className="sr-only">
         {announced}
       </span>

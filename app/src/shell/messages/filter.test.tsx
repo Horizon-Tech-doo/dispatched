@@ -213,15 +213,15 @@ describe("filter bar", () => {
     expect(apply).toBeDisabled();
   });
 
-  it("shows the property syntax only while the field is focused or has a problem", async () => {
+  it("shows the property syntax only while the field is focused, outside the bar's layout", async () => {
     renderShell("default", seed);
     const bar = await openBar();
-    expect(within(bar).getByText("sys.MessageId")).toBeInTheDocument();
+    const syntax = within(bar).getByText("sys.MessageId").closest("p")!;
+    expect(within(bar).getByLabelText("Properties")).toHaveAccessibleDescription(/sys\.MessageId/);
+    // It hangs under the bar and lets clicks through, so hiding it never moves a control being pressed.
+    expect(syntax).toHaveClass("absolute", "pointer-events-none");
     act(() => within(bar).getByLabelText("Body contains").focus());
     expect(within(bar).queryByText("sys.MessageId")).toBeNull();
-    await typeInto(within(bar).getByLabelText("Properties"), "sys.Subject == 'x'");
-    act(() => within(bar).getByLabelText("Body contains").focus());
-    expect(await within(bar).findByText("sys.MessageId")).toBeInTheDocument();
   });
 
   it("says how Equals compares while it is focused", async () => {
@@ -263,5 +263,33 @@ describe("filter bar", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Clear filter" }));
     await waitFor(() => expect(screen.getByRole("button", { name: /Filter/ })).not.toHaveTextContent("2"));
     expect(screen.queryByRole("button", { name: /^Edit filter/ })).toBeNull();
+  });
+
+  it("treats a second Enter while Apply waits for the check as the same request", async () => {
+    const { mock } = renderShell("default", seed);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let checks = 0;
+    setTransport({
+      listen: mock.listen,
+      invoke: async <T,>(cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === "check_filter") {
+          checks++;
+          await gate;
+        }
+        return mock.invoke<T>(cmd, args);
+      },
+    });
+    const bar = await openBar();
+    await screen.findByRole("grid");
+    const before = peeks(mock);
+    await typeInto(within(bar).getByLabelText("Properties"), "sys.DeliveryCount > 3{Enter}");
+    await waitFor(() => expect(checks).toBe(1));
+    await userEvent.keyboard("{Enter}");
+    await userEvent.keyboard("{Enter}");
+    await act(async () => release());
+    await waitFor(() => expect(lastPeek(mock).property).toBe("sys.DeliveryCount > 3"));
+    await new Promise((r) => setTimeout(r, 100));
+    expect(peeks(mock)).toBe(before + 1);
   });
 });
