@@ -223,6 +223,7 @@ pub async fn message_detail(
     entity: String,
     view: PeekView,
     sequence: i64,
+    session_id: Option<String>,
 ) -> Result<Option<MessageDetail>, CommandError> {
     ops::browse::message_detail(
         &state,
@@ -231,6 +232,7 @@ pub async fn message_detail(
         &entity,
         view,
         sequence,
+        session_id.as_deref(),
     )
     .await
 }

@@ -232,6 +232,8 @@ export function DetailPane(p: {
   entity: string;
   view: PeekView;
   sequence: number | null;
+  /** The session the rows were peeked in (a per-session view); the message is read through it. */
+  sessionId?: string | null;
   onClose(): void;
   onShowColumn(name: string): void;
   shownProps?: readonly string[];
@@ -245,7 +247,7 @@ export function DetailPane(p: {
     return () => clearTimeout(t);
   }, [p.sequence]);
   const settled = debounced === p.sequence;
-  const q = useMessageDetail(p.profileId, p.entity, p.view, debounced);
+  const q = useMessageDetail(p.profileId, p.entity, p.view, debounced, p.sessionId ?? null);
   const d = settled ? q.data : undefined;
   const label = VIEW_LABEL[p.view];
   const [tab, setTab] = useState("body");

@@ -299,4 +299,28 @@ describe("export", () => {
     await waitFor(() => expect(mock.calls.some((c) => c.cmd === "export_start")).toBe(true));
     expect(startOf(mock).request.scope).toEqual({ kind: "selected", sequences: [48213] });
   });
+
+  it("in a per-session view, the detail and a selected export read through that session", async () => {
+    const intake = {
+      last_profile: "p-logistics",
+      "shell:p-logistics": { tabs: [{ id: "returns-intake", kind: "queue", subTab: "messages" }], activeTab: "returns-intake", expanded: [], selected: null, layout: { treeSize: 18, drawerOpen: false, drawerSize: 18, drawerTab: "activity" } },
+    };
+    const defaults: ViewState = { from: { kind: "start" }, topN: 100, filter: {}, filterOpen: false, sorting: null, detailOpen: false };
+    const { mock } = renderShell("default", intake);
+    const grid = await screen.findByRole("grid");
+    act(() => setViewState(viewKey("p-logistics", "returns-intake", "active"), defaults, { filter: { session_id: "RMA-1001" } }));
+    await waitFor(() => expect(within(grid).getAllByText("RMA-1001").length).toBeGreaterThan(0));
+    act(() => grid.focus());
+    await userEvent.keyboard("{Home}{Enter}");
+    await waitFor(() => expect(mock.calls.some((c) => c.cmd === "message_detail")).toBe(true));
+    expect(mock.calls.find((c) => c.cmd === "message_detail")!.args).toMatchObject({ sessionId: "RMA-1001" });
+    act(() => grid.focus());
+    await userEvent.keyboard("{Home}{Shift>}{ArrowDown}{/Shift}");
+    await openExportMenu();
+    await userEvent.click(screen.getByRole("menuitem", { name: /Export 2 selected/ }));
+    await userEvent.click(within(sheetOf()).getByRole("button", { name: "Export 2 messages…" }));
+    await waitFor(() => expect(mock.calls.some((c) => c.cmd === "export_start")).toBe(true));
+    expect(startOf(mock).request.scope).toMatchObject({ kind: "selected", session_id: "RMA-1001" });
+    expect(startOf(mock).request.scope.sequences).toHaveLength(2);
+  });
 });

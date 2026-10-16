@@ -331,7 +331,8 @@ export interface DashboardView { rows: DashboardRow[]; failures: DashboardFailur
 export type ExportFormat = "json" | "ndjson";
 export type ExportScope =
   | { kind: "all"; filter: FilterSpec; from_sequence?: number; max?: number | null }
-  | { kind: "selected"; sequences: number[] };
+  /** `session_id`: the session the rows were peeked in (a per-session view); they are read again through it. */
+  | { kind: "selected"; sequences: number[]; session_id?: string | null };
 /** `pick` is the one-time id `pickExportPath` returned; the webview never sends a path. Unknown fields
  *  (`path`, `overwrite`) are refused. */
 export interface ExportRequest { entity: string; view: PeekView; scope: ExportScope; format: ExportFormat; pick: string; total_hint?: number | null }

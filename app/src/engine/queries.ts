@@ -165,11 +165,12 @@ export function useSignIn() {
   });
 }
 
-/** One message in full, by sequence number; `null` data when it is no longer in the view. */
-export function useMessageDetail(profileId: string | null, entity: string, view: PeekView, sequence: number | null) {
+/** One message in full, by sequence number; `null` data when it is no longer in the view. `sessionId`: the session the
+ *  row was peeked in, read through again (a sequence number names one message, so it is not part of the key). */
+export function useMessageDetail(profileId: string | null, entity: string, view: PeekView, sequence: number | null, sessionId: string | null = null) {
   return useQuery({
     queryKey: keys.message(profileId, entity, view, sequence),
-    queryFn: () => commands.messageDetail(profileId!, entity, view, sequence!),
+    queryFn: () => commands.messageDetail(profileId!, entity, view, sequence!, sessionId),
     enabled: profileId !== null && sequence !== null,
     staleTime: Infinity,
     gcTime: 60_000,

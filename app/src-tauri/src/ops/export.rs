@@ -31,6 +31,10 @@ pub enum ExportScope {
     },
     Selected {
         sequences: Vec<i64>,
+        /// The session the rows were peeked in (a per-session view), so they are read again
+        /// through it.
+        #[serde(default)]
+        session_id: Option<String>,
     },
 }
 
@@ -68,7 +72,10 @@ pub enum Scope {
         from: i64,
         max: Option<u64>,
     },
-    Selected(Vec<i64>),
+    Selected {
+        sequences: Vec<i64>,
+        session: Option<String>,
+    },
 }
 
 #[derive(Debug)]
@@ -109,6 +116,7 @@ pub trait ExportSource: Send + Sync {
         view: PeekView,
         sequences: &[i64],
         budget: u64,
+        session: Option<&str>,
         cancel: &CancellationToken,
     ) -> dispatched_core::Result<SequenceCollection>;
 }
@@ -129,9 +137,10 @@ impl ExportSource for Explorer {
         view: PeekView,
         sequences: &[i64],
         budget: u64,
+        session: Option<&str>,
         cancel: &CancellationToken,
     ) -> dispatched_core::Result<SequenceCollection> {
-        self.collect_sequences(entity, view, sequences, budget, Some(cancel))
+        self.collect_sequences(entity, view, sequences, budget, Some(cancel), session)
             .await
     }
 }
@@ -227,21 +236,27 @@ pub fn plan(req: ExportRequest, path: PathBuf) -> Result<ExportPlan, CommandErro
             from: from_sequence.max(0),
             max,
         },
-        ExportScope::Selected { sequences } if sequences.is_empty() => {
+        ExportScope::Selected { sequences, .. } if sequences.is_empty() => {
             return Err(CommandError::new(
                 "invalid",
                 "Select the messages to export.",
             ));
         }
         // Each message once, so the job's total is the number of distinct messages asked for.
-        ExportScope::Selected { mut sequences } => {
+        ExportScope::Selected {
+            mut sequences,
+            session_id,
+        } => {
             sequences.sort_unstable();
             sequences.dedup();
-            Scope::Selected(sequences)
+            Scope::Selected {
+                sequences,
+                session: session_id.filter(|s| !s.is_empty()),
+            }
         }
     };
     let total = match &scope {
-        Scope::Selected(s) => Some(s.len() as u64),
+        Scope::Selected { sequences, .. } => Some(sequences.len() as u64),
         Scope::All { max, .. } => match (*max, req.total_hint) {
             (Some(m), Some(h)) => Some(m.min(h)),
             (m, h) => m.or(h),
@@ -315,9 +330,16 @@ pub async fn run(
                     "; the scan stopped early, so the end of the entity was not confirmed".into();
             }
         }
-        Scope::Selected(sequences) => {
+        Scope::Selected { sequences, session } => {
             let found = source
-                .sequences(&entity, view, &sequences, SELECTED_BUDGET, cancel)
+                .sequences(
+                    &entity,
+                    view,
+                    &sequences,
+                    SELECTED_BUDGET,
+                    session.as_deref(),
+                    cancel,
+                )
                 .await
                 .map_err(cancelled)?;
             if cancel.is_cancelled() {
@@ -614,6 +636,7 @@ mod tests {
             _v: PeekView,
             seqs: &[i64],
             _b: u64,
+            _session: Option<&str>,
             c: &CancellationToken,
         ) -> dispatched_core::Result<SequenceCollection> {
             if let Some((_, token)) = &self.cancel_after {
@@ -736,6 +759,7 @@ mod tests {
             dir.path(),
             ExportScope::Selected {
                 sequences: vec![1, 2],
+                session_id: None,
             },
         )
         .unwrap();
@@ -754,6 +778,7 @@ mod tests {
             dir.path(),
             ExportScope::Selected {
                 sequences: vec![1, 2, 9],
+                session_id: None,
             },
         )
         .unwrap();
@@ -765,6 +790,76 @@ mod tests {
             s.summary,
             "Exported 2 messages to out.json; 1 selected message was no longer there"
         );
+    }
+
+    /// Records the session a selected export reads through.
+    #[derive(Default)]
+    struct SessionSeen(Mutex<Vec<Option<String>>>);
+
+    #[async_trait::async_trait]
+    impl ExportSource for SessionSeen {
+        async fn page(
+            &self,
+            _e: &EntityPath,
+            _v: PeekView,
+            _o: &PeekOptions,
+        ) -> dispatched_core::Result<PeekPage> {
+            unreachable!()
+        }
+        async fn sequences(
+            &self,
+            _e: &EntityPath,
+            _v: PeekView,
+            seqs: &[i64],
+            _b: u64,
+            session: Option<&str>,
+            _c: &CancellationToken,
+        ) -> dispatched_core::Result<SequenceCollection> {
+            self.0.lock().unwrap().push(session.map(str::to_string));
+            Ok(SequenceCollection {
+                messages: seqs.iter().copied().map(msg).collect(),
+                missing: vec![],
+                scanned: 0,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_selected_export_reads_through_the_rows_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let scope: ExportScope = serde_json::from_value(serde_json::json!({
+            "kind": "selected", "sequences": [2, 4], "session_id": "order-7"
+        }))
+        .unwrap();
+        let plan = plan_in(dir.path(), scope).unwrap();
+        let seen = SessionSeen::default();
+        run(
+            plan,
+            &seen,
+            &CancellationToken::new(),
+            &Recorder::default(),
+            "j1",
+        )
+        .await
+        .unwrap();
+        // Without a session (a whole-entity view), the whole entity is read, as before.
+        let dir2 = tempfile::tempdir().unwrap();
+        let plan = plan_in(
+            dir2.path(),
+            serde_json::from_value(serde_json::json!({ "kind": "selected", "sequences": [2] }))
+                .unwrap(),
+        )
+        .unwrap();
+        run(
+            plan,
+            &seen,
+            &CancellationToken::new(),
+            &Recorder::default(),
+            "j2",
+        )
+        .await
+        .unwrap();
+        assert_eq!(*seen.0.lock().unwrap(), [Some("order-7".to_string()), None]);
     }
 
     #[test]
@@ -783,9 +878,15 @@ mod tests {
             "invalid"
         );
         assert_eq!(
-            plan_in(dir.path(), ExportScope::Selected { sequences: vec![] })
-                .unwrap_err()
-                .kind,
+            plan_in(
+                dir.path(),
+                ExportScope::Selected {
+                    sequences: vec![],
+                    session_id: None,
+                }
+            )
+            .unwrap_err()
+            .kind,
             "invalid"
         );
         let e = plan(request("p", all()), dir.path().to_path_buf()).unwrap_err();
@@ -890,11 +991,14 @@ mod tests {
             dir.path(),
             ExportScope::Selected {
                 sequences: vec![3, 1, 3, 2, 1],
+                session_id: None,
             },
         )
         .unwrap();
         assert_eq!(p.total, Some(3));
-        assert!(matches!(&p.scope, Scope::Selected(s) if s == &[1, 2, 3]));
+        assert!(
+            matches!(&p.scope, Scope::Selected { sequences, session: None } if sequences == &[1, 2, 3])
+        );
     }
 
     #[test]
@@ -1009,6 +1113,7 @@ mod tests {
             _v: PeekView,
             _s: &[i64],
             _b: u64,
+            _session: Option<&str>,
             _c: &CancellationToken,
         ) -> dispatched_core::Result<SequenceCollection> {
             unreachable!()

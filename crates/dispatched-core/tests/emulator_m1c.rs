@@ -77,7 +77,7 @@ async fn m1c_tail_sequences_sessions_details() {
     let seq = tail.messages[0].sequence_number;
     assert_eq!(
         explorer
-            .peek_message(&q, PeekView::Active, seq)
+            .peek_message(&q, PeekView::Active, seq, None)
             .await
             .unwrap()
             .unwrap()
@@ -86,7 +86,7 @@ async fn m1c_tail_sequences_sessions_details() {
     );
     assert!(
         explorer
-            .peek_message(&q, PeekView::DeadLetter, seq)
+            .peek_message(&q, PeekView::DeadLetter, seq, None)
             .await
             .unwrap()
             .is_none(),
@@ -96,7 +96,7 @@ async fn m1c_tail_sequences_sessions_details() {
     // Selected sequences.
     let picked: Vec<i64> = tail.messages.iter().map(|m| m.sequence_number).collect();
     let c = explorer
-        .collect_sequences(&q, PeekView::Active, &picked, 100_000, None)
+        .collect_sequences(&q, PeekView::Active, &picked, 100_000, None, None)
         .await
         .unwrap();
     assert_eq!(c.messages.len(), 3);

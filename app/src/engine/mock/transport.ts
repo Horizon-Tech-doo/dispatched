@@ -555,7 +555,11 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
         const entity = entityPath(args.entity as string);
         connectedTo(args.profileId);
         return quietly(`Reading message ${args.sequence} of ${entity} failed`, started, () => {
-          const m = fx.messagesOf(entity, scenario).find((x) => x.sequence_number === args.sequence && accepts(args.view as PeekView, x));
+          // As Rust: read through the row's session when given, so another session's message is not there.
+          const session = (args.sessionId as string | null | undefined) ?? null;
+          const m = fx.messagesOf(entity, scenario).find(
+            (x) => x.sequence_number === args.sequence && accepts(args.view as PeekView, x) && (session === null || x.session_id === session),
+          );
           if (!m || scenario === "message-gone") return null;
           return structuredClone(without(m, "sub")) satisfies MessageDetail;
         });
@@ -711,7 +715,9 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
           // `export-missing`: the last two selected messages were received since the grid read them.
           const wanted = [...new Set(r.scope.sequences)];
           const lost = scenario === "export-missing" ? new Set(wanted.slice(-2)) : new Set<number>();
-          found = inView.filter((m) => wanted.includes(m.sequence_number) && !lost.has(m.sequence_number));
+          // As Rust: through the rows' session when given, keeping only that session's messages.
+          const session = r.scope.session_id ?? null;
+          found = inView.filter((m) => wanted.includes(m.sequence_number) && !lost.has(m.sequence_number) && (session === null || m.session_id === session));
           total = wanted.length;
           missingCount = wanted.length - found.length;
           if (missingCount === 1) note = "; 1 selected message was no longer there";

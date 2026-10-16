@@ -242,17 +242,26 @@ impl Explorer {
             .await
     }
 
-    /// One message by sequence number, if it is still in `view`.
+    /// One message by sequence number, if it is still in `view`; read through `session` when
+    /// given (see [`peek_one`]).
     pub async fn peek_message(
         &self,
         entity: &EntityPath,
         view: PeekView,
         sequence: i64,
+        session: Option<&str>,
     ) -> Result<Option<PeekedMessage>> {
         let address = entity.address(view.sub_queue());
         with_one_retry(|_| async {
             let mut guard = self.connection().await?;
-            let result = peek_one(guard.as_mut().expect("opened"), &address, view, sequence).await;
+            let result = peek_one(
+                guard.as_mut().expect("opened"),
+                &address,
+                view,
+                sequence,
+                session,
+            )
+            .await;
             drop_if_broken(&self.ns, &mut guard, result).await
         })
         .await
@@ -268,6 +277,7 @@ impl Explorer {
         sequences: &[i64],
         budget: u64,
         cancel: Option<&CancellationToken>,
+        session: Option<&str>,
     ) -> Result<SequenceCollection> {
         let address = entity.address(view.sub_queue());
         collect_sequences(
@@ -277,6 +287,7 @@ impl Explorer {
             sequences,
             budget,
             cancel,
+            session,
         )
         .await
     }
@@ -515,8 +526,8 @@ mod tests {
     #[allow(dead_code)]
     fn browse_futures_are_send(e: &Explorer, p: &EntityPath, o: &PeekOptions) {
         assert_send(&e.peek_tail(p, PeekView::Active, o));
-        assert_send(&e.peek_message(p, PeekView::Active, 1));
-        assert_send(&e.collect_sequences(p, PeekView::Active, &[1], 10, None));
+        assert_send(&e.peek_message(p, PeekView::Active, 1, Some("s")));
+        assert_send(&e.collect_sequences(p, PeekView::Active, &[1], 10, None, Some("s")));
         assert_send(&e.peek(p, PeekView::Active, o));
         assert_send(&e.list_sessions(p));
     }
@@ -873,7 +884,7 @@ mod tests {
             Err(Error::Cancelled)
         ));
         assert!(matches!(
-            e.collect_sequences(&q, PeekView::Active, &[1], 10, None)
+            e.collect_sequences(&q, PeekView::Active, &[1], 10, None, None)
                 .await,
             Err(Error::Cancelled)
         ));

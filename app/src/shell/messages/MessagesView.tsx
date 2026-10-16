@@ -277,6 +277,7 @@ export function MessagesView({
                   entity={tab.id}
                   view={view}
                   sequence={sel.focus !== null ? Number(sel.focus) : null}
+                  sessionId={vs.filter.session_id ?? null}
                   onClose={closeDetail}
                   onPeekAgain={restart}
                   onExport={(sequence) => exportSheet([sequence])}

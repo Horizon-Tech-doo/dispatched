@@ -33,9 +33,10 @@ export const listSubscriptions = (profileId: string, topic: string) => call<Subs
 
 /** One page of summaries; the engine caps a page at 500 (from the end: 5,000) and its scan at 5,000 (100,000). */
 export const peekPage = (profileId: string, request: PeekRequest) => call<PeekPageView>("peek_page", { profileId, request });
-/** The full message (body capped at 4 MiB), or `null` when it is no longer in the view. */
-export const messageDetail = (profileId: string, entity: string, view: PeekView, sequence: number) =>
-  call<MessageDetail | null>("message_detail", { profileId, entity, view, sequence });
+/** The full message (body capped at 4 MiB), or `null` when it is no longer in the view. `sessionId` is the session the
+ *  row was peeked in (a per-session view): the engine reads it through that session. */
+export const messageDetail = (profileId: string, entity: string, view: PeekView, sequence: number, sessionId: string | null = null) =>
+  call<MessageDetail | null>("message_detail", { profileId, entity, view, sequence, sessionId });
 /** Problems with a filter, at most one per field; empty when it compiles. Local: no connection needed. */
 export const checkFilter = (filter: FilterSpec) => call<FilterIssue[]>("check_filter", { filter });
 export const entityDetails = (profileId: string, kind: EntityKindName, entity: string) => call<EntityDetails>("entity_details", { profileId, kind, entity });

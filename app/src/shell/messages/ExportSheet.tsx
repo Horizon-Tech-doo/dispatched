@@ -86,7 +86,10 @@ export function ExportSheet(p: {
             profileId: conn.profileId,
             request: {
               entity: p.entity, view: p.view, format, pick: file.pick, total_hint: total,
-              scope: selecting ? { kind: "selected", sequences: p.selected } : { kind: "all", filter: p.filter },
+              // Selected rows of a per-session view are read again through that session, as they were peeked.
+              scope: selecting
+                ? { kind: "selected", sequences: p.selected, ...(p.filter.session_id ? { session_id: p.filter.session_id } : {}) }
+                : { kind: "all", filter: p.filter },
             },
           });
         } catch (e) {

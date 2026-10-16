@@ -548,13 +548,21 @@ pub async fn peek_tail<S: PeekSource + ?Sized>(
 }
 
 /// The message with sequence number `sequence` in `view` of `address`, if it is still there.
+/// With `session`, it is read through that session, as a per-session view's rows were (the whole
+/// entity only when the source cannot peek by session).
 pub async fn peek_one<S: PeekSource + ?Sized>(
     src: &mut S,
     address: &str,
     view: PeekView,
     sequence: i64,
+    session: Option<&str>,
 ) -> Result<Option<PeekedMessage>> {
-    let batch = src.peek_batch(address, sequence, 1).await?;
+    let mut b = Batches {
+        src,
+        address,
+        session,
+    };
+    let batch = b.next(sequence, 1).await?;
     Ok(batch
         .into_iter()
         .find(|m| m.sequence_number == sequence && view.accepts(m.state)))
@@ -574,7 +582,9 @@ pub struct SequenceCollection {
 /// The messages of `view` with the given sequence numbers, read from the smallest to the
 /// largest. Each batch starts at the next wanted sequence number, so messages between wanted
 /// ones are skipped rather than read. Examines at most `budget` messages; stops early when all
-/// are found.
+/// are found. With `session`, reads go through that session, as a per-session view's rows did (the
+/// whole entity only when the source cannot peek by session), and only that session's messages
+/// are collected.
 pub async fn collect_sequences<S: PeekSource + ?Sized>(
     src: &mut S,
     address: &str,
@@ -582,7 +592,13 @@ pub async fn collect_sequences<S: PeekSource + ?Sized>(
     sequences: &[i64],
     budget: u64,
     cancel: Option<&CancellationToken>,
+    session: Option<&str>,
 ) -> Result<SequenceCollection> {
+    let mut b = Batches {
+        src,
+        address,
+        session,
+    };
     let mut wanted: BTreeSet<i64> = sequences.iter().copied().filter(|&s| s >= 0).collect();
     let mut out = SequenceCollection::default();
     let (Some(&first), Some(&last)) = (wanted.first(), wanted.last()) else {
@@ -601,7 +617,7 @@ pub async fn collect_sequences<S: PeekSource + ?Sized>(
         if cancel.is_some_and(CancellationToken::is_cancelled) {
             return Err(Error::Cancelled);
         }
-        let batch = src.peek_batch(address, next, MAX_PER_REQUEST).await?;
+        let batch = b.next(next, MAX_PER_REQUEST).await?;
         let mut advanced = false;
         for m in batch {
             if m.sequence_number < next {
@@ -613,7 +629,8 @@ pub async fn collect_sequences<S: PeekSource + ?Sized>(
             out.scanned += 1;
             next = m.sequence_number + 1;
             advanced = true;
-            if wanted.remove(&m.sequence_number) && view.accepts(m.state) {
+            let in_session = session.is_none_or(|s| m.session_id.as_deref() == Some(s));
+            if wanted.remove(&m.sequence_number) && view.accepts(m.state) && in_session {
                 out.messages.push(m);
             }
             if out.scanned >= budget {
@@ -1122,6 +1139,82 @@ mod tests {
         assert!(page.exhausted);
     }
 
+    #[tokio::test]
+    async fn peek_one_reads_through_the_session_and_falls_back_when_refused() {
+        for supports in [true, false] {
+            let mut src = SessionFake {
+                messages: sessions(10),
+                session_calls: 0,
+                plain_calls: 0,
+                supports_sessions: supports,
+            };
+            let m = peek_one(&mut src, "q", PeekView::Active, 4, Some("even"))
+                .await
+                .unwrap()
+                .expect("found");
+            assert_eq!(m.sequence_number, 4);
+            assert_eq!(src.session_calls, 1, "supports={supports}");
+            assert_eq!(src.plain_calls, u32::from(!supports), "supports={supports}");
+        }
+    }
+
+    #[tokio::test]
+    async fn collect_sequences_reads_through_the_session_and_falls_back_when_refused() {
+        for supports in [true, false] {
+            let mut src = SessionFake {
+                messages: sessions(10),
+                session_calls: 0,
+                plain_calls: 0,
+                supports_sessions: supports,
+            };
+            let c = collect_sequences(
+                &mut src,
+                "q",
+                PeekView::Active,
+                &[2, 6, 10],
+                1_000,
+                None,
+                Some("even"),
+            )
+            .await
+            .unwrap();
+            assert_eq!(seq_of(&c.messages), [2, 6, 10], "supports={supports}");
+            assert!(c.missing.is_empty());
+            if supports {
+                assert_eq!(src.plain_calls, 0, "the whole entity is never peeked");
+            } else {
+                assert_eq!(src.session_calls, 1, "asked once, then fell back for good");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn collect_sequences_in_a_session_keeps_only_that_sessions_messages() {
+        // The emulator ignores `session-id`; a wanted number from another session is missing.
+        let mut src = IgnoresSession {
+            messages: sessions(10),
+            session_calls: 0,
+            plain_calls: 0,
+        };
+        let c = collect_sequences(
+            &mut src,
+            "q",
+            PeekView::Active,
+            &[2, 3],
+            1_000,
+            None,
+            Some("even"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(seq_of(&c.messages), [2]);
+        assert_eq!(c.missing, [3]);
+    }
+
+    fn seq_of(ms: &[PeekedMessage]) -> Vec<i64> {
+        ms.iter().map(|m| m.sequence_number).collect()
+    }
+
     /// A source that takes `session-id` but ignores it and returns the whole entity, as the
     /// emulator does. It never refuses, so no fallback is triggered.
     struct IgnoresSession {
@@ -1323,7 +1416,7 @@ mod tests {
             calls: 0,
         };
         assert_eq!(
-            peek_one(&mut src, "q", PeekView::Active, 2)
+            peek_one(&mut src, "q", PeekView::Active, 2, None)
                 .await
                 .unwrap()
                 .unwrap()
@@ -1331,14 +1424,14 @@ mod tests {
             2
         );
         assert!(
-            peek_one(&mut src, "q", PeekView::Active, 3)
+            peek_one(&mut src, "q", PeekView::Active, 3, None)
                 .await
                 .unwrap()
                 .is_none(),
             "3 was received; 5 is not it"
         );
         assert!(
-            peek_one(&mut src, "q", PeekView::Scheduled, 1)
+            peek_one(&mut src, "q", PeekView::Scheduled, 1, None)
                 .await
                 .unwrap()
                 .is_none(),
@@ -1359,6 +1452,7 @@ mod tests {
             &[21, 3, 4, 3, 8],
             1_000,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1377,7 +1471,7 @@ mod tests {
         let mut src = entity(10_000, 0);
         // A dense selection (no gap to jump over): the budget ends the read at 500.
         let wanted: Vec<i64> = (1..=600).collect();
-        let c = collect_sequences(&mut src, "q", PeekView::Active, &wanted, 500, None)
+        let c = collect_sequences(&mut src, "q", PeekView::Active, &wanted, 500, None, None)
             .await
             .unwrap();
         assert_eq!(c.messages.len(), 500);
@@ -1389,9 +1483,17 @@ mod tests {
         assert_eq!(c.scanned, 500);
         let token = CancellationToken::new();
         token.cancel();
-        let e = collect_sequences(&mut src, "q", PeekView::Active, &[1], 500, Some(&token))
-            .await
-            .unwrap_err();
+        let e = collect_sequences(
+            &mut src,
+            "q",
+            PeekView::Active,
+            &[1],
+            500,
+            Some(&token),
+            None,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(e, Error::Cancelled));
     }
 
@@ -1404,6 +1506,7 @@ mod tests {
             PeekView::Active,
             &[10, 95_000],
             1_000_000,
+            None,
             None,
         )
         .await
@@ -1432,9 +1535,17 @@ mod tests {
     async fn collect_sequences_reports_a_wanted_message_in_another_view_as_missing() {
         // 5 and 10 are scheduled.
         let mut src = entity(10, 5);
-        let c = collect_sequences(&mut src, "q", PeekView::Active, &[4, 5, 6], 1_000, None)
-            .await
-            .unwrap();
+        let c = collect_sequences(
+            &mut src,
+            "q",
+            PeekView::Active,
+            &[4, 5, 6],
+            1_000,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             c.messages
                 .iter()
@@ -1606,6 +1717,7 @@ mod tests {
             PeekView::Active,
             &[4, 95_000],
             1_000_000,
+            None,
             None,
         )
         .await

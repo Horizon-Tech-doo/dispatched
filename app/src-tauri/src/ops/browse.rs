@@ -130,6 +130,8 @@ pub async fn peek_page(
 }
 
 /// The full message (body capped at [`DETAIL_BODY_CAP`]), or `None` when it is no longer in the view.
+/// `session_id` is the session the row was peeked in (a per-session view): the message is read
+/// through it, falling back to the whole entity where the broker can't peek by session.
 pub async fn message_detail(
     state: &AppState,
     ev: &dyn Events,
@@ -137,7 +139,9 @@ pub async fn message_detail(
     entity: &str,
     view: PeekView,
     sequence: i64,
+    session_id: Option<&str>,
 ) -> Result<Option<MessageDetail>, CommandError> {
+    let session_id = session_id.filter(|s| !s.is_empty());
     let path = EntityPath::parse(entity)?;
     let active = state.active_for(profile_id).await?;
     tracked_failures(
@@ -146,7 +150,7 @@ pub async fn message_detail(
         async {
             Ok(active
                 .explorer
-                .peek_message(&path, view, sequence)
+                .peek_message(&path, view, sequence, session_id)
                 .await?
                 .map(|m| MessageDetail::new(m, DETAIL_BODY_CAP)))
         },
@@ -325,7 +329,7 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(e.kind, "not_connected");
-        let e = message_detail(&s, &ev, "someone-else", "orders", PeekView::Active, 1)
+        let e = message_detail(&s, &ev, "someone-else", "orders", PeekView::Active, 1, None)
             .await
             .unwrap_err();
         assert_eq!(e.kind, "not_connected");
