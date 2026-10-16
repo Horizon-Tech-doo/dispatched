@@ -163,9 +163,22 @@ export function messagesOf(entity: string, scenario: string): MockMessage[] {
   let all = cache.get(key);
   if (!all) {
     all = (specs(scenario)[entity] ?? []).flatMap(generate);
-    // The newest tracking-sync dead letter has a 5 MiB body that arrives cut.
-    const big = all.find((m) => m.sub === "dlq" && m.sequence_number === 48_213);
-    if (big) Object.assign(big, { body_size: 5 * 1024 * 1024, body_truncated: true });
+    // The newest tracking-sync dead letters: an empty body, a 6 MiB log that arrives cut, a 5 MiB binary that arrives cut
+    // (both cut to a few thousand rows: the viewer's work is the same).
+    const at = (seq: number) => all!.find((m) => m.sub === "dlq" && m.sequence_number === seq);
+    const empty = at(48_211);
+    if (empty) Object.assign(empty, { body: { kind: "empty" }, body_size: 0, content_type: null });
+    const log = at(48_212);
+    if (log) {
+      const text = Array.from({ length: 600 }, (_, i) => `2026-10-15T10:58:${String(i % 60).padStart(2, "0")}Z worker-${i % 7} INFO shipment ${48_212 + i} step ${i % 23} ok`).join("\n");
+      Object.assign(log, { body: { kind: "text", value: text }, content_type: "text/plain", body_size: 6 * 1024 * 1024, body_truncated: true });
+    }
+    const big = at(48_213);
+    if (big) {
+      // Bytes that are not UTF-8, so the viewer shows hex.
+      const bytes = Array.from({ length: 4096 }, (_, i) => String.fromCharCode((i * 31 + 0xc3) & 0xff)).join("");
+      Object.assign(big, { body: { kind: "binary", value: btoa(bytes) }, content_type: "application/octet-stream", body_size: 5 * 1024 * 1024, body_truncated: true });
+    }
     cache.set(key, all);
   }
   return all;

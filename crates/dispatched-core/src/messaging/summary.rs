@@ -31,6 +31,13 @@ pub struct MessageSummary {
     pub to: Option<String>,
     /// `reply-to` address.
     pub reply_to: Option<String>,
+    /// Session the reply should go to.
+    pub reply_to_session_id: Option<String>,
+    /// Partition key.
+    pub partition_key: Option<String>,
+    /// When the message expires (enqueued time plus time to live).
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub expires_at: Option<OffsetDateTime>,
     /// When the broker enqueued it.
     #[serde(with = "time::serde::rfc3339::option")]
     pub enqueued_time: Option<OffsetDateTime>,
@@ -133,6 +140,9 @@ impl From<&PeekedMessage> for MessageSummary {
             content_type: m.content_type.clone(),
             to: m.to.clone(),
             reply_to: m.reply_to.clone(),
+            reply_to_session_id: m.reply_to_session_id.clone(),
+            partition_key: m.partition_key.clone(),
+            expires_at: m.expires_at,
             enqueued_time: m.enqueued_time,
             scheduled_enqueue_time: m.scheduled_enqueue_time,
             delivery_count: m.delivery_count,
@@ -220,6 +230,21 @@ mod tests {
         assert_eq!(s.body_preview, None, "non-UTF-8 has no text preview");
         m.body = MessageBody::Empty;
         assert_eq!(MessageSummary::from(&m).body_kind, "empty");
+    }
+
+    #[test]
+    fn summary_and_detail_carry_partition_reply_session_and_expiry() {
+        let mut m = test_message(5);
+        m.reply_to_session_id = Some("rs".into());
+        m.partition_key = Some("pk".into());
+        m.expires_at = Some(OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap());
+        let s = serde_json::to_value(MessageSummary::from(&m)).unwrap();
+        let d = serde_json::to_value(MessageDetail::new(m, DETAIL_BODY_CAP)).unwrap();
+        for v in [s, d] {
+            assert_eq!(v["reply_to_session_id"], "rs");
+            assert_eq!(v["partition_key"], "pk");
+            assert_eq!(v["expires_at"], "2023-11-14T22:13:20Z");
+        }
     }
 
     #[test]

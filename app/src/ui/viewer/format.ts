@@ -1,5 +1,4 @@
 export type BodyFormat = "json" | "xml" | "text";
-export const HEX_ROW = 16;
 /** Display limit per line; longer lines are cut (copy and export keep everything). */
 export const MAX_LINE = 20_000;
 /**
@@ -274,6 +273,31 @@ export function utf8OrNull(bytes: Uint8Array): string | null {
 
 const HEX = Array.from({ length: 256 }, (_, b) => b.toString(16).padStart(2, "0"));
 
+/** Bytes per hex row: 16 when the view is wide enough, else 8. */
+export type HexWidth = 8 | 16;
+/** The widest row. */
+export const HEX_ROW = 16;
+/** Offsets are at least this many hex digits (a 4 MiB body needs six). */
+export const HEX_OFFSET_DIGITS = 6;
+
+/** Characters of the hex column for `width` bytes: pairs joined by a space, a second space between the two groups of 8. */
+export const hexColumns = (width: HexWidth) => (width === 16 ? 48 : 23);
+
+/** The column titles `00 01 .. 0f` for `width` bytes, as wide as `hexColumns`. */
+export function hexHeader(width: HexWidth): string {
+  const cols = Array.from({ length: width }, (_, i) => i.toString(16).padStart(2, "0"));
+  return width === 16 ? `${cols.slice(0, 8).join(" ")}  ${cols.slice(8).join(" ")}` : cols.join(" ");
+}
+
+/** The narrowest wide-enough layout: 16 bytes per row when offset, hex and text columns (and their padding) fit
+ *  in `available` pixels for a mono character `charWidth` pixels wide, else 8. Below even that the view scrolls. */
+export function hexWidthFor(available: number, charWidth: number): HexWidth {
+  if (!(available > 0) || !(charWidth > 0)) return 16;
+  // offset + hex + "|text|", and the paddings the view puts around the three columns (12 + 12 + 12 + 16 px).
+  const need = (HEX_OFFSET_DIGITS + hexColumns(16) + HEX_ROW + 2) * charWidth + 52;
+  return available >= need ? 16 : 8;
+}
+
 export interface HexRow {
   offset: string;
   /** Padded to the width of a full row so the text column lines up. */
@@ -282,9 +306,9 @@ export interface HexRow {
   ascii: string;
 }
 
-/** One row of up to 16 bytes from `at`, never reading past `end`. */
-export function hexRow(bytes: Uint8Array, at: number, end = bytes.length): HexRow {
-  const stop = Math.min(at + HEX_ROW, end, bytes.length);
+/** One row of up to `width` bytes from `at`, never reading past `end`. */
+export function hexRow(bytes: Uint8Array, at: number, end = bytes.length, width: HexWidth = 16): HexRow {
+  const stop = Math.min(at + width, end, bytes.length);
   const cells: string[] = [];
   let ascii = "";
   for (let i = at; i < stop; i++) {
@@ -295,17 +319,17 @@ export function hexRow(bytes: Uint8Array, at: number, end = bytes.length): HexRo
   const left = cells.slice(0, 8).join(" ");
   const right = cells.slice(8).join(" ");
   return {
-    offset: at.toString(16).padStart(8, "0"),
-    hex: (right ? `${left}  ${right}` : left).padEnd(HEX_ROW * 3, " "),
+    offset: at.toString(16).padStart(HEX_OFFSET_DIGITS, "0"),
+    hex: (right ? `${left}  ${right}` : left).padEnd(hexColumns(width), " "),
     ascii: `|${ascii}|`,
   };
 }
 
-/** `00000010  7b 22 69 …  |{"i…|` rows of 16 bytes, for bytes [start, end). */
-export function hexDump(bytes: Uint8Array, start = 0, end = bytes.length): string[] {
+/** `000010  7b 22 69 …  |{"i…|` rows for bytes [start, end). */
+export function hexDump(bytes: Uint8Array, start = 0, end = bytes.length, width: HexWidth = 16): string[] {
   const rows: string[] = [];
-  for (let at = Math.max(0, start); at < Math.min(end, bytes.length); at += HEX_ROW) {
-    const r = hexRow(bytes, at, end);
+  for (let at = Math.max(0, start); at < Math.min(end, bytes.length); at += width) {
+    const r = hexRow(bytes, at, end, width);
     rows.push(`${r.offset}  ${r.hex}  ${r.ascii}`);
   }
   return rows;

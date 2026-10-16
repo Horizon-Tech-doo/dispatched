@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { MAX_LINES } from "./format";
 import { CodeView } from "./CodeView";
 import { HexView } from "./HexView";
@@ -60,7 +60,7 @@ describe("CodeView", () => {
 describe("HexView", () => {
   it("renders offset, hex and text columns", () => {
     render(<HexView bytes={new Uint8Array([0x48, 0x69])} label="Hex" />);
-    expect(screen.getByRole("region", { name: "Hex" })).toHaveTextContent("00000000");
+    expect(screen.getByRole("region", { name: "Hex" })).toHaveTextContent("000000");
     expect(screen.getByText("48 69")).toBeInTheDocument();
     expect(screen.getByText("|Hi|")).toBeInTheDocument();
   });
@@ -74,6 +74,28 @@ describe("HexView", () => {
     const zero = within(row as HTMLElement).getByText("00");
     expect(zero.className).toContain("text-faint");
     expect(header.querySelector("[data-row]")).toBeNull();
+  });
+  it("holds 16 bytes per row in a wide view and 8 in a narrow one, and follows a resize", () => {
+    let width = 700;
+    let resize: () => void = () => {};
+    vi.stubGlobal("ResizeObserver", class { constructor(cb: () => void) { resize = cb; } observe() {} disconnect() {} unobserve() {} });
+    const client = vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(() => width);
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(() => ({ width: 66, height: 12 }) as DOMRect);
+    try {
+      render(<HexView bytes={Uint8Array.from({ length: 40 }, (_, i) => i)} label="Hex" />);
+      const region = screen.getByRole("region", { name: "Hex" });
+      expect(region).toHaveTextContent("08 09 0a 0b 0c 0d 0e 0f");
+      expect(region.querySelectorAll("[data-row]")).toHaveLength(3);
+      width = 400;
+      act(() => resize());
+      expect(screen.getByText("Offset").parentElement).toHaveTextContent("00 01 02 03 04 05 06 07Text");
+      expect(region.querySelectorAll("[data-row]")).toHaveLength(5);
+      expect(region).toHaveTextContent("000020");
+    } finally {
+      client.mockRestore();
+      rect.mockRestore();
+      vi.unstubAllGlobals();
+    }
   });
   it("shows a caller's notice as the last row", () => {
     render(<HexView bytes={new Uint8Array(4)} label="Hex" notice="Showing the first 4 MiB." />);

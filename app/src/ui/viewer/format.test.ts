@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  base64ToBytes, detectFormat, formatBody, hexDump, MAX_LINES, prettyJson, prettyXml, splitLines, utf8OrNull,
+  base64ToBytes, detectFormat, formatBody, hexColumns, hexDump, hexHeader, hexRow, hexWidthFor, MAX_LINES, prettyJson, prettyXml, splitLines, utf8OrNull,
 } from "./format";
 
 describe("prettyJson", () => {
@@ -134,16 +134,40 @@ describe("bytes", () => {
   });
   it("hexDump shows non-printables as dots", () => {
     const lines = hexDump(new Uint8Array([0x7b, 0x00, 0x41, 0xff]));
-    expect(lines).toEqual(["00000000  7b 00 41 ff                                       |{.A.|"]);
+    expect(lines).toEqual(["000000  7b 00 41 ff                                       |{.A.|"]);
     expect(hexDump(new Uint8Array(40))).toHaveLength(3);
-    expect(hexDump(new Uint8Array(40), 16, 32)[0].startsWith("00000010")).toBe(true);
+    expect(hexDump(new Uint8Array(40), 16, 32)[0].startsWith("000010")).toBe(true);
   });
   it("hexDump aligns a full row and copes with empty and out-of-range input", () => {
     const full = hexDump(Uint8Array.from({ length: 16 }, (_, i) => i + 0x30))[0];
-    expect(full).toBe("00000000  30 31 32 33 34 35 36 37  38 39 3a 3b 3c 3d 3e 3f  |0123456789:;<=>?|");
+    expect(full).toBe("000000  30 31 32 33 34 35 36 37  38 39 3a 3b 3c 3d 3e 3f  |0123456789:;<=>?|");
     expect(hexDump(new Uint8Array())).toEqual([]);
     expect(hexDump(new Uint8Array(4), 100, 200)).toEqual([]);
     expect(hexDump(new Uint8Array(4), 0, 1000)).toHaveLength(1);
+  });
+  it("hexDump holds 8 bytes per row when asked, with the hex column as wide as the title", () => {
+    const bytes = Uint8Array.from({ length: 20 }, (_, i) => i + 0x30);
+    const rows = hexDump(bytes, 0, bytes.length, 8);
+    expect(rows).toHaveLength(3);
+    expect(rows[0]).toBe("000000  30 31 32 33 34 35 36 37  |01234567|");
+    expect(rows[2]).toBe(`000010  ${"40 41 42 43".padEnd(hexColumns(8))}  |@ABC|`);
+    expect(hexHeader(8)).toBe("00 01 02 03 04 05 06 07");
+    expect(hexHeader(16)).toBe("00 01 02 03 04 05 06 07  08 09 0a 0b 0c 0d 0e 0f");
+    for (const w of [8, 16] as const) expect(hexRow(bytes, 0, 20, w).hex).toHaveLength(hexColumns(w));
+  });
+  it("offsets keep six digits and grow only past them", () => {
+    expect(hexRow(new Uint8Array(4), 0).offset).toBe("000000");
+    expect(hexRow(new Uint8Array(0x400000 + 16), 0x400000).offset).toBe("400000");
+  });
+  it("hexWidthFor chooses 16 bytes only when offset, hex and text fit", () => {
+    // 72 columns of 6.6 px and 52 px of padding: 527.2 px.
+    expect(hexWidthFor(600, 6.6)).toBe(16);
+    expect(hexWidthFor(528, 6.6)).toBe(16);
+    expect(hexWidthFor(527, 6.6)).toBe(8);
+    expect(hexWidthFor(300, 6.6)).toBe(8);
+    // Unmeasured (not laid out yet): the wide layout.
+    expect(hexWidthFor(0, 6.6)).toBe(16);
+    expect(hexWidthFor(600, 0)).toBe(16);
   });
 });
 

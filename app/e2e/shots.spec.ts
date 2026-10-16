@@ -46,6 +46,17 @@ const openRow = async (page: Page, row: number, body: string | RegExp = "Body") 
   await page.getByRole("region", { name: body }).first().waitFor();
 };
 
+/** Read from the end, select the row `up` rows above the newest and open the pane on it. */
+const openFromEnd = async (page: Page, up: number) => {
+  await peekStatus(page).getByText(/100 messages/).waitFor();
+  await page.getByRole("radio", { name: "End" }).click();
+  await peekStatus(page).getByText("Last 100 messages").waitFor();
+  await page.getByRole("grid").focus();
+  await page.keyboard.press("End");
+  for (let i = 0; i < up; i++) await page.keyboard.press("ArrowUp");
+  await page.keyboard.press("Enter");
+};
+
 /** The message detail pane. The mock's bodies by position: row 0 is binary (not UTF-8), 1 JSON, 2 XML, 3 text. */
 function detailShots(): Shot[] {
   const pane = (p: Page) => p.getByRole("region", { name: /^Message \d+$/ });
@@ -63,16 +74,43 @@ function detailShots(): Shot[] {
       },
     },
     {
+      // The newest dead letters of tracking-sync: 48213 is a 5 MiB binary cut to a few thousand rows, 48212 a 6 MiB log cut the
+      // same way, 48211 has no body.
       name: "message-detail-truncated",
       path: DETAIL_VIEW(),
       prepare: async (p) => {
+        await openFromEnd(p, 0);
+        await p.getByText(/^Showing the first .* of 5\.0 MiB/).waitFor();
+      },
+    },
+    {
+      name: "message-detail-text-truncated",
+      path: DETAIL_VIEW(),
+      prepare: async (p) => {
+        await openFromEnd(p, 1);
+        await p.getByText(/^Showing the first .* of 6\.0 MiB/).waitFor();
+      },
+    },
+    {
+      name: "message-detail-empty",
+      path: DETAIL_VIEW(),
+      prepare: async (p) => {
+        await openFromEnd(p, 2);
+        await p.getByText("Empty body (0 bytes)").waitFor();
+      },
+    },
+    {
+      name: "message-detail-none",
+      path: DETAIL_VIEW(),
+      prepare: async (p) => {
         await peekStatus(p).getByText(/100 messages/).waitFor();
-        await p.getByRole("radio", { name: "End" }).click();
-        await peekStatus(p).getByText("Last 100 messages").waitFor();
-        await p.getByRole("grid").focus();
-        await p.keyboard.press("End");
-        await p.keyboard.press("Enter");
-        await p.getByText(/^Showing the first 4\.0 MiB of 5\.0 MiB/).waitFor();
+        // The pane is open (Enter or a double click did it) but nothing is selected: put the view in that state.
+        await p.evaluate(() => {
+          const m = (window as unknown as { __dispatchedMock: { setViewState(k: string, d: unknown, p: unknown): void; viewKey(p: string, t: string, v: string): string } }).__dispatchedMock;
+          const defaults = { from: { kind: "start" }, topN: 100, filter: {}, filterOpen: false, sorting: null, detailOpen: false };
+          m.setViewState(m.viewKey("p-logistics", "shipment-events/subscriptions/tracking-sync", "dead-letter"), defaults, { detailOpen: true });
+        });
+        await p.getByRole("heading", { name: "No message selected" }).waitFor();
       },
     },
     {

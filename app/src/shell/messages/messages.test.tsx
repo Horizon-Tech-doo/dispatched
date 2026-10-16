@@ -18,7 +18,7 @@ const presetView = (tabId: string, view: string, patch: Partial<ViewState>) => s
 
 const summary = (seq: number): MessageSummary => ({
   sequence_number: seq, state: "active", message_id: `m-${seq}`, correlation_id: null, session_id: null, subject: "s", content_type: null, to: null,
-  reply_to: null, enqueued_time: "2026-10-15T09:00:00Z", scheduled_enqueue_time: null, delivery_count: 0, time_to_live_ms: null,
+  reply_to: null, reply_to_session_id: null, partition_key: null, expires_at: null, enqueued_time: "2026-10-15T09:00:00Z", scheduled_enqueue_time: null, delivery_count: 0, time_to_live_ms: null,
   dead_letter_reason: null, dead_letter_description: null, dead_letter_source: null, application_properties: {}, body_kind: "empty", body_size: 0,
   body_preview: null,
 });

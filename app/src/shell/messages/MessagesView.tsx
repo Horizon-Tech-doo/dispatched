@@ -95,6 +95,7 @@ export function MessagesView({
     setVs({ detailOpen: false });
     gridBox.current?.querySelector<HTMLElement>('[role="grid"]')?.focus();
   };
+  const shownProps = useMemo(() => columnIds.filter((c) => c.startsWith("prop:")).map((c) => c.slice(5)), [columnIds]);
   const qc = useQueryClient();
   const label = VIEW_LABEL[view];
   const propertyNames = useMemo(() => {
@@ -256,6 +257,8 @@ export function MessagesView({
                   view={view}
                   sequence={sel.focus !== null ? Number(sel.focus) : null}
                   onClose={closeDetail}
+                  onPeekAgain={restart}
+                  shownProps={shownProps}
                   onShowColumn={(name) => {
                     const id = propColumn(name);
                     if (!columnIds.includes(id)) setColumnIds([...columnIds, id]);

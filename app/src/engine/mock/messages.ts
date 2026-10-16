@@ -68,6 +68,8 @@ export function generate(s: Spec): MockMessage[] {
       props.DeadLetterErrorDescription = { type: "string", value: dl[1] };
     }
     const enq = new Date(T0 - (s.count - i) * 37_000).toISOString();
+    // Every fourth message carries a 14-day time to live.
+    const ttl = i % 4 === 0 ? 14 * 86_400_000 : null;
     return {
       sub: s.sub,
       sequence_number: seq,
@@ -78,11 +80,14 @@ export function generate(s: Spec): MockMessage[] {
       subject: SUBJECTS[pick(i, SUBJECTS.length)],
       to: null,
       reply_to: null,
+      reply_to_session_id: null,
+      partition_key: pick(i, 5) === 0 ? `pk-${pick(i, 8)}` : null,
+      expires_at: ttl === null ? null : new Date(Date.parse(enq) + ttl).toISOString(),
       enqueued_time: enq,
       scheduled_enqueue_time: state === "scheduled" ? new Date(T0 + 3_600_000 + i * 60_000).toISOString() : null,
       locked_until: null,
       delivery_count: dl ? 10 : pick(i, 3),
-      time_to_live_ms: null,
+      time_to_live_ms: ttl,
       dead_letter_reason: dl?.[0] ?? null,
       dead_letter_description: dl?.[1] ?? null,
       dead_letter_source: null,

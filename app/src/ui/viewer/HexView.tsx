@@ -1,9 +1,6 @@
-import { Fragment } from "react";
-import { HEX_ROW, hexRow } from "./format";
+import { Fragment, useLayoutEffect, useRef, useState } from "react";
+import { HEX_OFFSET_DIGITS, hexHeader, hexRow, hexWidthFor, type HexWidth } from "./format";
 import { NoticeRow, VirtualLines } from "./VirtualLines";
-
-const COLUMNS = Array.from({ length: HEX_ROW }, (_, i) => i.toString(16).padStart(2, "0"));
-const HEX_HEADER = `${COLUMNS.slice(0, 8).join(" ")}  ${COLUMNS.slice(8).join(" ")}`.padEnd(HEX_ROW * 3, " ");
 
 /** Zero bytes are dimmed so runs of padding recede. A byte is exactly two hex digits, so "00" only ever occurs as a whole byte. */
 function HexBytes({ hex }: { hex: string }) {
@@ -16,32 +13,59 @@ function HexBytes({ hex }: { hex: string }) {
   );
 }
 
-/** Any bytes as `offset  hex  |text|` rows of 16, virtualised, under a sticky column header. `notice` is shown as a last row. */
+/** How many bytes a row holds: 16 while the offset, hex and text columns fit the view, else 8. The view is measured
+ *  (its width and the width of a mono character), and measured again when it is resized. */
+function useHexWidth() {
+  const box = useRef<HTMLDivElement>(null);
+  const probe = useRef<HTMLSpanElement>(null);
+  const [width, setWidth] = useState<HexWidth>(16);
+  useLayoutEffect(() => {
+    const el = box.current;
+    const ch = probe.current;
+    if (!el || !ch) return;
+    const measure = () => setWidth(hexWidthFor(el.clientWidth, ch.getBoundingClientRect().width / 10));
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+  return { box, probe, width };
+}
+
+/** Any bytes as `offset  hex  |text|` rows of 16 (8 in a narrow view), virtualised, under a sticky column header.
+ *  `notice` is shown as a last row. Only a view narrower than one 8-byte row scrolls sideways. */
 export function HexView({ bytes, label, notice }: { bytes: Uint8Array; label: string; notice?: string }) {
-  const rows = Math.ceil(bytes.length / HEX_ROW);
+  const { box, probe, width } = useHexWidth();
+  const rows = Math.ceil(bytes.length / width);
   return (
-    <VirtualLines
-      label={label}
-      resetKey={bytes}
-      count={rows + (notice ? 1 : 0)}
-      header={
-        <>
-          <span className="px-3 text-muted">{"Offset".padEnd(8, " ")}</span>
-          <span className="pr-3 text-muted">{HEX_HEADER}</span>
-          <span className="pr-4 text-muted">Text</span>
-        </>
-      }
-      renderRow={(i) => {
-        if (i >= rows) return <NoticeRow>{notice}</NoticeRow>;
-        const r = hexRow(bytes, i * HEX_ROW);
-        return (
+    <div ref={box} className="relative h-full min-w-0">
+      <span ref={probe} aria-hidden="true" className="pointer-events-none invisible absolute left-0 top-0 whitespace-pre font-mono text-11">
+        0000000000
+      </span>
+      <VirtualLines
+        label={label}
+        resetKey={bytes}
+        count={rows + (notice ? 1 : 0)}
+        header={
           <>
-            <span className="px-3 text-muted">{r.offset}</span>
-            <span className="pr-3 text-fg"><HexBytes hex={r.hex} /></span>
-            <span className="pr-4 text-muted">{r.ascii}</span>
+            <span className="px-3 text-muted">{"Offset".padEnd(HEX_OFFSET_DIGITS, " ")}</span>
+            <span className="pr-3 text-muted">{hexHeader(width)}</span>
+            <span className="pr-4 text-muted">Text</span>
           </>
-        );
-      }}
-    />
+        }
+        renderRow={(i) => {
+          if (i >= rows) return <NoticeRow>{notice}</NoticeRow>;
+          const r = hexRow(bytes, i * width, bytes.length, width);
+          return (
+            <>
+              <span className="px-3 text-muted">{r.offset}</span>
+              <span className="pr-3 text-fg"><HexBytes hex={r.hex} /></span>
+              <span className="pr-4 text-muted">{r.ascii}</span>
+            </>
+          );
+        }}
+      />
+    </div>
   );
 }

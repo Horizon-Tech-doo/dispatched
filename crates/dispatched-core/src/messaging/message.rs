@@ -57,6 +57,13 @@ pub struct PeekedMessage {
     pub to: Option<String>,
     /// `ReplyTo`.
     pub reply_to: Option<String>,
+    /// `ReplyToSessionId` (AMQP reply-to-group-id).
+    pub reply_to_session_id: Option<String>,
+    /// `PartitionKey` (`x-opt-partition-key`).
+    pub partition_key: Option<String>,
+    /// When the message expires (AMQP absolute-expiry-time): enqueued time plus time to live.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub expires_at: Option<OffsetDateTime>,
     /// When the broker accepted the message.
     #[serde(with = "time::serde::rfc3339::option")]
     pub enqueued_time: Option<OffsetDateTime>,
@@ -366,6 +373,11 @@ pub fn decode_message(m: Message<Body<Value>>) -> PeekedMessage {
             .map(|s| s.0.clone()),
         to: props.and_then(|p| p.to.clone()),
         reply_to: props.and_then(|p| p.reply_to.clone()),
+        reply_to_session_id: props.and_then(|p| p.reply_to_group_id.clone()),
+        partition_key: annotation_string(&m, "x-opt-partition-key"),
+        expires_at: props
+            .and_then(|p| p.absolute_expiry_time.as_ref())
+            .and_then(timestamp_to_datetime),
         enqueued_time: annotation_time(&m, "x-opt-enqueued-time"),
         scheduled_enqueue_time: annotation_time(&m, "x-opt-scheduled-enqueue-time"),
         locked_until: annotation_time(&m, "x-opt-locked-until"),
@@ -398,6 +410,9 @@ pub(crate) fn test_message(seq: i64) -> PeekedMessage {
         content_type: None,
         to: None,
         reply_to: None,
+        reply_to_session_id: None,
+        partition_key: None,
+        expires_at: None,
         enqueued_time: None,
         scheduled_enqueue_time: None,
         locked_until: None,
@@ -742,6 +757,7 @@ mod tests {
                     .insert("x-opt-scheduled-enqueue-time", ts(enq + 1000))
                     .insert("x-opt-locked-until", ts(enq + 2000))
                     .insert("x-opt-deadletter-source", "orders")
+                    .insert("x-opt-partition-key", "pk-7")
                     .build(),
             ),
             properties: Some(
@@ -753,6 +769,8 @@ mod tests {
                     .content_type("text/plain")
                     .to("to-addr")
                     .reply_to("reply-addr")
+                    .reply_to_group_id(Some("reply-sess".to_string()))
+                    .absolute_expiry_time(ts(enq + 60_000))
                     .build(),
             ),
             application_properties: Some(ApplicationProperties(app.clone())),
@@ -780,6 +798,9 @@ mod tests {
         assert_eq!(m.scheduled_enqueue_time, Some(at(enq + 1000)));
         assert_eq!(m.locked_until, Some(at(enq + 2000)));
         assert_eq!(m.dead_letter_source.as_deref(), Some("orders"));
+        assert_eq!(m.partition_key.as_deref(), Some("pk-7"));
+        assert_eq!(m.reply_to_session_id.as_deref(), Some("reply-sess"));
+        assert_eq!(m.expires_at, Some(at(enq + 60_000)));
         assert_eq!(m.dead_letter_reason.as_deref(), Some("why"));
         assert_eq!(m.dead_letter_description.as_deref(), Some("desc"));
         assert_eq!(

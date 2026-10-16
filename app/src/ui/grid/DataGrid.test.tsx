@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import type { ColumnDef } from "@tanstack/react-table";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
-import { DataGrid, rowNumberWidth, type DataGridProps, type GridSort } from "./DataGrid";
+import { DataGrid, fitTrack, rowNumberWidth, type DataGridProps, type GridSort } from "./DataGrid";
 
 interface Msg { seq: number; subject: string; size: string }
 const columns: ColumnDef<Msg, unknown>[] = [
@@ -134,7 +134,7 @@ describe("DataGrid", () => {
   it("shapes loading rows to the grid's columns", () => {
     render(<Harness data={[]} loading />);
     const row = screen.getByRole("status").querySelector("[data-skeleton-row]") as HTMLElement;
-    expect(row.style.gridTemplateColumns).toBe("64px minmax(140px, 1fr) 60px");
+    expect(row.style.gridTemplateColumns).toBe("64px minmax(min(140px, 72px), 1fr) 60px");
     expect(row.children).toHaveLength(3);
     expect(row.style.height).toBe("22px");
   });
@@ -161,6 +161,36 @@ describe("DataGrid", () => {
     await user.click(rowEls()[3]);
     await user.keyboard("{/Meta}");
     expect(rowEls()[3].className).toContain("outline-muted");
+  });
+
+  it("marks the keyboard focus on the active row, and on the container only when no row is active", async () => {
+    const user = userEvent.setup();
+    render(<Harness data={rows(12)} />);
+    const ring = () => document.querySelector<HTMLElement>("[data-focus-ring]")!;
+    // Nothing active: the container carries the focus ring.
+    expect(ring().dataset.focusRing).toBe("container");
+    expect(ring().className).toContain("peer-focus-visible:outline-fg");
+    const rowEls = () => screen.getAllByRole("row").slice(1);
+    await user.click(rowEls()[2]);
+    // An active row: its inset outline is the mark and the container draws none.
+    expect(ring().dataset.focusRing).toBe("row");
+    expect(ring().className).not.toContain("peer-focus-visible");
+    expect(rowEls()[2].className).toContain("group-focus-visible/grid:outline-fg");
+    expect(rowEls()[1].className).not.toContain("group-focus-visible/grid:outline-fg");
+  });
+
+  it("lets flexible columns give way before the grid scrolls, and leaves fixed ones alone", () => {
+    expect(fitTrack("minmax(150px, 200px)")).toBe("minmax(min(150px, 72px), 200px)");
+    expect(fitTrack("minmax(120px, 1fr)")).toBe("minmax(min(120px, 72px), 1fr)");
+    expect(fitTrack("64px")).toBe("64px");
+    expect(fitTrack("minmax(60px, 1fr)")).toBe("minmax(min(60px, 72px), 1fr)");
+  });
+
+  it("shares the panel's width between the columns instead of running past it", () => {
+    render(<Harness />);
+    const header = screen.getAllByRole("row")[0];
+    expect(header.parentElement!.className).toContain("w-full");
+    expect(header.parentElement!.className).not.toContain("w-max");
   });
 });
 

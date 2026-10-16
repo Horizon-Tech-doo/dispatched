@@ -49,6 +49,13 @@ export interface DataGridProps<R> {
 const HEADER_HEIGHT = 24;
 /** The row-number gutter: 52px holds five digits plus its padding and rule; more rows widen it by the extra digits
  *  (mono 11px digits are 6.6px wide). */
+/** The narrowest a flexible column gives way to before the grid scrolls sideways. */
+export const MIN_SHRINK = 72;
+/** A `minmax(Npx, max)` track that may shrink below N (down to `MIN_SHRINK`) when the panel is narrower than the columns'
+ *  preferred widths, so every column, the last visible one too, shares the panel and cuts its text with an ellipsis
+ *  instead of running past the panel's edge. Wider panels give each column up to its maximum, as before. */
+export const fitTrack = (track: string) => track.replace(/^minmax\((\d+)px,/, (_, n: string) => `minmax(min(${n}px, ${MIN_SHRINK}px),`);
+
 export function rowNumberWidth(rowCount: number): string {
   const digits = String(Math.max(1, rowCount)).length;
   return digits <= 5 ? "52px" : `${Math.ceil(digits * 6.6) + 20}px`;
@@ -87,7 +94,7 @@ export function DataGrid<R>(p: DataGridProps<R>) {
   });
   const rows = table.getRowModel().rows;
   const leafColumns = table.getVisibleLeafColumns();
-  const columnTemplate = leafColumns.map((c) => c.columnDef.meta?.width ?? "minmax(80px, 1fr)").join(" ");
+  const columnTemplate = leafColumns.map((c) => fitTrack(c.columnDef.meta?.width ?? "minmax(80px, 1fr)")).join(" ");
   const template = p.rowNumbers ? `${rowNumberWidth(rows.length)} ${columnTemplate}` : columnTemplate;
   const colCount = leafColumns.length + (p.rowNumbers ? 1 : 0);
 
@@ -197,6 +204,8 @@ export function DataGrid<R>(p: DataGridProps<R>) {
       <div role="gridcell" aria-colspan={colCount}>{state}</div>
     </div>
   ) : null;
+  // A row is the active descendant: its outline is the focus mark, so the container draws none.
+  const activeRowShown = body == null && focusRendered;
 
   return (
     <div className="relative h-full">
@@ -210,10 +219,11 @@ export function DataGrid<R>(p: DataGridProps<R>) {
       aria-busy={p.loading || undefined}
       aria-activedescendant={body == null && focusRendered ? `${domId}-${p.focusId}` : undefined}
       onKeyDown={onKeyDown}
-      className="peer relative h-full overflow-auto outline-none"
+      className="peer group/grid relative h-full overflow-auto outline-none"
     >
-      {/* Sizes to the header's max-content so absolutely positioned rows span the full scroll width. */}
-      <div className="w-max min-w-full">
+      {/* The panel's width, or the columns' minimum widths when those are wider (then the grid scrolls sideways): the
+          columns share the panel instead of running past its edge, and the absolutely positioned rows span the full scroll width. */}
+      <div className="w-full min-w-min">
       <div
         role="row"
         aria-rowindex={1}
@@ -277,6 +287,8 @@ export function DataGrid<R>(p: DataGridProps<R>) {
                   "absolute inset-x-0 grid items-center px-2.5 text-12",
                   selected ? "bg-selection" : "hover:bg-hover",
                   focused && !(selected && p.selectedIds.size === 1) && "outline outline-1 -outline-offset-1 outline-muted",
+                  // With the keyboard in the grid the active row carries the focus mark (the container's ring is not drawn then).
+                  focused && "group-focus-visible/grid:outline group-focus-visible/grid:outline-1 group-focus-visible/grid:-outline-offset-1 group-focus-visible/grid:outline-fg",
                 )}
                 style={{ height: p.rowHeight, transform: `translateY(${v.start - HEADER_HEIGHT}px)`, gridTemplateColumns: template }}
               >
@@ -307,7 +319,11 @@ export function DataGrid<R>(p: DataGridProps<R>) {
     {/* The focus ring sits on an overlay: inside the scroller the sticky header would cover its top edge. */}
     <div
       aria-hidden="true"
-      className="pointer-events-none absolute inset-0 z-20 peer-focus-visible:outline peer-focus-visible:outline-1 peer-focus-visible:-outline-offset-1 peer-focus-visible:outline-fg"
+      data-focus-ring={activeRowShown ? "row" : "container"}
+      className={cn(
+        "pointer-events-none absolute inset-0 z-20",
+        !activeRowShown && "peer-focus-visible:outline peer-focus-visible:outline-1 peer-focus-visible:-outline-offset-1 peer-focus-visible:outline-fg",
+      )}
     />
     </div>
   );
