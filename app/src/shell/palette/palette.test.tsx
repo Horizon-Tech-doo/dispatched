@@ -28,6 +28,15 @@ describe("buildCommands", () => {
     expect(cmds.find((c) => c.label === "Toggle Jobs and Activity")?.shortcut).toBe("mod+j");
   });
 
+  it("offers the dashboard while connected, and not otherwise", () => {
+    const c = ctx();
+    const cmd = buildCommands(c).find((x) => x.label === "Open dashboard");
+    expect(cmd?.shortcut).toBe("mod+shift+d");
+    cmd!.run();
+    expect(c.open).toHaveBeenCalledWith({ id: "::dashboard", kind: "dashboard" });
+    expect(buildCommands({ ...c, activeProfileId: null }).some((x) => x.label === "Open dashboard")).toBe(false);
+  });
+
   it("lists a pinned entity once even when the namespace lists it too", () => {
     const c = ctx();
     const cmds = buildCommands({ ...c, listing: { ...c.listing, known: [{ entity: "invoice-generate", subscription: null }] } });

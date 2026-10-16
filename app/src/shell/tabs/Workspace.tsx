@@ -1,6 +1,8 @@
 import { useEffect, useRef } from "react";
 import { EmptyState, Kbd } from "@/ui";
 import { useShell } from "../context";
+import { DashboardView } from "../dashboard/DashboardView";
+import { isEntityTab } from "../state";
 import { EntityTabs } from "./EntityTabs";
 import { EntityView } from "./EntityView";
 
@@ -29,7 +31,7 @@ export function Workspace() {
       {shell.tabs.length > 0 && <EntityTabs />}
       <div className="min-h-0 flex-1">
         {active ? (
-          <EntityView key={active.id} tab={active} />
+          isEntityTab(active) ? <EntityView key={active.id} tab={active} /> : <DashboardView key={active.id} />
         ) : (
           <EmptyState
             title="Open an entity"

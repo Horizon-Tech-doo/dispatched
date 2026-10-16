@@ -66,10 +66,16 @@ describe("persisted state", () => {
     expect(parseProfileShell({ layout: { detailSize: 55 } }).layout.detailSize).toBe(55);
   });
 
+  it("keeps a dashboard tab only under its own id", () => {
+    const tabs = parseProfileShell({ tabs: [{ id: "::dashboard", kind: "dashboard" }, { id: "orders", kind: "dashboard" }] }).tabs;
+    expect(tabs).toEqual([{ id: "::dashboard", kind: "dashboard", subTab: "overview" }]);
+  });
+
   it("prefs fall back per field", () => {
-    expect(parsePrefs({ theme: "light", density: "huge", autoRefresh: 30, peekSize: 500 })).toEqual({ theme: "light", density: "compact", autoRefresh: 30, peekSize: 500 });
-    expect(parsePrefs(undefined)).toEqual({ theme: "system", density: "compact", autoRefresh: 0, peekSize: 100 });
+    expect(parsePrefs({ theme: "light", density: "huge", autoRefresh: 30, peekSize: 500, dashboardRefresh: 60 })).toEqual({ theme: "light", density: "compact", autoRefresh: 30, peekSize: 500, dashboardRefresh: 60 });
+    expect(parsePrefs(undefined)).toEqual({ theme: "system", density: "compact", autoRefresh: 0, peekSize: 100, dashboardRefresh: 0 });
     expect(parsePrefs({ peekSize: 5000 }).peekSize).toBe(100);
+    expect(parsePrefs({ dashboardRefresh: 45 }).dashboardRefresh).toBe(0);
   });
 });
 

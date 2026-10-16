@@ -14,8 +14,11 @@ export type AutoRefresh = 0 | 30 | 60;
 /** Messages each view reads at first (its Top N until the user picks another). */
 export type PeekSize = 50 | 100 | 500 | 1000;
 export const PEEK_SIZES = [50, 100, 500, 1000] as const;
-export interface Prefs { theme: ThemePref; density: Density; autoRefresh: AutoRefresh; peekSize: PeekSize }
-export const defaultPrefs: Prefs = { theme: "system", density: "compact", autoRefresh: 0, peekSize: 100 };
+/** Seconds between the Dashboard's reads; 0 is off. */
+export type DashboardRefresh = 0 | 30 | 60 | 300;
+export const DASHBOARD_REFRESH = [0, 30, 60, 300] as const;
+export interface Prefs { theme: ThemePref; density: Density; autoRefresh: AutoRefresh; peekSize: PeekSize; dashboardRefresh: DashboardRefresh }
+export const defaultPrefs: Prefs = { theme: "system", density: "compact", autoRefresh: 0, peekSize: 100, dashboardRefresh: 0 };
 
 export function parsePrefs(v: unknown): Prefs {
   const o = isObj(v) ? v : {};
@@ -24,6 +27,7 @@ export function parsePrefs(v: unknown): Prefs {
     density: oneOf(o.density, ["compact", "comfortable"] as const, defaultPrefs.density),
     autoRefresh: oneOf(o.autoRefresh, [0, 30, 60] as const, defaultPrefs.autoRefresh),
     peekSize: oneOf(o.peekSize, PEEK_SIZES, defaultPrefs.peekSize),
+    dashboardRefresh: oneOf(o.dashboardRefresh, DASHBOARD_REFRESH, defaultPrefs.dashboardRefresh),
   };
 }
 
@@ -49,10 +53,14 @@ export const SUB_TABS = ["overview", "messages", "dead-letter", "transfer-dlq", 
 export type SubTabId = (typeof SUB_TABS)[number];
 export type EntityKind = "queue" | "topic" | "subscription";
 
-export interface OpenTab { id: string; kind: EntityKind; subTab: SubTabId }
-/** A tab showing an entity. The same as `OpenTab` until the dashboard tab arrives; entity views take this type so
- *  they never have to handle the dashboard case. */
+/** What a tab shows: an entity, or the namespace-wide dashboard. */
+export type TabKind = EntityKind | "dashboard";
+/** The dashboard's tab id: no entity can have it (entity names cannot contain a colon). */
+export const DASHBOARD_ID = "::dashboard";
+export interface OpenTab { id: string; kind: TabKind; subTab: SubTabId }
+/** A tab showing an entity; entity views take this type so they never have to handle the dashboard case. */
 export type EntityTab = OpenTab & { kind: EntityKind };
+export const isEntityTab = (t: OpenTab): t is EntityTab => t.kind !== "dashboard";
 export interface Layout { treeSize: number; drawerOpen: boolean; drawerSize: number; drawerTab: "jobs" | "activity"; detailSize: number }
 export interface ProfileShell { tabs: OpenTab[]; activeTab: string | null; expanded: string[]; selected: string | null; layout: Layout }
 
@@ -69,9 +77,9 @@ export function parseProfileShell(v: unknown): ProfileShell {
   if (!isObj(v)) return emptyShell;
   const tabs: OpenTab[] = (Array.isArray(v.tabs) ? v.tabs : [])
     .filter(isObj)
-    .filter((t) => typeof t.id === "string" && t.id.length > 0 && ["queue", "topic", "subscription"].includes(t.kind as string))
+    .filter((t) => typeof t.id === "string" && t.id.length > 0 && (t.kind === "dashboard" ? t.id === DASHBOARD_ID : ["queue", "topic", "subscription"].includes(t.kind as string)))
     .slice(0, MAX_TABS)
-    .map((t) => ({ id: t.id as string, kind: t.kind as EntityKind, subTab: oneOf(t.subTab, SUB_TABS, "overview") }));
+    .map((t) => ({ id: t.id as string, kind: t.kind as TabKind, subTab: oneOf(t.subTab, SUB_TABS, "overview") }));
   const activeTab = tabs.some((t) => t.id === v.activeTab) ? (v.activeTab as string) : (tabs[0]?.id ?? null);
   const expanded = Array.isArray(v.expanded) ? v.expanded.filter((e): e is string => typeof e === "string") : emptyShell.expanded;
   const l = isObj(v.layout) ? v.layout : {};
@@ -92,7 +100,7 @@ export function parseProfileShell(v: unknown): ProfileShell {
 }
 
 export type ShellAction =
-  | { type: "open"; tab: { id: string; kind: EntityKind; subTab?: SubTabId } }
+  | { type: "open"; tab: { id: string; kind: TabKind; subTab?: SubTabId } }
   | { type: "close"; id: string }
   | { type: "activate"; id: string }
   | { type: "activateIndex"; index: number }

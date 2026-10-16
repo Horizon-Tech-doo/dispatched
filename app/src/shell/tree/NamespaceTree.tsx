@@ -8,6 +8,7 @@ import {
 import { shortHost } from "../ConnectionSelector";
 import { useShell } from "../context";
 import { keepTogether } from "../text";
+import { DASHBOARD_ID } from "../state";
 import { describeListError } from "./listError";
 import { buildNodes, type NsNode, type SubsState } from "./model";
 
@@ -117,7 +118,8 @@ export function NamespaceTree() {
   function activate(id: string) {
     const n = byId.get(id);
     if (!n) return;
-    if (n.entity) dispatch({ type: "open", tab: n.entity });
+    if (n.kind === "namespace") dispatch({ type: "open", tab: { id: DASHBOARD_ID, kind: "dashboard" } });
+    else if (n.entity) dispatch({ type: "open", tab: n.entity });
     else if (n.kind === "error" && n.topic) retryTopic(n.topic);
     else if (n.expandable) dispatch({ type: "toggleExpanded", nodeId: n.id, expanded: !n.expanded });
   }
@@ -215,6 +217,7 @@ export function NamespaceTree() {
             </ContextMenuTrigger>
             <ContextMenuContent>
               <ContextMenuItem disabled={!menuNode?.entity} onSelect={() => menuNode && activate(menuNode.id)}>Open</ContextMenuItem>
+              <ContextMenuItem onSelect={() => dispatch({ type: "open", tab: { id: DASHBOARD_ID, kind: "dashboard" } })}>Open dashboard</ContextMenuItem>
               <ContextMenuItem disabled={!menuNode?.entity} onSelect={() => menuNode && copy(menuNode.label)}>Copy name</ContextMenuItem>
               <ContextMenuItem disabled={!menuNode?.entity} onSelect={() => menuNode?.entity && copy(menuNode.entity.id)}>Copy entity path</ContextMenuItem>
               <ContextMenuSeparator />

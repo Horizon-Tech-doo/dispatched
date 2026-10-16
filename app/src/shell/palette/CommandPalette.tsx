@@ -33,10 +33,11 @@ export function CommandPalette() {
     profiles,
     activeProfileId: connected ? conn.profileId : null,
     open: (tab) => {
-      // Show the entity in the tree too: open the rows above it and select its row.
+      dispatch({ type: "open", tab });
+      // Show the entity in the tree too: open the rows above it and select its row. The dashboard has no row.
+      if (tab.kind === "dashboard") return;
       const { rowId, ancestors } = treeRowOf(tab, listing?.limited != null);
       for (const id of ancestors) if (!shell.expanded.includes(id)) dispatch({ type: "toggleExpanded", nodeId: id, expanded: true });
-      dispatch({ type: "open", tab });
       dispatch({ type: "select", nodeId: rowId });
     },
     connect: (id) => void conn.connect(id),

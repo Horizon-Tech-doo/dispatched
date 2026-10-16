@@ -367,6 +367,53 @@ function sessionsAndRulesShots(): Shot[] {
   ];
 }
 
+/** The Dashboard tab. */
+function dashboardShots(): Shot[] {
+  const path = (scenario = "default") =>
+    `/?scenario=${scenario}&autoconnect=p-logistics&seed=${encodeURIComponent(
+      JSON.stringify({
+        "shell:p-logistics": {
+          tabs: [{ id: "::dashboard", kind: "dashboard", subTab: "overview" }], activeTab: "::dashboard", expanded: ["group:queues", "group:topics"], selected: null,
+          layout: { treeSize: 18, drawerOpen: false, drawerSize: 18, drawerTab: "activity" },
+        },
+      }),
+    )}`;
+  const grid = (p: Page) => p.getByRole("grid", { name: "Dashboard" });
+  return [
+    {
+      // Sorted by dead letters, the default: the amber numbers lead.
+      name: "dashboard",
+      path: path(),
+      ready: (p) => grid(p).getByText("tracking-sync"),
+      prepare: async (p) => {
+        await p.keyboard.press("Shift"); // keyboard modality so :focus-visible matches
+        await grid(p).getByText("invoice-generate").click();
+      },
+    },
+    {
+      name: "dashboard-dlq-only",
+      path: path(),
+      ready: (p) => grid(p).getByText("tracking-sync"),
+      prepare: async (p) => {
+        await p.getByRole("button", { name: "Only with dead letters" }).click();
+        await expect(grid(p).getByText("customs-docs")).toHaveCount(0);
+      },
+    },
+    {
+      // The identity can't list the namespace: pinned entities only, no counts, and no kind claimed for any of them.
+      name: "dashboard-limited",
+      path: path("forbidden"),
+      ready: (p) => p.getByRole("main").getByText("Showing pinned entities only"),
+    },
+    {
+      // Counts read by peeking: `~N`, and the status line says so.
+      name: "dashboard-counts-approx",
+      path: path("counts-approx"),
+      ready: (p) => grid(p).getByText("~1,284"),
+    },
+  ];
+}
+
 export const shots: Shot[] = [
   { name: "catalogue", path: "/#catalogue", scroll: true },
   {
@@ -1045,6 +1092,7 @@ export const shots: Shot[] = [
   ...exportShots(),
   ...overviewShots(),
   ...sessionsAndRulesShots(),
+  ...dashboardShots(),
 ];
 
 for (const colorScheme of ["dark", "light"] as const) {

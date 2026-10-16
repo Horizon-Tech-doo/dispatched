@@ -1,6 +1,6 @@
 import type { EntityListing, Profile, SubscriptionInfo } from "@/engine";
 import type { SheetState } from "../context";
-import type { EntityKind, Prefs } from "../state";
+import { DASHBOARD_ID, type EntityKind, type Prefs } from "../state";
 import { entityIdOf } from "../entityId";
 
 export interface PaletteCommand {
@@ -25,7 +25,7 @@ export interface PaletteContext {
   subs: Record<string, SubscriptionInfo[] | undefined>;
   profiles: Profile[];
   activeProfileId: string | null;
-  open(tab: { id: string; kind: EntityKind }): void;
+  open(tab: { id: string; kind: EntityKind } | { id: string; kind: "dashboard" }): void;
   connect(profileId: string): void;
   openSheet(s: Exclude<SheetState, null>): void;
   refresh(): void;
@@ -60,6 +60,7 @@ export function buildCommands(c: PaletteContext): PaletteCommand[] {
   out.push({ id: "conn:add", group: "Connections", label: "Add connection", run: () => c.openSheet({ kind: "profile", profileId: null }) });
   out.push({ id: "conn:manage", group: "Connections", label: "Manage connections", run: () => c.openSheet({ kind: "profiles" }) });
   const app: Omit<PaletteCommand, "group">[] = [
+    ...(c.activeProfileId !== null ? [{ id: "app:dashboard", label: "Open dashboard", shortcut: "mod+shift+d", keywords: ["counts", "overview", "dead letters"], run: () => c.open({ id: DASHBOARD_ID, kind: "dashboard" as const }) }] : []),
     { id: "app:refresh", label: "Refresh", shortcut: "f5", run: c.refresh },
     { id: "app:drawer", label: "Toggle Jobs and Activity", shortcut: "mod+j", run: c.toggleDrawer },
     { id: "app:theme-system", label: "Theme: follow system", keywords: ["appearance"], run: () => c.setPrefs({ theme: "system" }) },

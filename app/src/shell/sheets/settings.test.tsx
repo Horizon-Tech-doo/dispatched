@@ -20,7 +20,7 @@ describe("SettingsSheet", () => {
     await user.click(within(sheet).getByRole("radio", { name: "Comfortable" }));
     await waitFor(() => expect(document.documentElement.style.getPropertyValue("--row")).toBe("26px"));
     await user.click(within(sheet).getByRole("radio", { name: "60 s" }));
-    expect(mock.calls).toContainEqual({ cmd: "settings_set", args: { key: "ui", value: { theme: "light", density: "comfortable", autoRefresh: 60, peekSize: 100 } } });
+    expect(mock.calls).toContainEqual({ cmd: "settings_set", args: { key: "ui", value: { theme: "light", density: "comfortable", autoRefresh: 60, peekSize: 100, dashboardRefresh: 0 } } });
     expect(await within(sheet).findByText("0.0.1-mock")).toBeInTheDocument();
   });
 });
