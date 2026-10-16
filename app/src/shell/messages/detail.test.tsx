@@ -279,6 +279,14 @@ describe("detail pane", () => {
     expect(screen.queryByRole("radio", { name: "Formatted" })).toBeNull();
   });
 
+  it("gives the System and Custom tables one key column, so their values line up", async () => {
+    await pane("invoice-generate", "dead-letter", 41000);
+    await userEvent.click(await screen.findByRole("tab", { name: "Properties" }));
+    const columns = (name: string) => screen.getByRole("table", { name }).style.gridTemplateColumns;
+    expect(columns("System properties")).toBe(columns("Custom properties"));
+    expect(columns("System properties")).toContain("min(");
+  });
+
   it("has a heading for the message and for each section", async () => {
     await pane("invoice-generate", "dead-letter", 41000);
     expect(await screen.findByRole("heading", { level: 2, name: /Seq 41000/ })).toBeInTheDocument();
@@ -305,7 +313,7 @@ describe("body helpers", () => {
   const detail = (body: MessageDetail["body"]) => ({ body }) as MessageDetail;
   it("decodes a body once and reads a cut UTF-8 body as text", () => {
     const utf8 = new TextEncoder().encode("héllo wörld");
-    const cut = utf8.subarray(0, utf8.length - 1); // ends inside "d"? no: cut a two-byte character
+    const cut = utf8.subarray(0, utf8.length - 1); // drops the last character, "d": still whole UTF-8
     const mid = new TextEncoder().encode("ab\u00e9").subarray(0, 3); // 61 62 c3: half of é
     const b64 = (u: Uint8Array) => ({ kind: "binary" as const, value: btoa(String.fromCharCode(...u)) });
     expect(decodeBody(b64(cut)).text).toBe("héllo wörl");

@@ -193,7 +193,7 @@ interface MessageFields {
   reply_to: string | null;
   reply_to_session_id: string | null;
   partition_key: string | null;
-  /** When the message expires: enqueued time plus time to live. */
+  /** When the message expires: the broker's absolute-expiry-time, else enqueued time plus time to live. */
   expires_at: string | null;
   enqueued_time: string | null;
   scheduled_enqueue_time: string | null;

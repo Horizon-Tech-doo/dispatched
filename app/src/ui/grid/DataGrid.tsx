@@ -49,13 +49,6 @@ export interface DataGridProps<R> {
 const HEADER_HEIGHT = 24;
 /** The row-number gutter: 52px holds five digits plus its padding and rule; more rows widen it by the extra digits
  *  (mono 11px digits are 6.6px wide). */
-/** The narrowest a flexible column gives way to before the grid scrolls sideways. */
-export const MIN_SHRINK = 72;
-/** A `minmax(Npx, max)` track that may shrink below N (down to `MIN_SHRINK`) when the panel is narrower than the columns'
- *  preferred widths, so every column, the last visible one too, shares the panel and cuts its text with an ellipsis
- *  instead of running past the panel's edge. Wider panels give each column up to its maximum, as before. */
-export const fitTrack = (track: string) => track.replace(/^minmax\((\d+)px,/, (_, n: string) => `minmax(min(${n}px, ${MIN_SHRINK}px),`);
-
 export function rowNumberWidth(rowCount: number): string {
   const digits = String(Math.max(1, rowCount)).length;
   return digits <= 5 ? "52px" : `${Math.ceil(digits * 6.6) + 20}px`;
@@ -94,7 +87,7 @@ export function DataGrid<R>(p: DataGridProps<R>) {
   });
   const rows = table.getRowModel().rows;
   const leafColumns = table.getVisibleLeafColumns();
-  const columnTemplate = leafColumns.map((c) => fitTrack(c.columnDef.meta?.width ?? "minmax(80px, 1fr)")).join(" ");
+  const columnTemplate = leafColumns.map((c) => c.columnDef.meta?.width ?? "minmax(80px, 1fr)").join(" ");
   const template = p.rowNumbers ? `${rowNumberWidth(rows.length)} ${columnTemplate}` : columnTemplate;
   const colCount = leafColumns.length + (p.rowNumbers ? 1 : 0);
 
@@ -221,8 +214,9 @@ export function DataGrid<R>(p: DataGridProps<R>) {
       onKeyDown={onKeyDown}
       className="peer group/grid relative h-full overflow-auto outline-none"
     >
-      {/* The panel's width, or the columns' minimum widths when those are wider (then the grid scrolls sideways): the
-          columns share the panel instead of running past its edge, and the absolutely positioned rows span the full scroll width. */}
+      {/* The panel's width, or the columns' minimum widths when those are wider (then the grid scrolls sideways). Every
+          column keeps its own minimum; within the panel, columns with a fixed range share it first and the `fr` columns
+          (Description, Body) take what is left, down to their minimum. The absolutely positioned rows span the full scroll width. */}
       <div className="w-full min-w-min">
       <div
         role="row"

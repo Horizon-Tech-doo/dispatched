@@ -35,7 +35,7 @@ pub struct MessageSummary {
     pub reply_to_session_id: Option<String>,
     /// Partition key.
     pub partition_key: Option<String>,
-    /// When the message expires (enqueued time plus time to live).
+    /// When the message expires: the broker's absolute-expiry-time, else enqueued time plus time to live.
     #[serde(with = "time::serde::rfc3339::option")]
     pub expires_at: Option<OffsetDateTime>,
     /// When the broker enqueued it.

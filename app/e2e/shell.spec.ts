@@ -214,3 +214,32 @@ test("filter bar: Apply, Clear filter and the body segments take one click while
   await expect(page.getByRole("button", { name: "Filter", exact: true })).toBeVisible();
   await expect(properties).toHaveValue("");
 });
+
+test("message grid columns keep their minimum widths beside the detail pane, and scroll sideways only when they cannot fit", async ({ page }) => {
+  const tracking = "shipment-events/subscriptions/tracking-sync";
+  const seed = encodeURIComponent(
+    JSON.stringify({
+      "shell:p-logistics": {
+        tabs: [{ id: tracking, kind: "subscription", subTab: "dead-letter" }], activeTab: tracking, expanded: [], selected: null,
+        layout: { treeSize: 18, drawerOpen: false, drawerSize: 18, drawerTab: "activity" },
+      },
+    }),
+  );
+  await go(page, `${logistics}&seed=${seed}`);
+  await expect(page.getByRole("status", { name: "Peek status" })).toContainText("100 messages");
+  const grid = page.getByRole("grid");
+  const widthOf = async (name: string) => (await grid.getByRole("columnheader", { name }).boundingBox())!.width;
+  const overflows = () => grid.evaluate((el) => el.scrollWidth > el.clientWidth + 1);
+
+  // The whole width: the default dead-letter columns fit at their preferred widths, nothing scrolls.
+  expect(await overflows()).toBe(false);
+  // Beside the pane the panel is narrower than the columns' minimums: each keeps its own minimum and the grid scrolls.
+  await page.locator("[data-row-id]").first().click();
+  await grid.press("Enter");
+  await expect(page.getByRole("region", { name: /^Message \d+$/ })).toBeVisible();
+  expect(await overflows()).toBe(true);
+  expect(await widthOf("Subject")).toBeGreaterThanOrEqual(109);
+  expect(await widthOf("Message ID")).toBeGreaterThanOrEqual(119);
+  expect(await widthOf("Reason")).toBeGreaterThanOrEqual(149);
+  expect(await widthOf("Description")).toBeGreaterThanOrEqual(199);
+});

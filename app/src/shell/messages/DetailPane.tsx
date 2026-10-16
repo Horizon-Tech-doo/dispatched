@@ -32,23 +32,17 @@ interface PropRow {
   action?: ReactNode;
 }
 
-/** Key column as wide as the longest key (never more than 40% of the table), values to its right on one line each,
+/** Key column `keyCh` wide (the longest key of both tables, never more than 40% of the table), values to its right on one line each,
  *  cut with an ellipsis and whole in the tooltip (and selectable). Rows keep the grid's row height.
  *  A CSS grid with table roles: `min()` sizes the key column, which a table's `col` cannot take. */
-function PropTable({ label, rows }: { label: string; rows: PropRow[] }) {
-  const keyCh = Math.max(...rows.map((r) => r.key.length), 4) + 2;
-  const mono = rows.some((r) => r.mono);
+function PropTable({ label, rows, keyCh }: { label: string; rows: PropRow[]; keyCh: number }) {
   return (
-    <div
-      role="table"
-      aria-label={label}
-      className={`grid text-12 ${mono ? "font-mono text-11" : ""}`}
-      style={{ gridTemplateColumns: `minmax(0, min(${keyCh}ch, 40%)) minmax(0, 1fr)` }}
-    >
+    // Both tables use the same font here, so one `ch` is one width: the System and Custom values line up.
+    <div role="table" aria-label={label} className="grid text-12" style={{ gridTemplateColumns: `minmax(0, min(${keyCh}ch, 40%)) minmax(0, 1fr)` }}>
       {rows.map((r) => (
         <div key={r.key} role="row" className="group/prop contents">
           <div role="rowheader" title={r.key} className="flex h-row items-center pr-3 text-muted">
-            <span className="truncate">{r.key}</span>
+            <span className={`truncate ${r.mono ? "font-mono text-11" : ""}`}>{r.key}</span>
           </div>
           <div role="cell" className="relative flex h-row min-w-0 items-center gap-2 font-sans">
             {r.value === null ? (
@@ -121,12 +115,15 @@ function customRows(d: MessageDetail, shown: ReadonlySet<string>, onShowColumn: 
 
 function Properties({ d, shown, onShowColumn }: { d: MessageDetail; shown: ReadonlySet<string>; onShowColumn(name: string): void }) {
   const custom = customRows(d, shown, onShowColumn);
+  const system = systemRows(d);
+  // One key column for both tables.
+  const keyCh = Math.max(...[...system, ...custom].map((r) => r.key.length), 4) + 2;
   return (
     <div className="px-3 py-2">
       <h3 className="m-0 mb-1 text-12 font-semibold">System</h3>
-      <PropTable label="System properties" rows={systemRows(d)} />
+      <PropTable label="System properties" rows={system} keyCh={keyCh} />
       <h3 className="m-0 mb-1 mt-3 text-12 font-semibold">Custom</h3>
-      {custom.length === 0 ? <p className="m-0 text-12 text-muted">No custom properties.</p> : <PropTable label="Custom properties" rows={custom} />}
+      {custom.length === 0 ? <p className="m-0 text-12 text-muted">No custom properties.</p> : <PropTable label="Custom properties" rows={custom} keyCh={keyCh} />}
     </div>
   );
 }

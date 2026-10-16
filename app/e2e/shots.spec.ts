@@ -114,6 +114,12 @@ function detailShots(): Shot[] {
       },
     },
     {
+      // An active view: the Body preview column is on, and the pane sits beside it.
+      name: "message-detail-active",
+      path: seedTab("customs-docs", "queue", "messages"),
+      prepare: (p) => openRow(p, 1),
+    },
+    {
       name: "message-detail-gone",
       path: seedTab(TRACKING, "subscription", "dead-letter", "message-gone"),
       prepare: async (p) => {
