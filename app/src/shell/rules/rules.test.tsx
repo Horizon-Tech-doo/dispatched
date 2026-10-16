@@ -17,7 +17,12 @@ describe("rules", () => {
     expect(within(eu).getByText("SET priority = 'high'")).toBeInTheDocument();
     const prio = within(list).getByRole("listitem", { name: "priority" });
     expect(within(prio).getByText("batch-7")).toBeInTheDocument();
+    expect(within(prio).getByText("Correlation ID")).toBeInTheDocument();
+    expect(within(prio).getByText("Properties")).toBeInTheDocument();
     expect(within(prio).getByText("tier")).toBeInTheDocument();
+    expect(within(eu).getByText("Filter")).toBeInTheDocument();
+    expect(within(eu).getByText("Action")).toBeInTheDocument();
+    expect(screen.getByText("Rules are read-only here.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Edit|Delete|Add rule/ })).toBeNull();
   });
 
@@ -28,7 +33,9 @@ describe("rules", () => {
     });
     const list = await screen.findByRole("list", { name: "Rules" });
     const unset = within(list).getByRole("listitem", { name: "unset" });
-    expect(within(unset).getByRole("heading", { name: "This rule matches nothing" })).toBeInTheDocument();
+    expect(within(unset).getByText("Matches no message")).toBeInTheDocument();
+    expect(within(unset).getByText("Sets no fields, so no message matches it.")).toBeInTheDocument();
+    expect(within(unset).queryByRole("heading")).toBeNull();
     const legacy = within(list).getByRole("listitem", { name: "legacy-route" });
     expect(within(legacy).getByText("Unknown filter")).toBeInTheDocument();
   });
@@ -38,5 +45,9 @@ describe("rules", () => {
     expect(ruleKind({ kind: "sql", expression: " 1 = 1 " })).toBe("Matches every message");
     expect(ruleKind({ kind: "sql", expression: "a = 1" })).toBe("SQL filter");
     expect(ruleKind({ kind: "unknown" })).toBe("Unknown filter");
+    const none = { correlation_id: null, message_id: null, to: null, reply_to: null, subject: null, session_id: null, reply_to_session_id: null, content_type: null };
+    expect(ruleKind({ kind: "correlation", ...none, properties: [] })).toBe("Matches no message");
+    expect(ruleKind({ kind: "correlation", ...none, subject: "x", properties: [] })).toBe("Correlation filter");
+    expect(ruleKind({ kind: "correlation", ...none, properties: [{ name: "a", value: "1" }] })).toBe("Correlation filter");
   });
 });

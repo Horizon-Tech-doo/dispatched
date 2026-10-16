@@ -21,6 +21,9 @@ export type Scenario =
   // An export fails after its second tick (the connection resets); selected messages `export-missing` lost two
   // of the ones asked for (received since the grid read them); `export-refused` is refused before it starts.
   | "export-fails" | "export-missing" | "export-refused"
+  // The session list's sources (returns-intake): the service lists none (`sessions-empty`), its list is cut at 10,000
+  // (`sessions-capped`), or the call fails and the tally was cut short (`sessions-cut`).
+  | "sessions-empty" | "sessions-capped" | "sessions-cut"
   // Every peek page is refused: the identity lacks Listen.
   | "peek-error"
   // A peek's first page arrives; the next one never does (screenshots of a view still reading).
@@ -613,18 +616,25 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
             // The tally: messages per session in the main queue.
             const per = new Map<string, MockMessage[]>();
             for (const m of main) if (m.session_id) per.set(m.session_id, [...(per.get(m.session_id) ?? []), m]);
-            // The broker lists returns-intake's sessions, and one that has state but no messages.
-            const broker = id === "returns-intake" ? [...fx.RMA, "RMA-0999"] : [];
+            // The broker lists returns-intake's sessions, and one that has state but no messages, unless the scenario
+            // takes the service's list away (`sessions-empty`, `sessions-cut`).
+            const fromBroker = scenario !== "sessions-empty" && scenario !== "sessions-cut";
+            const broker = id === "returns-intake" && fromBroker ? [...fx.RMA, "RMA-0999"] : [];
             const ids = [...new Set([...per.keys(), ...broker])].sort((a, b) => a.localeCompare(b));
             const sessions: SessionSummary[] = ids.map((sid) => {
               const ms = per.get(sid) ?? [];
               return { id: sid, messages: ms.length, first_enqueued: ms[0]?.enqueued_time ?? null, last_enqueued: ms.at(-1)?.enqueued_time ?? null, in_broker: broker.includes(sid) };
             });
+            const cut = scenario === "sessions-cut";
             return {
               sessions,
-              broker: broker.length ? { state: "listed", capped: false } : { state: "empty" },
-              scanned: main.length,
-              truncated: false,
+              broker: cut
+                ? { state: "unavailable", kind: "forbidden" }
+                : broker.length
+                  ? { state: "listed", capped: scenario === "sessions-capped" }
+                  : { state: "empty" },
+              scanned: cut ? 10_000 : main.length,
+              truncated: cut,
             } satisfies SessionListing;
           },
           (l) => `Listed ${count(l.sessions.length, "session", "sessions")} of ${id}`,

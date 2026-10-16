@@ -337,6 +337,18 @@ function sessionsAndRulesShots(): Shot[] {
       },
     },
     {
+      // The service listed no sessions: they come from the tally alone, and none is marked as listed.
+      name: "sessions-broker-empty",
+      path: seedTab("returns-intake", "queue", "sessions", "sessions-empty"),
+      ready: (p) => p.getByRole("row", { name: "RMA-1004" }),
+    },
+    {
+      // The service call failed and the tally was cut short: counts are lower bounds and sessions may be missing.
+      name: "sessions-tally-cut",
+      path: seedTab("returns-intake", "queue", "sessions", "sessions-cut"),
+      ready: (p) => p.getByRole("row", { name: "RMA-1004" }),
+    },
+    {
       name: "sessions-none",
       path: seedTab("invoice-generate", "queue", "sessions"),
       ready: (p) => p.getByRole("heading", { name: "This queue doesn't use sessions" }),
