@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { describeListError, troubleOf } from "./listError";
 
-const sas = { name: "Logistics", host: "sb-logistics-prod", entra: false };
-const entra = { name: "Logistics dev", host: "sb-logistics-dev", entra: true };
+const sas = { name: "Logistics", host: "sb-logistics-prod", auth: "connection-string" as const };
+const entra = { name: "Logistics dev", host: "sb-logistics-dev", auth: "entra" as const };
+const unknown = { name: "Logistics", host: "sb-logistics-prod", auth: "unknown" as const };
 
 describe("describeListError", () => {
   it("explains a network failure and the next step", () => {
@@ -21,6 +22,7 @@ describe("describeListError", () => {
     expect(e.message).toMatch(/^Your account needs the Azure Service Bus Data Owner role on this namespace\./);
     expect(e.message).toMatch(/You can also pin entities on the connection\.$/);
     expect(e.fix).toBe("edit");
+    expect(describeListError("forbidden", unknown).message).toMatch(/^Your connection needs the Manage right: an Entra role or a key/);
   });
   it("sends an expired or revoked Entra sign-in to the connection sheet", () => {
     for (const kind of ["not_signed_in", "auth"]) {

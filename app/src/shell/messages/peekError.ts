@@ -14,7 +14,7 @@ export function describePeekError(kind: string, message: string, viewLabel: stri
   switch (kind) {
     case "forbidden": {
       // Trying again can't grant a right: the way out is the connection (another key, or a role assigned in Azure).
-      return { title: `Can't read the ${viewLabel}`, body: accessAdvice(rightsOf(message, "Listen"), auth), fix: "edit" };
+      return { title: `Can't read the ${viewLabel}`, body: accessAdvice(rightsOf(message, "Listen"), auth, "peek again"), fix: "edit" };
     }
     case "not_found":
       return { title: "This entity wasn't found", body: "It may have been deleted or renamed. Refresh the tree to see what is there now.", fix: "retry" };

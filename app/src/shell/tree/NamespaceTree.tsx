@@ -13,7 +13,7 @@ import { keepTogether } from "../text";
 import { DASHBOARD_ID, MAX_FILTER_LENGTH, type CountKind } from "../state";
 import { compileRules, highlightOf, type Highlight } from "./highlight";
 import { marksTier, type MarksTier } from "./marksLayout";
-import { accessAdvice } from "../access";
+import { accessAdvice, useAuthKind } from "../access";
 import { describeListError } from "./listError";
 import { buildNodes, type NsNode, type SubsState } from "./model";
 import type { EntityCounts } from "@/engine";
@@ -192,6 +192,7 @@ export function NamespaceTree() {
   const fullHost = profile?.host ?? conn.view?.host ?? "";
   const host = shortHost(fullHost);
   const entra = profile?.auth.kind === "entra";
+  const auth = useAuthKind();
   // Like the Overview's button: until the profile list is known an Entra profile can't be told from the others.
   const canCopyString = profile !== undefined && !entra;
   const nodes = useMemo(
@@ -255,7 +256,7 @@ export function NamespaceTree() {
   const summary = listing && !listing.limited ? `${formatNumber(listing.queues.length)} queues, ${formatNumber(listing.topics.length)} topics` : "";
   const editConnection = profileId ? () => openSheet({ kind: "profile", profileId }) : undefined;
   const failure = entities.error
-    ? describeListError(errorKind(entities.error), { name: profile?.name ?? conn.view?.profile_name ?? host, host, entra: profile?.auth.kind === "entra" })
+    ? describeListError(errorKind(entities.error), { name: profile?.name ?? conn.view?.profile_name ?? host, host, auth })
     : null;
   // A listing that needs the connection fixed offers to edit it; anything else runs the listing again.
   const recover =
@@ -301,7 +302,7 @@ export function NamespaceTree() {
         banner(
           <Problem
             title="Showing pinned entities only"
-            body={keepTogether(`${accessAdvice(["Manage"], entra ? "entra" : "connection-string")} Or edit this connection to pin more.`, host)}
+            body={keepTogether(`${accessAdvice(["Manage"], auth)} Or edit this connection to pin more.`, host)}
             action={editConnection && <Button onClick={editConnection}>Edit connection</Button>}
           />,
         )}
@@ -313,7 +314,7 @@ export function NamespaceTree() {
         ) : listing?.limited && listing.known.length === 0 ? (
           <EmptyState
             title="No pinned entities"
-            body={keepTogether(`${accessAdvice(["Manage"], entra ? "entra" : "connection-string")} Or edit this connection to pin the queues or subscriptions you use.`, host)}
+            body={keepTogether(`${accessAdvice(["Manage"], auth)} Or edit this connection to pin the queues or subscriptions you use.`, host)}
             action={editConnection && <Button onClick={editConnection}>Edit connection</Button>}
           />
         ) : nodes.length === 1 && filter.trim() ? (

@@ -27,6 +27,12 @@ describe("describePeekError for forbidden", () => {
   it("sends an Entra account to the Data Receiver role", () => {
     const d = describePeekError("forbidden", raw, "active messages", "entra");
     expect(d.body).toMatch(/^Your account needs the Azure Service Bus Data Receiver role on this namespace or entity\. Owner and Contributor don't include reading messages\./);
+    expect(d.body).toMatch(/After it's assigned, peek again\.$/);
     expect(d.fix).toBe("edit");
+  });
+  it("is neutral when the sign-in is unknown", () => {
+    expect(describePeekError("forbidden", raw, "active messages", "unknown").body).toBe(
+      "Your connection needs the Listen right: an Entra role or a key whose policy includes Listen.",
+    );
   });
 });

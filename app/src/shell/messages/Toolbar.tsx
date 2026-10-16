@@ -33,7 +33,12 @@ export function CompactLabel({ compact, children }: { compact: boolean; children
 
 /** Wraps a compact button in a tooltip carrying its name. */
 export function CompactHint({ compact, label, children }: { compact: boolean; label: string; children: ReactNode }) {
-  return compact ? <Hint label={label}>{children}</Hint> : <>{children}</>;
+  // Always a Hint, so the button keeps its place in the tree when the toolbar crosses the threshold.
+  return (
+    <Hint label={label} off={!compact}>
+      {children}
+    </Hint>
+  );
 }
 
 export const TOP_N = [50, 100, 500, 1000, 5000, 10000, 50000] as const;

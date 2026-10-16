@@ -391,7 +391,17 @@ test("a narrow window keeps every control of the message toolbar inside it", asy
   expect(await clipped()).toEqual([]);
   // The controls keep their names when their labels give way to icons.
   for (const name of ["Filter", "Columns", "Export", "Peek again"]) await expect(toolbar.getByRole("button", { name })).toBeVisible();
-  // A sequence number field and an applied filter make the row longer still.
+  // An applied filter adds its summary, the widest item; closed, the bar leaves the summary in the toolbar.
+  await toolbar.getByRole("button", { name: /^Filter/ }).click();
+  const bar = page.getByRole("search", { name: "Message filter" });
+  await bar.getByLabel("Body contains").fill("SHP-1000");
+  await bar.getByLabel("Body contains").press("Enter");
+  await expect(status(page)).toContainText("9 matching messages");
+  await bar.getByLabel("Body contains").press("Escape");
+  await expect(toolbar.getByRole("button", { name: /^Edit filter: / })).toBeVisible();
+  expect(await clipped()).toEqual([]);
+  // A sequence number field makes the row longer still. (Focus came back to Filter, whose tooltip Escape dismisses.)
+  await page.keyboard.press("Escape");
   await toolbar.getByRole("radio", { name: "Sequence" }).click();
   await expect(toolbar.getByRole("textbox", { name: "From sequence number" })).toBeVisible();
   expect(await clipped()).toEqual([]);

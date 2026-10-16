@@ -132,7 +132,7 @@ function ConnectionStringCopy({ entity, eligible, entra }: { entity: string; eli
 
 /** A topic's subscriptions with their counts; a name opens that subscription. */
 function SubscriptionsTable({ topic, profileId }: { topic: string; profileId: string | null }) {
-  const { dispatch } = useShell();
+  const { dispatch, openSheet } = useShell();
   const auth = useAuthKind();
   // Read again while the Overview is shown, like its details (the engine logs only failures of either).
   const [q] = useSubscriptionsFor(profileId, [topic], REFRESH_MS);
@@ -145,6 +145,7 @@ function SubscriptionsTable({ topic, profileId }: { topic: string; profileId: st
           title="Couldn't list the subscriptions"
           body={isForbidden(q.error) ? accessAdvice(rightsOf(q.error!.message, "Manage"), auth) : "Try refreshing. If it keeps failing, the detail below says why."}
           detail={q.error?.message}
+          action={isForbidden(q.error) && profileId ? <Button onClick={() => openSheet({ kind: "profile", profileId })}>Edit connection</Button> : undefined}
         />
       );
     if (subs.length === 0) return <p className="m-0 text-12 text-muted">This topic has no subscriptions.</p>;
@@ -251,6 +252,7 @@ export function OverviewView({ tab }: { tab: EntityTab }) {
   const profile = profiles.data?.find((p) => p.id === conn.profileId);
   const host = profile?.host ?? conn.view?.host ?? "";
   const entra = profile?.auth.kind === "entra";
+  const auth = useAuthKind();
   // The button waits for the profile list: until it is known, an Entra profile can't be told from the others.
   const eligible = profiles.data !== undefined && profile !== undefined && !entra;
 
@@ -268,7 +270,7 @@ export function OverviewView({ tab }: { tab: EntityTab }) {
       <EmptyState
         tone="error"
         title="Couldn't read this entity"
-        body={denied ? accessAdvice(rightsOf(q.error!.message, "Manage"), entra ? "entra" : "connection-string") : "Try again. If it keeps failing, the detail below says why."}
+        body={denied ? accessAdvice(rightsOf(q.error!.message, "Manage"), auth) : "Try again. If it keeps failing, the detail below says why."}
         detail={q.error?.message}
         action={
           denied && conn.profileId ? (
@@ -320,8 +322,9 @@ export function OverviewView({ tab }: { tab: EntityTab }) {
             {q.isError && <Problem
                 className="mt-2"
                 title="Couldn't refresh the counts"
-                body={denied ? `${accessAdvice(rightsOf(q.error!.message, "Manage"), entra ? "entra" : "connection-string")} Showing the last counts read.` : "Showing the last counts read."}
+                body={denied ? `${accessAdvice(rightsOf(q.error!.message, "Manage"), auth)} Showing the last counts read.` : "Showing the last counts read."}
                 detail={q.error?.message}
+                action={denied && conn.profileId ? <Button onClick={() => openSheet({ kind: "profile", profileId: conn.profileId! })}>Edit connection</Button> : undefined}
               />}
           </section>
         )}

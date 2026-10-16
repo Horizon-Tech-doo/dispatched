@@ -37,7 +37,7 @@ function countColumn(id: string, header: string, pick: (r: DashboardRow) => numb
 }
 
 export function DashboardView() {
-  const { conn, prefs, setPrefs, dispatch } = useShell();
+  const { conn, prefs, setPrefs, dispatch, openSheet } = useShell();
   const auth = useAuthKind();
   const q = useDashboard(conn.profileId, prefs.dashboardRefresh * 1000);
   const [sorting, setSorting] = useState<GridSort | null>({ id: "dlq", desc: true });
@@ -196,7 +196,12 @@ export function DashboardView() {
               </>
             }
             detail={kinds.slice(0, MAX_REASONS_SHOWN).map((k) => failures.find((f) => f.kind === k)!.message).join(" | ")}
-            action={<Button onClick={() => void q.refetch()}>Try again</Button>}
+            action={
+              <>
+                {kinds.includes("forbidden") && conn.profileId && <Button onClick={() => openSheet({ kind: "profile", profileId: conn.profileId! })}>Edit connection</Button>}
+                {kinds.some((k) => k !== "forbidden") && <Button onClick={() => void q.refetch()}>Try again</Button>}
+              </>
+            }
           />
         </div>
       )}

@@ -390,9 +390,9 @@ function Column({ theme, density }: { theme: ThemeName; density: Density }) {
           <EmptyState
             tone="error"
             title="Can't list subscriptions"
-            body="This identity needs Listen or Manage on shipment-events."
-            detail="access denied (needs Listen): the token does not include the claim"
-            action={<Button>Try again</Button>}
+            body="This key has no Manage right. Use a key whose policy includes Manage."
+            detail="access denied (needs Manage): the token does not include the claim"
+            action={<Button>Edit connection</Button>}
           />
           <div className="w-72 border-y border-line px-3 py-2.5">
             <Problem title="Couldn't refresh" body="The connection was interrupted. Showing the last loaded data." detail="network error: connection reset by peer" action={<Button>Try again</Button>} />
