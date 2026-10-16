@@ -14,6 +14,7 @@ import { DetailPane } from "./DetailPane";
 import { FilterBar } from "./FilterBar";
 import { useAuthKind } from "../access";
 import { describePeekError } from "./peekError";
+import { rowLimit } from "./rowLimit";
 import { CompactHint, CompactLabel, Toolbar } from "./Toolbar";
 import { defaultViewState, useViewState, viewKey } from "./viewStore";
 
@@ -34,8 +35,6 @@ const LISTED: Partial<Record<PeekView, { count: (c: EntityCounts) => number; sin
   scheduled: { count: (c) => c.scheduled, since: "they may have become active since" },
 };
 
-/** The grid holds at most this many rows: more than this belongs in an export, not a scrolling grid. */
-export const ROW_LIMIT = 100_000;
 
 export const filterCount = (f: FilterSpec) =>
   [f.property, f.body_contains || f.body_regex || f.body_json_path, f.session_id].filter((v) => typeof v === "string" && v.trim() !== "").length;
@@ -122,7 +121,8 @@ export function MessagesView({
   // The error stays on the query while a retry is on its way: show it only when it can be acted on.
   const auth = useAuthKind();
   const failure = stream.error && stream.canRetry ? describePeekError(stream.error.kind, stream.error.message, label, auth) : null;
-  const atLimit = n + vs.topN > ROW_LIMIT;
+  const limit = rowLimit();
+  const atLimit = n + vs.topN > limit;
   const canPeekMore = !stream.streaming && stream.canPeekMore && !atLimit;
   const end =
     view === "dead-letter" ? "dead-letter queue" : view === "transfer-dead-letter" ? "transfer dead-letter queue" : tab.kind === "subscription" ? "subscription" : "queue";
@@ -145,7 +145,7 @@ export function MessagesView({
     if (n === 0 && stream.exhausted) return "";
     if (stream.exhausted) return `${rows} · end of the ${end}`;
     if (stream.stopped) return `${rows} · stopped`;
-    if (stream.canPeekMore && atLimit) return `${rows} · the view holds up to ${formatNumber(ROW_LIMIT)} messages`;
+    if (stream.canPeekMore && atLimit) return `${rows} · the view holds up to ${formatNumber(limit)} messages`;
     return `${rows} · more available`;
   })();
 

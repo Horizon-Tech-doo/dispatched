@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { EngineError, setTransport, type IpcTransport, type MessageSummary, type PeekPageView, type PeekRequest } from "@/engine";
 import { renderShell } from "../test-utils";
+import { ROW_LIMIT, setRowLimitForTests } from "./rowLimit";
 import { setViewState, viewKey, type ViewState } from "./viewStore";
 
 const TRACKING = "shipment-events/subscriptions/tracking-sync";
@@ -198,22 +199,29 @@ describe("message views", () => {
     await waitFor(() => expect(status).toHaveTextContent("3 matching messages in the newest 100,000 · older messages may not have been examined"));
   });
 
-  it("holds 100,000 rows: Top N 50,000 can peek more once", async () => {
-    const { mock } = renderShell("default", seedTab(TRACKING, "subscription", "dead-letter"));
-    presetView(TRACKING, "dead-letter", { topN: 50_000 });
-    around(mock, async (cmd, args, answer) => {
-      if (cmd !== "peek_page") return answer();
-      const r = args!.request as PeekRequest;
-      const from = r.from.kind === "sequence" ? r.from.sequence : 1;
-      const messages = Array.from({ length: r.max }, (_, i) => summary(from + i));
-      return { messages, scanned: r.max, scan_limit: r.scan_limit ?? 5000, next_sequence: from + r.max, exhausted: false } satisfies PeekPageView;
-    });
-    const status = await screen.findByRole("status", { name: "Peek status" });
-    await waitFor(() => expect(status).toHaveTextContent("50,000 messages · more available"), { timeout: 10_000 });
-    await userEvent.click(within(status).getByRole("button", { name: "Peek more" }));
-    await waitFor(() => expect(status).toHaveTextContent("100,000 messages · the view holds up to 100,000 messages"), { timeout: 10_000 });
-    expect(within(status).queryByRole("button", { name: "Peek more" })).toBeNull();
-  }, 90_000);
+  it("holds at most the row limit: a peek more that would pass it is not offered", async () => {
+    // The production limit is 100,000 rows; the test uses a small one so it runs in moments.
+    expect(ROW_LIMIT).toBe(100_000);
+    setRowLimitForTests(10);
+    try {
+      const { mock } = renderShell("default", seedTab(TRACKING, "subscription", "dead-letter"));
+      presetView(TRACKING, "dead-letter", { topN: 5 });
+      around(mock, async (cmd, args, answer) => {
+        if (cmd !== "peek_page") return answer();
+        const r = args!.request as PeekRequest;
+        const from = r.from.kind === "sequence" ? r.from.sequence : 1;
+        const messages = Array.from({ length: r.max }, (_, i) => summary(from + i));
+        return { messages, scanned: r.max, scan_limit: r.scan_limit ?? 5000, next_sequence: from + r.max, exhausted: false } satisfies PeekPageView;
+      });
+      const status = await screen.findByRole("status", { name: "Peek status" });
+      await waitFor(() => expect(status).toHaveTextContent("5 messages · more available"));
+      await userEvent.click(within(status).getByRole("button", { name: "Peek more" }));
+      await waitFor(() => expect(status).toHaveTextContent("10 messages · the view holds up to 10 messages"));
+      expect(within(status).queryByRole("button", { name: "Peek more" })).toBeNull();
+    } finally {
+      setRowLimitForTests(null);
+    }
+  });
 
   it("offers only the columns the view can fill, and resets them", async () => {
     renderShell("default", seedTab("invoice-generate", "queue", "messages"));
