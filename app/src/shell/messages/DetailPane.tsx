@@ -323,7 +323,7 @@ export function DetailPane(p: {
               {source && <p className="m-0 text-11 text-muted">Dead-lettered from <span className="font-mono" data-selectable>{source}</span></p>}
             </div>
           )}
-          <TabsList variant="underline" aria-label="Message parts" className="shrink-0 border-b border-line">
+          <TabsList variant="underline" aria-label="Message parts" className="shrink-0 border-b border-line [--tabs-fade:var(--c-side)]">
             <TabsTrigger value="body">Body</TabsTrigger>
             <TabsTrigger value="properties">Properties</TabsTrigger>
           </TabsList>

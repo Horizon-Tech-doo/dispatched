@@ -14,6 +14,9 @@ function finishedMessage(j: Job): string {
   return j.written != null ? `${j.title} finished: ${plural(j.written, "message")} written.` : `${j.title} finished.`;
 }
 
+/** How long a line stays in the region: long enough to be read out, short enough that nothing stale is left behind. */
+export const SAID_FOR_MS = 5000;
+
 interface Said {
   key: number;
   text: string;
@@ -51,6 +54,12 @@ export function JobAnnouncer() {
     }
     if (lines.length) setSaid(lines.map((text) => ({ key: next.current++, text })));
   }, [jobs]);
+  // Lines are forgotten after a while (a new announcement restarts the wait), so the region never holds old news.
+  useEffect(() => {
+    if (!said.length) return;
+    const t = setTimeout(() => setSaid([]), SAID_FOR_MS);
+    return () => clearTimeout(t);
+  }, [said]);
   return (
     <div role="status" aria-label="Job updates" className="sr-only">
       {said.map((s) => (

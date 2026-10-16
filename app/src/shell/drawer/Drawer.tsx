@@ -61,8 +61,6 @@ function ActivityLog() {
   );
 }
 
-
-
 /** Where a job stands, in numbers: "5 of 37", or, with no total, "5 written" and how many were looked at. */
 function counts(j: Job): string {
   if (j.total != null) return `${formatNumber(j.done)} of ${formatNumber(j.total)}`;
@@ -170,10 +168,7 @@ function JobRow({ j }: { j: Job }) {
         <span aria-hidden="true" className="hidden @[560px]:block" />
       )}
       <span className="flex items-center justify-between gap-3 @[560px]:justify-end">
-        <span className="min-w-[96px] whitespace-nowrap text-left text-11 tabular-nums text-muted @[560px]:text-right"
-        >
-          {state}
-        </span>
+        <span className="min-w-[96px] whitespace-nowrap text-left text-11 tabular-nums text-muted @[560px]:text-right">{state}</span>
         {running && (
           <Button size="sm" className="h-[18px]" disabled={cancelling} onClick={cancel} aria-label={`${cancelling ? "Cancelling" : "Cancel"} ${j.title}`}>
             {cancelling ? "Cancelling" : "Cancel"}
@@ -223,7 +218,7 @@ export function Drawer() {
     <section aria-label="Jobs and activity" className="flex h-full min-h-0 flex-col">
       <Tabs value={shell.layout.drawerTab} onValueChange={(v) => dispatch({ type: "layout", patch: { drawerTab: v as "jobs" | "activity" } })} className="flex min-h-0 flex-1 flex-col">
         <div className="flex h-[26px] shrink-0 items-stretch border-b border-line pr-1">
-          <TabsList variant="underline" aria-label="Drawer" className="h-full px-1.5">
+          <TabsList variant="underline" aria-label="Drawer" className="h-full px-1.5 [--tabs-fade:var(--c-side)]">
             <TabsTrigger value="jobs">Jobs {running > 0 && <span className="tabular-nums text-muted">{running}</span>}</TabsTrigger>
             <TabsTrigger value="activity">Activity</TabsTrigger>
           </TabsList>

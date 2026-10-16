@@ -42,13 +42,21 @@ test("dead letters: rows, detail, filter, and what the status bar promises", asy
   await expect(appStatus(page).getByText("Peek only, nothing locked")).toBeVisible();
   await expect(status(page)).not.toContainText("Peek only");
 
-  // Enter on a selected row opens the pane; closing it hands the keyboard back to the grid.
+  // Enter on a selected row opens the pane. Escape with a control in the pane focused closes it and hands the keyboard
+  // back to the grid; so does the Close message button.
   await grid.getByRole("row").nth(1).click();
   await expect(grid.getByRole("row").nth(1)).toHaveAttribute("aria-selected", "true");
   await page.keyboard.press("Enter");
   const detail = page.getByRole("region", { name: /^Message \d+$/ });
   await expect(detail).toBeVisible();
-  await expect(detail.getByRole("button", { name: "Copy JSON" })).toBeEnabled();
+  const copyJson = detail.getByRole("button", { name: "Copy JSON" });
+  await expect(copyJson).toBeEnabled();
+  // A tab, not Copy JSON: a focused button shows its tooltip, and Escape dismisses that first.
+  await detail.getByRole("tab", { name: "Body" }).focus();
+  await page.keyboard.press("Escape");
+  await expect(detail).toHaveCount(0);
+  await expect(grid).toBeFocused();
+  await page.keyboard.press("Enter");
   await detail.getByRole("button", { name: "Close message" }).click();
   await expect(detail).toHaveCount(0);
   await expect(grid).toBeFocused();
@@ -58,8 +66,10 @@ test("dead letters: rows, detail, filter, and what the status bar promises", asy
   const bar = page.getByRole("search", { name: "Message filter" });
   await bar.getByLabel("Body contains").fill("SHP-1000");
   await bar.getByLabel("Body contains").press("Enter");
-  await expect(status(page)).toContainText(/matching messages? · scanned 37/);
-  await expect(status(page)).not.toContainText(/^37 messages/);
+  // The mock's dead-letter queue has 9 messages with SHP-1000 in the body, out of the 37 it examines.
+  await expect(status(page)).toHaveText("9 matching messages · scanned 37 · end of the dead-letter queue");
+  await expect(page.locator("[data-row-id]")).toHaveCount(9);
+
   // Closed, the filter stays visible as a summary, and one click clears it.
   await bar.getByLabel("Body contains").press("Escape");
   await expect(bar).toHaveCount(0);
@@ -338,4 +348,23 @@ test("a narrow window scrolls the sub-tabs, keeps the active one in view and sho
   await views.getByRole("tab", { name: "Overview" }).click();
   await expect.poll(async () => (await geometry()).before).toBe(false);
   expect(await geometry()).toMatchObject({ overflows: true, inView: true, after: true });
+
+  // A middle tab is brought in clear of the fade on the edge that has more tabs beyond it (28px), not just into view.
+  await views.getByRole("tab", { name: "Scheduled" }).click();
+  await expect(views.getByRole("tab", { name: "Scheduled" })).toHaveAttribute("aria-selected", "true");
+  const clear = () =>
+    views.evaluate((list) => {
+      const tab = list.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')!;
+      const l = list.getBoundingClientRect();
+      const t = tab.getBoundingClientRect();
+      const max = list.scrollWidth - list.clientWidth;
+      return {
+        // Inside the strip by the fade's width (28px, less a pixel for rounding), or at the true start / end where there is no fade.
+        left: t.left - l.left >= 27 || list.scrollLeft <= 1,
+        right: l.right - t.right >= 27 || list.scrollLeft >= max - 1,
+      };
+    });
+  await expect.poll(clear).toEqual({ left: true, right: true });
+  // More tabs on both sides: both fades are on.
+  await expect(page.locator('[role="tablist"][aria-label="Entity views"][data-overflow-start][data-overflow-end]')).toHaveCount(1);
 });

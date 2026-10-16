@@ -280,6 +280,11 @@ describe("Drawer", () => {
     expect(live()).toHaveTextContent(`${title} failed.`);
   });
 
+  it("tints the drawer tabs' edge fade with the drawer's own surface", async () => {
+    const jobs = await jobsTab();
+    expect(within(jobs).getByRole("tablist", { name: "Drawer" }).className).toContain("[--tabs-fade:var(--c-side)]");
+  });
+
   it("does not announce jobs that were already running or finished when the page mounted", async () => {
     renderShell("default", { last_profile: "p-logistics" });
     await screen.findByRole("region", { name: "Jobs and activity" });

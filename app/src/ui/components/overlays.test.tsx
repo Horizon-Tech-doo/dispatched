@@ -62,7 +62,8 @@ describe("Tabs overflow", () => {
     const list = screen.getByRole("tablist");
     expect(list.scrollLeft).toBe(0);
     await userEvent.click(screen.getByRole("tab", { name: "audit" }));
-    await vi.waitFor(() => expect(list.scrollLeft).toBe(100));
+    // Clear of the 28px fade on the edge with more tabs beyond it: the tab's right edge (200) sits 28px inside the strip's (100).
+    await vi.waitFor(() => expect(list.scrollLeft).toBe(128));
     await userEvent.click(screen.getByRole("tab", { name: "orders" }));
     await vi.waitFor(() => expect(list.scrollLeft).toBe(0));
     expect(scrollIntoView).not.toHaveBeenCalled();
@@ -148,6 +149,73 @@ describe("Tabs that do not fit", () => {
     expect(list.scrollLeft).toBe(200); // scrollWidth - clientWidth, past the tab's own edge (190) by the padding
     expect(list).toHaveAttribute("data-overflow-start");
     expect(list).not.toHaveAttribute("data-overflow-end");
+  });
+
+  it("reveals a middle tab clear of the fades on both edges", async () => {
+    sizes = { scrollWidth: 600, clientWidth: 100 };
+    stubLayout();
+    const rect = (l: number, w: number) => ({ left: l, right: l + w, top: 0, bottom: 30, width: w, height: 30, x: l, y: 0, toJSON() {} }) as DOMRect;
+    // Four tabs of 50px at 0, 150, 300 and 450 in the strip's own coordinates (the strip shows 100px).
+    const at: Record<string, number> = { one: 0, two: 150, three: 300, four: 450 };
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.getAttribute("role") === "tablist") return rect(0, 100);
+      const list = this.closest<HTMLElement>('[role="tablist"]')!;
+      return rect(at[this.textContent ?? ""] - list.scrollLeft, 50);
+    });
+    render(
+      <Tabs defaultValue="one">
+        <TabsList variant="underline" aria-label="Views">
+          {Object.keys(at).map((n) => (
+            <TabsTrigger key={n} value={n}>{n}</TabsTrigger>
+          ))}
+        </TabsList>
+      </Tabs>,
+    );
+    const list = screen.getByRole("tablist");
+    expect(list.scrollLeft).toBe(0);
+    await userEvent.click(screen.getByRole("tab", { name: "three" }));
+    // Coming from the left: the tab's right edge (350) ends 28px inside the strip's right edge.
+    await vi.waitFor(() => expect(list.scrollLeft).toBe(350 - 72));
+    const inside = (name: string) => {
+      const t = at[name] - list.scrollLeft;
+      return { fromLeft: t, fromRight: 100 - (t + 50) };
+    };
+    expect(inside("three").fromRight).toBeGreaterThanOrEqual(28);
+    await userEvent.click(screen.getByRole("tab", { name: "two" }));
+    // Coming from the right: the tab's left edge (150) ends 28px inside the strip's left edge.
+    await vi.waitFor(() => expect(list.scrollLeft).toBe(150 - 28));
+    expect(inside("two").fromLeft).toBeGreaterThanOrEqual(28);
+  });
+
+  it("watches tabs that are added later, and the strip has no gap that the fades would share", async () => {
+    stubLayout();
+    const watched = new Set<Element>();
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe(el: Element) {
+          watched.add(el);
+        }
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+    const view = (tabs: string[]) => (
+      <Tabs defaultValue="a">
+        <TabsList variant="underline" aria-label="Views">
+          {tabs.map((t) => (
+            <TabsTrigger key={t} value={t}>{t}</TabsTrigger>
+          ))}
+        </TabsList>
+      </Tabs>
+    );
+    const { rerender } = render(view(["a", "b"]));
+    expect(watched.has(screen.getByRole("tab", { name: "b" }))).toBe(true);
+    rerender(view(["a", "b", "c"]));
+    await vi.waitFor(() => expect(watched.has(screen.getByRole("tab", { name: "c" }))).toBe(true));
+    // The pseudo-element ends take part in a flex gap like any item; the space between tabs is margin instead.
+    expect(screen.getByRole("tablist").className).not.toMatch(/(^|\s)gap-/);
+    expect(screen.getByRole("tab", { name: "b" }).className).toContain("not-first:ml-0.5");
   });
 
   it("keeps the active tab in view when the strip resizes, until the person scrolls it themselves", () => {

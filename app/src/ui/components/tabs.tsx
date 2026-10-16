@@ -5,6 +5,9 @@ import { cn } from "../lib/cn";
 type Variant = "strip" | "underline";
 const VariantContext = createContext<Variant>("underline");
 
+/** How far the edge fades reach into the strip (their width, below); a revealed tab stays clear of them. */
+const FADE_PX = 28;
+
 export const Tabs = TabsPrimitive.Root;
 
 export function TabsList({
@@ -36,12 +39,18 @@ export function TabsList({
       if (tab) {
         const l = list.getBoundingClientRect();
         const t = tab.getBoundingClientRect();
-        if (t.left < l.left) list.scrollLeft -= l.left - t.left;
-        else if (t.right > l.right) list.scrollLeft += t.right - l.right;
-        // The first and last tab reveal the strip's own padding too, so no fade claims there are more tabs.
-        const tabs = list.querySelectorAll('[role="tab"]');
-        if (tab === tabs[0]) list.scrollLeft = 0;
-        else if (tab === tabs[tabs.length - 1]) list.scrollLeft = Math.max(list.scrollLeft, list.scrollWidth - list.clientWidth);
+        // The tab's place in the strip's own coordinates, and how much of the strip can be scrolled.
+        const left = t.left - l.left + list.scrollLeft;
+        const right = t.right - l.left + list.scrollLeft;
+        const max = list.scrollWidth - list.clientWidth;
+        // Keep the tab clear of the fade on any edge that has more tabs beyond it: inset by the fade's width, then take
+        // the true start or end when the tab is that close to it (the strip's padding shows and the fade goes).
+        let target = list.scrollLeft;
+        if (left - target < FADE_PX) target = left - FADE_PX;
+        else if (right - target > l.width - FADE_PX) target = right - (l.width - FADE_PX);
+        if (target < FADE_PX) target = 0;
+        else if (max > 0 && max - target < FADE_PX) target = max;
+        if (target !== list.scrollLeft) list.scrollLeft = target;
       }
       edges();
     };
@@ -51,15 +60,20 @@ export function TabsList({
     };
     const onUser = () => (userScrolled = true);
     reveal();
+    const sizes = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => (userScrolled ? edges() : reveal()));
+    const watchChildren = () => {
+      // Tabs added later are watched too (observing one already watched changes nothing).
+      for (const child of Array.from(list.children)) sizes?.observe(child);
+    };
     const states = new MutationObserver((records) => {
+      if (records.some((r) => r.type === "childList")) watchChildren();
       if (records.some((r) => r.type === "attributes")) onActivated();
       else edges();
     });
     states.observe(list, { attributes: true, attributeFilter: ["data-state"], childList: true, subtree: true });
     // The strip or a tab changed size (the window, a count arriving): keep the active tab in view unless the person scrolled.
-    const sizes = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => (userScrolled ? edges() : reveal()));
     sizes?.observe(list);
-    for (const child of Array.from(list.children)) sizes?.observe(child);
+    watchChildren();
     list.addEventListener("scroll", edges, { passive: true });
     list.addEventListener("wheel", onUser, { passive: true });
     list.addEventListener("pointerdown", onUser, { passive: true });
@@ -95,7 +109,7 @@ export function TabsList({
           "after:pointer-events-none after:sticky after:right-0 after:z-10 after:-ml-7 after:w-7 after:shrink-0 after:self-stretch after:bg-linear-to-l after:from-(--tabs-fade) after:to-transparent after:opacity-0 after:content-['']",
           "data-[overflow-start]:before:opacity-100 data-[overflow-end]:after:opacity-100",
           variant === "strip" && "[--tabs-fade:var(--c-chrome)]",
-          variant === "strip" ? "h-[30px] bg-chrome" : "h-7 gap-0.5 px-2.5",
+          variant === "strip" ? "h-[30px] bg-chrome" : "h-7 px-2.5",
           className,
         )}
         {...props}
@@ -127,7 +141,7 @@ export function TabsTrigger({ className, onMouseDown, onKeyDown, onBlur, ...prop
         "flex shrink-0 items-center gap-1.5 whitespace-nowrap text-12 text-muted hover:text-fg data-[state=active]:text-fg",
         variant === "strip"
           ? "border-r border-t-2 border-line border-t-transparent px-3 data-[state=active]:border-t-fg data-[state=active]:bg-content"
-          : "border-b-2 border-b-transparent px-2 data-[state=active]:border-b-fg",
+          : "border-b-2 border-b-transparent px-2 not-first:ml-0.5 data-[state=active]:border-b-fg",
         // Inset by 2px: inside the marker's edge, so a focused tab never looks like a second selected one.
         "focus-visible:outline focus-visible:outline-1 focus-visible:-outline-offset-2 focus-visible:outline-fg",
         "data-[pointer]:focus-visible:outline-0",

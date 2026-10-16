@@ -709,6 +709,21 @@ export const shots: Shot[] = [
     },
   },
   {
+    // A middle tab: clear of the fade on both edges.
+    name: "subtabs-narrow-middle",
+    path: seedTab("returns-intake", "queue", "overview"),
+    ready: (p) => p.getByRole("tablist", { name: "Entity views" }).getByRole("tab", { name: "Overview", selected: true }),
+    prepare: async (page) => {
+      await page.setViewportSize({ width: 640, height: 800 });
+      const views = page.getByRole("tablist", { name: "Entity views" });
+      await views.getByRole("tab", { name: "Scheduled" }).click();
+      await expect(views.getByRole("tab", { name: "Scheduled", selected: true })).toBeVisible();
+      await expect.poll(() => views.evaluate((l) => l.hasAttribute("data-overflow-start") && l.hasAttribute("data-overflow-end"))).toBe(true);
+      // Let the strip finish scrolling to its place.
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+    },
+  },
+  {
     name: "subtabs-narrow-start",
     path: seedTab("returns-intake", "queue", "overview"),
     ready: (p) => p.getByRole("tablist", { name: "Entity views" }).getByRole("tab", { name: "Overview", selected: true }),
