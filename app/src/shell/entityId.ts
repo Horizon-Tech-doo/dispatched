@@ -22,3 +22,10 @@ export function displayName(id: string): string {
   const { topic, name } = splitSubscriptionId(id);
   return topic ? `${name} (${topic})` : id;
 }
+
+/** What an entity's connection string is scoped to, as a sentence part: `EntityPath` names the queue or topic, so a
+ *  subscription's string is scoped to its topic (`topic events`); anything else to `fallback`. */
+export function connectionStringScope(id: string, fallback: string): string {
+  const { topic } = splitSubscriptionId(id);
+  return topic ? `topic ${topic}` : fallback;
+}

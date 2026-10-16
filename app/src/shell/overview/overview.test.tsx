@@ -93,6 +93,17 @@ describe("overview", () => {
     expect(within(screen.getByRole("region", { name: "Counts" })).getByText("3,417")).toBeInTheDocument();
   });
 
+  it("a subscription's connection string is scoped to its topic, and says so", async () => {
+    renderShell("default", seed("shipment-events/subscriptions/tracking-sync", "subscription"));
+    const addresses = await screen.findByRole("region", { name: "Addresses" });
+    expect(within(addresses).getByText("Scoped to topic shipment-events. It goes to the clipboard and is never shown.")).toBeInTheDocument();
+    await userEvent.click(within(addresses).getByRole("button", { name: "Copy connection string" }));
+    expect(await within(addresses).findByText("Copied to the clipboard. It is scoped to topic shipment-events.")).toBeInTheDocument();
+    expect(
+      await within(screen.getByRole("contentinfo")).findByText("Copied the connection string for tracking-sync (shipment-events). It is scoped to topic shipment-events and was never shown."),
+    ).toBeInTheDocument();
+  });
+
   it("counts the service did not report show as unknown, and say so", async () => {
     const { mock } = renderShell("default", seed("invoice-generate", "queue"));
     setTransport({

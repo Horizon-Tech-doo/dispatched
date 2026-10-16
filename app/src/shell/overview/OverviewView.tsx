@@ -5,7 +5,7 @@ import { Button, CountBadge, EmptyState, Hint, IconButton, Problem, Skeleton, Sk
 import { accessAdvice, isForbidden, rightsOf, useAuthKind } from "../access";
 import { useShell } from "../context";
 import { copyFailureBody } from "../copyFailure";
-import { displayName, entityIdOf } from "../entityId";
+import { connectionStringScope, displayName, entityIdOf } from "../entityId";
 import { deadLetterUrl, entityUrl } from "../entityUrls";
 import type { EntityTab } from "../state";
 import { formatProperty, groupProperties, isTimestamp, labelOf, propertiesJson } from "./labels";
@@ -97,6 +97,8 @@ function Address({ label, copyLabel, value, said }: { label: string; copyLabel: 
 
 function ConnectionStringCopy({ entity, eligible, entra }: { entity: string; eligible: boolean; entra: boolean }) {
   const { copyConnectionString } = useShell();
+  // `EntityPath` names the queue or topic, so a subscription's string is scoped to its topic.
+  const scope = connectionStringScope(entity, "this entity");
   const [state, setState] = useState<{ kind: "idle" | "copied" } | { kind: "failed"; message: string }>({ kind: "idle" });
   useEffect(() => {
     if (state.kind !== "copied") return;
@@ -122,8 +124,8 @@ function ConnectionStringCopy({ entity, eligible, entra }: { entity: string; eli
           {entra
             ? "Entra ID connections have no connection string. Copy the URL instead."
             : state.kind === "copied"
-              ? "Copied to the clipboard. It is scoped to this entity."
-              : "Scoped to this entity. It goes to the clipboard and is never shown."}
+              ? `Copied to the clipboard. It is scoped to ${scope}.`
+              : `Scoped to ${scope}. It goes to the clipboard and is never shown.`}
         </span>
       )}
     </div>

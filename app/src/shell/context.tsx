@@ -5,7 +5,7 @@ import { useTheme } from "@/ui";
 import { startEventCapture } from "./drawer/activity";
 import { useConnectionController, type ConnectionController } from "./connection";
 import { clearViewStates } from "./messages/viewStore";
-import { displayName } from "./entityId";
+import { connectionStringScope, displayName } from "./entityId";
 import { installStore } from "./sheets/installState";
 import { usePrefs, useProfileShell, type Prefs, type ProfileShell, type ShellAction } from "./state";
 
@@ -119,7 +119,7 @@ export function ShellProvider({ children }: { children: ReactNode }) {
     try {
       await commands.copyEntityConnectionString(profileId, entity);
       // Rust has already put it on the clipboard; if the connection changed meanwhile, say nothing about the old one.
-      if (profileNow.current === profileId) setNotice({ text: `Copied the connection string for ${displayName(entity)}. It is scoped to that entity and was never shown.` });
+      if (profileNow.current === profileId) setNotice({ text: `Copied the connection string for ${displayName(entity)}. It is scoped to ${connectionStringScope(entity, "that entity")} and was never shown.` });
       return { ok: true };
     } catch (e) {
       const message = String((e as { message?: string } | null)?.message ?? e);

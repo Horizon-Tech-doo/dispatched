@@ -93,13 +93,16 @@ impl ConnectionString {
     }
 }
 
-/// `cs` scoped to `entity` (`EntityPath=` replaced or added). Refuses a string that is
-/// already scoped to another entity, since its key works only there. The result is a secret.
+/// `cs` scoped to `entity` (`EntityPath=` replaced or added). `EntityPath` names the queue or
+/// topic, as the portal and the Azure SDKs expect: a subscription's string is scoped to its topic.
+/// Refuses a string that is already scoped to another queue or topic, since its key works only
+/// there; a key scoped to a topic does copy that topic's subscriptions. The result is a secret.
 pub fn entity_connection_string(cs: &str, entity: &crate::EntityPath) -> Result<SecretString> {
-    let base = entity.base();
     // Only the characters Service Bus names use: anything else (`;`, `=`, spaces, control
     // characters) could add or change segments of the string the user pastes elsewhere.
+    let base = entity.base();
     let valid = !base.is_empty()
+        && !entity.entity.is_empty()
         && base
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'/' | b'~' | b'-'));
@@ -109,10 +112,11 @@ pub fn entity_connection_string(cs: &str, entity: &crate::EntityPath) -> Result<
             base.escape_debug()
         )));
     }
+    let scope = entity.entity.as_str();
     let parsed = ConnectionString::parse(cs)?;
     if let Some(scoped) = &parsed.entity_path {
         let same = crate::EntityPath::parse(scoped)
-            .map(|p| p.base().eq_ignore_ascii_case(&base))
+            .map(|p| p.entity.eq_ignore_ascii_case(scope))
             .unwrap_or(false);
         if !same {
             return Err(Error::Invalid(format!(
@@ -132,7 +136,7 @@ pub fn entity_connection_string(cs: &str, entity: &crate::EntityPath) -> Result<
         })
         .collect();
     Ok(SecretString::from(format!(
-        "{};EntityPath={base}",
+        "{};EntityPath={scope}",
         parts.join(";")
     )))
 }
@@ -272,12 +276,39 @@ mod tests {
             e.contains("only works for `orders`") && !e.contains("k="),
             "{e}"
         );
-        assert!(
-            entity_connection_string(cs, &sub)
-                .unwrap()
-                .expose_secret()
-                .ends_with(";EntityPath=events/Subscriptions/audit")
-        );
+    }
+
+    #[test]
+    fn a_subscription_string_is_scoped_to_its_topic() {
+        // The Azure SDKs expect `EntityPath` to name the queue or topic; they reject a
+        // subscription path there.
+        let cs =
+            "Endpoint=sb://ns.servicebus.windows.net/;SharedAccessKeyName=r;SharedAccessKey=k=";
+        let sub = crate::EntityPath::subscription("events", "audit");
+        let out = entity_connection_string(cs, &sub).unwrap();
+        let out = out.expose_secret();
+        assert!(out.ends_with(";EntityPath=events"), "{out}");
+        assert!(!out.contains("Subscriptions"), "{out}");
+    }
+
+    #[test]
+    fn a_topic_scoped_key_copies_that_topics_subscriptions_only() {
+        let cs =
+            "Endpoint=sb://ns.servicebus.windows.net/;SharedAccessKeyName=r;SharedAccessKey=k=";
+        let topic_scoped = format!("{cs};EntityPath=events");
+        let own = crate::EntityPath::subscription("events", "audit");
+        let out = entity_connection_string(&topic_scoped, &own).unwrap();
+        assert!(out.expose_secret().ends_with(";EntityPath=events"));
+        let other_topic = crate::EntityPath::subscription("billing", "audit");
+        let e = entity_connection_string(&topic_scoped, &other_topic)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("only works for `events`"), "{e}");
+        let queue = crate::EntityPath::queue("orders");
+        assert!(entity_connection_string(&topic_scoped, &queue).is_err());
+        // A queue-scoped key does not copy a subscription either.
+        let queue_scoped = format!("{cs};EntityPath=orders");
+        assert!(entity_connection_string(&queue_scoped, &own).is_err());
     }
 
     #[test]
