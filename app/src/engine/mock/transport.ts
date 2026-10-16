@@ -1,4 +1,5 @@
 import { EngineError, setTransport, type IpcTransport, type Unlisten } from "../ipc";
+import { suggestedFileName } from "../exportName";
 import type {
   AccountView, ActivityEntry, ActivityError, BoundSignIn, ConnectionReport, ConnectionView, DashboardRow, DashboardView, EntityCounts, EntityDetails,
   EntityKindName, EntityListing, EntityRef, ExportRequest, FilterIssue, FilterSpec, JobEvent, JobStarted, MessageDetail, PeekPageView, PeekRequest, PeekView,
@@ -17,6 +18,9 @@ export type Scenario =
   | "tenant-sign-in"
   // customs-docs holds 12,000 active messages (scan budgets); exports keep running until cancelled.
   | "many-messages" | "export-slow"
+  // An export fails after its second tick (the connection resets); selected messages `export-missing` lost two
+  // of the ones asked for (received since the grid read them).
+  | "export-fails" | "export-missing"
   // Every peek page is refused: the identity lacks Listen.
   | "peek-error"
   // A peek's first page arrives; the next one never does (screenshots of a view still reading).
@@ -36,6 +40,14 @@ function hostFromConnectionString(cs: string | null | undefined): string {
 const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
 /** `1,284`: the Rust activity lines group digits. */
+/** The views as the UI names them, which Rust uses in a job's title. */
+const VIEW_NAME: Record<PeekView, string> = {
+  active: "active messages",
+  "dead-letter": "dead-letter queue",
+  "transfer-dead-letter": "transfer dead-letter queue",
+  scheduled: "scheduled messages",
+  deferred: "deferred messages",
+};
 const thousands = (n: number) => n.toLocaleString("en-US");
 
 /** As core `EntityPath::parse`: a queue, or `topic/subscriptions/name`; refused (`invalid`) when blank. */
@@ -125,13 +137,6 @@ function matches(m: MockMessage, f: FilterSpec): boolean {
 
 /** The sub-queue a view reads. */
 const subOf = (view: PeekView): MockMessage["sub"] => (view === "dead-letter" ? "dlq" : view === "transfer-dead-letter" ? "tdlq" : "main");
-
-/** As Rust `suggested_file_name`: `{entity-slug}-{view}-{yyyyMMdd-HHmm}.{ext}`, in UTC. */
-function suggestedFileName(entity: string, view: PeekView, format: string, now = new Date()): string {
-  const p = (n: number) => String(n).padStart(2, "0");
-  const stamp = `${now.getUTCFullYear()}${p(now.getUTCMonth() + 1)}${p(now.getUTCDate())}-${p(now.getUTCHours())}${p(now.getUTCMinutes())}`;
-  return `${entity.replace(/[^A-Za-z0-9._-]/g, "-")}-${view}-${stamp}.${format.toLowerCase() === "ndjson" ? "ndjson" : "json"}`;
-}
 
 /** Entities a profile that may not list the namespace still knows (its pins and `EntityPath`). */
 const FORBIDDEN_KNOWN: EntityRef[] = [{ entity: "orders", subscription: null }, { entity: "shipment-events", subscription: "tracking-sync" }];
@@ -677,18 +682,22 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
         } else if (r.scope.sequences.length === 0) throw new EngineError("invalid", "Select the messages to export.");
         picks.delete(r.pick);
         const name = path.split("/").at(-1)!;
-        const title = `Export ${entity} (${r.view}) to ${name}`;
+        const title = `Export ${entity} (${VIEW_NAME[r.view]})`;
         const inView = fx.messagesOf(entity, scenario).filter((m) => accepts(r.view, m));
         let found: MockMessage[];
         let total: number | null;
         let note = "";
+        let missingCount = 0;
+        const filtered = r.scope.kind === "all" && Object.values(r.scope.filter ?? {}).some((v) => typeof v === "string" && v.trim() !== "");
         if (r.scope.kind === "selected") {
+          // `export-missing`: the last two selected messages were received since the grid read them.
           const wanted = [...new Set(r.scope.sequences)];
-          found = inView.filter((m) => wanted.includes(m.sequence_number));
+          const lost = scenario === "export-missing" ? new Set(wanted.slice(-2)) : new Set<number>();
+          found = inView.filter((m) => wanted.includes(m.sequence_number) && !lost.has(m.sequence_number));
           total = wanted.length;
-          const missing = wanted.length - found.length;
-          if (missing === 1) note = "; 1 selected message was no longer there";
-          else if (missing > 1) note = `; ${missing} selected messages were no longer there`;
+          missingCount = wanted.length - found.length;
+          if (missingCount === 1) note = "; 1 selected message was no longer there";
+          else if (missingCount > 1) note = `; ${missingCount} selected messages were no longer there`;
         } else {
           const { filter = {}, from_sequence = 0, max = null } = r.scope;
           found = inView.filter((m) => m.sequence_number >= Math.max(0, from_sequence) && matches(m, filter));
@@ -697,7 +706,7 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
           total = max != null && hint != null ? Math.min(max, hint) : (max ?? hint);
         }
         const id = `job-${Math.random().toString(36).slice(2, 10)}`;
-        job({ type: "started", id, title, total });
+        job({ type: "started", id, title, total, file_name: name });
         let written = 0;
         const entry: Job = {
           cancelling: false,
@@ -708,21 +717,26 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
               const e = new EngineError(error.kind, error.message);
               // As `tracked`: a cancel is logged as its message without an error.
               activity(error.kind === "cancelled" ? error.message.replace(/\.$/, "") : `${title} failed`, started, error.kind === "cancelled" ? null : e);
-              job({ type: "finished", id, error, summary: null, output: null });
+              job({ type: "finished", id, error, summary: null, output: null, written: null, missing: null, file_name: null });
               return;
             }
             const summary = `Exported ${thousands(written)} ${written === 1 ? "message" : "messages"} to ${name}${note}`;
             outputs.set(id, path);
             activity(summary, started);
-            job({ type: "finished", id, error: null, summary, output: path });
+            job({ type: "finished", id, error: null, summary, output: path, written, missing: missingCount, file_name: name });
           },
         };
         // A page at a time (selected messages in one write); `export-slow` writes one message a tick and never ends.
-        const chunk = scenario === "export-slow" ? 1 : r.scope.kind === "selected" ? found.length : Math.max(1, Math.min(1000, Math.ceil(found.length / 3)));
+        const chunk =
+          scenario === "export-slow" ? 1 : scenario === "export-fails" ? 5 : r.scope.kind === "selected" ? found.length : Math.max(1, Math.min(1000, Math.ceil(found.length / 3)));
+        // A filtered export examines more messages than it writes.
+        const ratio = filtered ? Math.ceil(inView.length / Math.max(1, found.length)) : 1;
         const tick = () => {
           if (entry.cancelling) return;
+          // `export-fails`: the connection resets on the second page.
+          if (scenario === "export-fails" && written >= chunk) return entry.finish({ kind: "network", message: "network error: connection reset by peer" });
           written = Math.min(found.length, written + chunk);
-          job({ type: "progress", id, done: written, total });
+          job({ type: "progress", id, done: written, total, scanned: Math.min(inView.length, written * ratio) });
           if (scenario !== "export-slow" && written >= found.length) entry.finish(null);
           else entry.timer = setTimeout(tick, 150);
         };

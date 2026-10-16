@@ -31,21 +31,33 @@ pub struct ActivityEntry {
 pub enum JobEvent {
     Started {
         id: String,
+        /// What the job is, without where its file goes: `Export orders (dead-letter queue)`.
         title: String,
         total: Option<u64>,
+        /// The file the job writes, by name.
+        file_name: Option<String>,
     },
     Progress {
         id: String,
         done: u64,
         total: Option<u64>,
+        /// Messages examined so far. Past `done` when a filter skips messages.
+        scanned: u64,
     },
     Finished {
         id: String,
         error: Option<ActivityError>,
-        /// What was done, e.g. `Exported 1,284 messages to orders-dead-letter-20261016-0941.json`.
+        /// What was done, e.g. `Exported 1,284 messages to orders-dead-letter-20261016-0941.json`:
+        /// the activity log's line. The UI composes its own from the fields below.
         summary: Option<String>,
         /// The file written, in full.
         output: Option<String>,
+        /// Messages written; null on failure.
+        written: Option<u64>,
+        /// Selected messages that were no longer there; null on failure.
+        missing: Option<u64>,
+        /// The file written, by name; null on failure.
+        file_name: Option<String>,
     },
 }
 
@@ -251,24 +263,38 @@ mod tests {
             serde_json::to_value(&e).unwrap(),
             serde_json::json!({"at":"2026-10-15T09:41:12Z","action":"Listed 4 queues and 3 topics","duration_ms":312,"error":null})
         );
+        let s = JobEvent::Started {
+            id: "j1".into(),
+            title: "Export orders (dead-letter queue)".into(),
+            total: None,
+            file_name: Some("out.json".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(&s).unwrap(),
+            serde_json::json!({"type":"started","id":"j1","title":"Export orders (dead-letter queue)","total":null,"file_name":"out.json"})
+        );
         let j = JobEvent::Progress {
             id: "j1".into(),
             done: 5,
             total: Some(10),
+            scanned: 1200,
         };
         assert_eq!(
             serde_json::to_value(&j).unwrap(),
-            serde_json::json!({"type":"progress","id":"j1","done":5,"total":10})
+            serde_json::json!({"type":"progress","id":"j1","done":5,"total":10,"scanned":1200})
         );
         let f = JobEvent::Finished {
             id: "j1".into(),
             error: None,
             summary: Some("Exported 5 messages to out.json".into()),
             output: Some("/tmp/out.json".into()),
+            written: Some(5),
+            missing: Some(2),
+            file_name: Some("out.json".into()),
         };
         assert_eq!(
             serde_json::to_value(&f).unwrap(),
-            serde_json::json!({"type":"finished","id":"j1","error":null,"summary":"Exported 5 messages to out.json","output":"/tmp/out.json"})
+            serde_json::json!({"type":"finished","id":"j1","error":null,"summary":"Exported 5 messages to out.json","output":"/tmp/out.json","written":5,"missing":2,"file_name":"out.json"})
         );
         let p = SignInPrompt {
             kind: "device-code",

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { formatBytes, formatCount, formatDuration, formatNumber } from "./format";
-import { shortcutLabel } from "./platform";
+import { fileManagerName, shortcutLabel } from "./platform";
 
 describe("format", () => {
   it("formats counts like the CLI", () => {
@@ -31,5 +31,13 @@ describe("format", () => {
     expect(shortcutLabel("mod+k", false)).toBe("Ctrl+K");
     expect(shortcutLabel("mod+shift+p", true)).toBe("⇧⌘P");
     expect(shortcutLabel("f5", false)).toBe("F5");
+  });
+});
+
+describe("fileManagerName", () => {
+  it("names the platform's file manager", () => {
+    expect(fileManagerName(true, false)).toBe("Finder");
+    expect(fileManagerName(false, true)).toBe("Explorer");
+    expect(fileManagerName(false, false)).toBe("folder");
   });
 });

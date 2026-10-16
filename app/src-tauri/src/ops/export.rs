@@ -78,15 +78,18 @@ pub struct ExportPlan {
     pub scope: Scope,
     pub file: FileExport,
     pub path: PathBuf,
+    /// `Export {entity} ({view})`, without the file.
     pub title: String,
+    pub file_name: String,
     pub total: Option<u64>,
 }
 
 #[derive(Debug)]
 pub struct ExportSummary {
-    /// Messages written. The UI gets the count through `summary`.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Messages written.
     pub written: u64,
+    /// Selected messages that were no longer there (0 for an export of a whole view).
+    pub missing: u64,
     pub path: PathBuf,
     pub summary: String,
 }
@@ -137,6 +140,17 @@ fn file_name(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())
+}
+
+/// The view as the UI names it, so a job's title reads like the view's own tab.
+fn view_label(view: PeekView) -> &'static str {
+    match view {
+        PeekView::Active => "active messages",
+        PeekView::Scheduled => "scheduled messages",
+        PeekView::Deferred => "deferred messages",
+        PeekView::DeadLetter => "dead-letter queue",
+        PeekView::TransferDeadLetter => "transfer dead-letter queue",
+    }
 }
 
 fn thousands(n: u64) -> String {
@@ -234,11 +248,8 @@ pub fn plan(req: ExportRequest, path: PathBuf) -> Result<ExportPlan, CommandErro
         },
     };
     let file = FileExport::create(&path, format, true)?;
-    let title = format!(
-        "Export {entity} ({}) to {}",
-        req.view.as_str(),
-        file_name(&path)
-    );
+    let title = format!("Export {entity} ({})", view_label(req.view));
+    let file_name = file_name(&path);
     Ok(ExportPlan {
         entity,
         view: req.view,
@@ -246,6 +257,7 @@ pub fn plan(req: ExportRequest, path: PathBuf) -> Result<ExportPlan, CommandErro
         file,
         path,
         title,
+        file_name,
         total,
     })
 }
@@ -275,6 +287,7 @@ pub async fn run(
         ..
     } = plan;
     let mut note = String::new();
+    let mut missing = 0u64;
     match scope {
         Scope::All { filter, from, max } => {
             let fetch = |from: i64, n: u32| {
@@ -285,12 +298,13 @@ pub async fn run(
                 let entity = &entity;
                 async move { source.page(entity, view, &opts).await }
             };
-            let streamed = stream_pages(max, from, Some(cancel), fetch, |page, _| {
+            let streamed = stream_pages(max, from, Some(cancel), fetch, |page, scanned| {
                 file.write(&page)?;
                 ev.job(JobEvent::Progress {
                     id: id.to_string(),
                     done: file.written(),
                     total,
+                    scanned,
                 });
                 Ok(())
             })
@@ -314,7 +328,9 @@ pub async fn run(
                 id: id.to_string(),
                 done: file.written(),
                 total,
+                scanned: found.scanned,
             });
+            missing = found.missing.len() as u64;
             match found.missing.len() {
                 0 => {}
                 1 => note = "; 1 selected message was no longer there".into(),
@@ -329,6 +345,7 @@ pub async fn run(
     let written = file.finish()?;
     Ok(ExportSummary {
         written,
+        missing,
         summary: format!(
             "Exported {} to {}{note}",
             messages(written),
@@ -377,10 +394,12 @@ pub fn start(
         id: id.clone(),
         title: plan.title.clone(),
         total: plan.total,
+        file_name: Some(plan.file_name.clone()),
     });
     let (jobs, job_id) = (jobs.clone(), id.clone());
     tokio::spawn(async move {
-        let failed = format!("{} failed", plan.title);
+        // The activity log names the file; the job row has it on its own line.
+        let failed = format!("{} to {} failed", plan.title, plan.file_name);
         let result = tracked(
             &*ev,
             &failed,
@@ -396,6 +415,9 @@ pub fn start(
                     error: None,
                     summary: Some(s.summary),
                     output: Some(s.path.display().to_string()),
+                    written: Some(s.written),
+                    missing: Some(s.missing),
+                    file_name: Some(file_name(&s.path)),
                 });
             }
             Err(e) => {
@@ -408,6 +430,9 @@ pub fn start(
                     }),
                     summary: None,
                     output: None,
+                    written: None,
+                    missing: None,
+                    file_name: None,
                 });
             }
         }
@@ -593,14 +618,16 @@ mod tests {
             serde_json::from_slice(&std::fs::read(dir.path().join("out.json")).unwrap()).unwrap();
         assert_eq!(v.as_array().unwrap().len(), 5);
         let jobs = ev.jobs.lock().unwrap();
-        let done: Vec<u64> = jobs
+        let done: Vec<(u64, u64)> = jobs
             .iter()
             .filter_map(|j| match j {
-                JobEvent::Progress { done, .. } => Some(*done),
+                JobEvent::Progress { done, scanned, .. } => Some((*done, *scanned)),
                 _ => None,
             })
             .collect();
-        assert_eq!(done, [2, 4, 5]);
+        // Written and examined so far: the fake reads two messages a page.
+        assert_eq!(done, [(2, 2), (4, 4), (5, 5)]);
+        assert_eq!(s.missing, 0);
     }
 
     #[tokio::test]
@@ -684,7 +711,7 @@ mod tests {
         let s = run(plan, &fake(5), &CancellationToken::new(), &ev, "j1")
             .await
             .unwrap();
-        assert_eq!(s.written, 2);
+        assert_eq!((s.written, s.missing), (2, 1));
         assert_eq!(
             s.summary,
             "Exported 2 messages to out.json; 1 selected message was no longer there"
@@ -923,11 +950,15 @@ mod tests {
                 error: None,
                 summary: Some("Exported 3 messages to out.json".into()),
                 output: Some(target.display().to_string()),
+                written: Some(3),
+                missing: Some(0),
+                file_name: Some("out.json".into()),
             }
         );
         assert!(
-            matches!(&ev.jobs.lock().unwrap()[0], JobEvent::Started { id, title, total: Some(5) }
-            if *id == started.id && title == "Export orders (dead-letter) to out.json")
+            matches!(&ev.jobs.lock().unwrap()[0], JobEvent::Started { id, title, total: Some(5), file_name }
+            if *id == started.id && title == "Export orders (dead-letter queue)"
+                && file_name.as_deref() == Some("out.json"))
         );
         assert_eq!(jobs.output(&started.id), Some(target));
         assert!(!jobs.cancel(&started.id));
@@ -1014,6 +1045,9 @@ mod tests {
             error,
             summary,
             output,
+            written,
+            missing,
+            file_name,
             ..
         } = finished(&ev).await
         else {
@@ -1024,6 +1058,7 @@ mod tests {
             Some(("cancelled".into(), "Export cancelled.".into()))
         );
         assert_eq!((summary, output), (None, None));
+        assert_eq!((written, missing, file_name), (None, None, None));
         assert_eq!(
             std::fs::read_dir(dir.path()).unwrap().count(),
             0,

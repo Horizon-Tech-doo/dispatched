@@ -150,8 +150,10 @@ export interface ActivityError { kind: string; message: string }
 export interface ActivityEntry { at: string; action: string; duration_ms: number; error: ActivityError | null }
 
 export type JobEvent =
-  | { type: "started"; id: string; title: string; total: number | null }
-  | { type: "progress"; id: string; done: number; total: number | null }
+  /** `title` says what the job is (`Export orders (dead-letter queue)`); `file_name` is the file it writes. */
+  | { type: "started"; id: string; title: string; total: number | null; file_name: string | null }
+  /** `scanned` is the messages examined so far: past `done` when a filter skips messages. */
+  | { type: "progress"; id: string; done: number; total: number | null; scanned: number }
   | {
       type: "finished";
       id: string;
@@ -160,6 +162,12 @@ export type JobEvent =
       summary: string | null;
       /** The file written, in full; null on failure. */
       output: string | null;
+      /** Messages written; null on failure. */
+      written: number | null;
+      /** Selected messages that were no longer there; null on failure. */
+      missing: number | null;
+      /** The file written, by name; null on failure. */
+      file_name: string | null;
     };
 
 export interface AppInfo { version: string; startup_error: string | null }

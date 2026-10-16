@@ -19,7 +19,8 @@ export function SheetHost() {
     case "update":
       return <UpdateSheet />;
     case "export":
-      return <ExportSheet {...sheet} />;
+      // Another export opened while one is up starts from its own choices.
+      return <ExportSheet key={JSON.stringify(sheet)} {...sheet} />;
     default:
       return null;
   }

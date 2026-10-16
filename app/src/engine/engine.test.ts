@@ -228,10 +228,11 @@ describe("M1c commands on the mock", () => {
     // A request refused before the job starts keeps its pick.
     await expect(commands.exportStart("p-logistics", { ...request, scope: { kind: "all", filter: { body_regex: "(" } } })).rejects.toMatchObject({ kind: "invalid" });
     const { id } = await commands.exportStart("p-logistics", request);
-    expect(events[0]).toMatchObject({ type: "started", id, title: `Export invoice-generate (dead-letter) to ${picked!.name}`, total: 37 });
+    expect(events[0]).toMatchObject({ type: "started", id, title: "Export invoice-generate (dead-letter queue)", total: 37, file_name: picked!.name });
     await new Promise((r) => setTimeout(r, 700));
-    expect(events.at(-1)).toMatchObject({ type: "finished", id, error: null, summary: `Exported 37 messages to ${picked!.name}`, output: `${picked!.dir}/${picked!.name}` });
+    expect(events.at(-1)).toMatchObject({ type: "finished", id, error: null, summary: `Exported 37 messages to ${picked!.name}`, output: `${picked!.dir}/${picked!.name}`, written: 37, missing: 0, file_name: picked!.name });
     expect(events.some((e) => (e as { type: string }).type === "progress")).toBe(true);
+    expect(events.find((e) => (e as { type: string }).type === "progress")).toMatchObject({ id, total: 37, scanned: expect.any(Number) });
     expect(log).toEqual([{ action: `Exported 37 messages to ${picked!.name}`, error: null }]);
     await expect(commands.jobReveal(id)).resolves.toBeNull();
     // A pick authorises one export.
@@ -251,7 +252,7 @@ describe("M1c commands on the mock", () => {
     const job = await commands.exportStart("p-logistics", { entity: "invoice-generate", view: "dead-letter", scope: { kind: "all", filter: {} }, format: "ndjson", pick: picked!.pick });
     expect(await commands.jobCancel(job.id)).toBe(true);
     await new Promise((r) => setTimeout(r, 50));
-    expect(done.at(-1)).toMatchObject({ type: "finished", error: { kind: "cancelled", message: "Export cancelled." }, summary: null, output: null });
+    expect(done.at(-1)).toMatchObject({ type: "finished", error: { kind: "cancelled", message: "Export cancelled." }, summary: null, output: null, written: null, missing: null, file_name: null });
     expect(log).toEqual([{ action: "Export cancelled", error: null }]);
     expect(await commands.jobCancel(job.id)).toBe(false);
     await expect(commands.jobReveal(job.id)).rejects.toMatchObject({ kind: "not_found" });
@@ -362,5 +363,47 @@ describe("M1c commands on the mock", () => {
     await expect(commands.openSignInPage()).resolves.toBeNull();
     await pending;
     await expect(commands.openSignInPage()).rejects.toMatchObject({ kind: "not_found" });
+  });
+});
+
+describe("suggestedFileName", () => {
+  it("names the file as the save dialog does, in UTC", async () => {
+    const { suggestedFileName } = await import("./exportName");
+    const at = new Date("2026-10-16T09:41:59Z");
+    expect(suggestedFileName("invoice-generate", "dead-letter", "json", at)).toBe("invoice-generate-dead-letter-20261016-0941.json");
+    expect(suggestedFileName("shipment-events/subscriptions/tracking-sync", "active", "NDJSON", at)).toBe("shipment-events-subscriptions-tracking-sync-active-20261016-0941.ndjson");
+  });
+});
+
+describe("export job events on the mock", () => {
+  const run = async (scenario: "default" | "export-fails" | "export-missing", scope: Parameters<typeof commands.exportStart>[1]["scope"], wait = 700) => {
+    const mock = createMockTransport(scenario, 0);
+    setTransport(mock);
+    await commands.connect("p-logistics");
+    const events: { type: string; [k: string]: unknown }[] = [];
+    await mock.listen("job", (e) => events.push(e as never));
+    const picked = await commands.pickExportPath("invoice-generate", "dead-letter", "json");
+    await commands.exportStart("p-logistics", { entity: "invoice-generate", view: "dead-letter", scope, format: "json", pick: picked!.pick });
+    await new Promise((r) => setTimeout(r, wait));
+    return events;
+  };
+
+  it("a filtered export without a total examines more than it writes", async () => {
+    const events = await run("default", { kind: "all", filter: { body_contains: "SHP" } });
+    expect(events[0]).toMatchObject({ type: "started", total: null });
+    const last = events.filter((e) => e.type === "progress").at(-1)!;
+    expect(last.scanned as number).toBeGreaterThanOrEqual(last.done as number);
+    expect(events.at(-1)).toMatchObject({ type: "finished", written: last.done, missing: 0 });
+  });
+
+  it("reports the selected messages that were no longer there", async () => {
+    const events = await run("export-missing", { kind: "selected", sequences: [41_000, 41_001, 41_002, 41_003] });
+    expect(events.at(-1)).toMatchObject({ type: "finished", error: null, written: 2, missing: 2, summary: expect.stringContaining("2 selected messages were no longer there") });
+  });
+
+  it("a failing export ends with the engine's error and no counts", async () => {
+    const events = await run("export-fails", { kind: "all", filter: {} }, 500);
+    expect(events.filter((e) => e.type === "progress")).toHaveLength(1);
+    expect(events.at(-1)).toMatchObject({ type: "finished", error: { kind: "network" }, written: null, missing: null, file_name: null });
   });
 });

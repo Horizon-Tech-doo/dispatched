@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { setUpdater, type UpdateInfo } from "@/engine";
 import { jobStore } from "../drawer/activity";
+import { started } from "../drawer/jobEvents";
 import { renderShell } from "../test-utils";
 
 afterEach(() => vi.useRealTimers());
@@ -315,9 +316,9 @@ describe("update prompt", () => {
     setUpdater({ check: async () => INFO, install: async () => {} });
     const { sheet } = await openUpdateSheet();
     expect(within(sheet).queryByText(/running will stop/)).not.toBeInTheDocument();
-    jobStore.apply({ type: "started", id: "j1", title: "Export", total: 10 });
+    jobStore.apply(started("j1", "Export", 10));
     expect(await within(sheet).findByText("1 job running will stop when Dispatched restarts.")).toBeInTheDocument();
-    jobStore.apply({ type: "started", id: "j2", title: "Purge", total: null });
+    jobStore.apply(started("j2", "Purge", null));
     expect(await within(sheet).findByText("2 jobs running will stop when Dispatched restarts.")).toBeInTheDocument();
   });
 });

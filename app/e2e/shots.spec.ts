@@ -133,12 +133,31 @@ function detailShots(): Shot[] {
 /** The export sheet and the Jobs tab. */
 function exportShots(): Shot[] {
   const INVOICES = (scenario = "default") => seedTab("invoice-generate", "queue", "dead-letter", scenario);
+  const sheet = (p: Page) => p.getByRole("dialog", { name: "Export messages" });
   const openExport = async (page: Page, item: string | RegExp) => {
     await page.getByRole("button", { name: "Export", exact: true }).click();
     await page.getByRole("menuitem", { name: item }).click();
-    await page.getByRole("dialog", { name: "Export messages" }).waitFor();
+    await sheet(page).waitFor();
   };
   const jobs = (p: Page) => p.getByRole("region", { name: "Jobs and activity" });
+  /** Export the whole view and wait for the job's row. */
+  const exportAll = async (page: Page) => {
+    await openExport(page, "Export all…");
+    await sheet(page).getByRole("button", { name: /^Export 37 messages…/ }).click();
+    await jobs(page).getByRole("listitem").waitFor();
+  };
+  /** Put the view in a state no control reaches yet (a filter set before the sheet opens). */
+  const setFilter = (page: Page, filter: Record<string, string>) =>
+    page.evaluate((f) => {
+      const m = (window as unknown as { __dispatchedMock: { setViewState(k: string, d: unknown, p: unknown): void; viewKey(p: string, t: string, v: string): string } }).__dispatchedMock;
+      const defaults = { from: { kind: "start" }, topN: 100, filter: {}, filterOpen: false, sorting: null, detailOpen: false };
+      m.setViewState(m.viewKey("p-logistics", "invoice-generate", "dead-letter"), defaults, { filter: f });
+    }, filter);
+  const selectRows = async (page: Page, n: number) => {
+    await page.getByRole("grid").focus();
+    await page.keyboard.press("Home");
+    for (let i = 1; i < n; i++) await page.keyboard.press("Shift+ArrowDown");
+  };
   return [
     {
       // Three rows selected, so both scopes are offered.
@@ -146,13 +165,25 @@ function exportShots(): Shot[] {
       path: INVOICES(),
       ready: (p) => peekStatus(p).getByText(/37 messages/),
       prepare: async (page) => {
-        await page.getByRole("grid").focus();
-        await page.keyboard.press("Home");
-        await page.keyboard.press("Shift+ArrowDown");
-        await page.keyboard.press("Shift+ArrowDown");
+        await selectRows(page, 3);
         await openExport(page, /^Export 3 selected/);
       },
-      holds: (p) => p.getByRole("dialog", { name: "Export messages" }),
+      holds: sheet,
+      viewportOnly: true,
+    },
+    {
+      // A file chosen, then the request refused (a filter that does not compile): the file is kept and named.
+      name: "export-sheet-file-chosen",
+      path: INVOICES(),
+      ready: (p) => peekStatus(p).getByText(/37 messages/),
+      prepare: async (page) => {
+        await setFilter(page, { body_regex: "(" });
+        await openExport(page, "Export all…");
+        await sheet(page).getByRole("button", { name: "Export messages…" }).click();
+        await sheet(page).getByRole("alert").waitFor();
+        await sheet(page).getByRole("button", { name: "Choose another file" }).waitFor();
+      },
+      holds: sheet,
       viewportOnly: true,
     },
     {
@@ -160,11 +191,9 @@ function exportShots(): Shot[] {
       path: INVOICES("export-slow"),
       ready: (p) => peekStatus(p).getByText(/37 messages/),
       prepare: async (page) => {
-        await openExport(page, "Export all…");
-        await page.getByRole("dialog", { name: "Export messages" }).getByRole("button", { name: "Choose file and export" }).click();
-        await jobs(page).getByRole("button", { name: /^Cancel Export invoice-generate/ }).waitFor();
+        await exportAll(page);
         // Let a few messages through so the bar and the count show progress.
-        await jobs(page).getByText(/^\d+ \/ 37$/).filter({ hasText: /^([3-9]|\d\d) \/ 37$/ }).waitFor();
+        await jobs(page).getByText(/^([3-9]|\d\d) of 37$/).waitFor();
       },
     },
     {
@@ -172,10 +201,65 @@ function exportShots(): Shot[] {
       path: INVOICES(),
       ready: (p) => peekStatus(p).getByText(/37 messages/),
       prepare: async (page) => {
+        await exportAll(page);
+        await jobs(page).getByText("37 messages written", { exact: true }).waitFor();
+        await jobs(page).getByRole("button", { name: /^Show in/ }).waitFor();
+      },
+    },
+    {
+      // Four selected, two of them gone by the time the export reads them again.
+      name: "jobs-missing",
+      path: INVOICES("export-missing"),
+      ready: (p) => peekStatus(p).getByText(/37 messages/),
+      prepare: async (page) => {
+        await selectRows(page, 4);
+        await openExport(page, /^Export 4 selected/);
+        await sheet(page).getByRole("button", { name: "Export 4 messages…" }).click();
+        await jobs(page).getByText("2 selected messages were no longer there").waitFor();
+      },
+    },
+    {
+      // A filter, so no total: no bar fill, what was written and how many were examined.
+      name: "jobs-unknown-total",
+      path: INVOICES("export-slow"),
+      ready: (p) => peekStatus(p).getByText(/37 messages/),
+      prepare: async (page) => {
+        await setFilter(page, { body_contains: "SHP" });
         await openExport(page, "Export all…");
-        await page.getByRole("dialog", { name: "Export messages" }).getByRole("button", { name: "Choose file and export" }).click();
-        await jobs(page).getByText(/^Exported 37 messages to /).waitFor();
-        await jobs(page).getByRole("button", { name: "Show in folder" }).waitFor();
+        await sheet(page).getByRole("button", { name: "Export messages…" }).click();
+        await jobs(page).getByText(/ written · .* scanned$/).waitFor();
+      },
+    },
+    {
+      name: "jobs-cancelled",
+      path: INVOICES("export-slow"),
+      ready: (p) => peekStatus(p).getByText(/37 messages/),
+      prepare: async (page) => {
+        await exportAll(page);
+        await jobs(page).getByText(/^([3-9]|\d\d) of 37$/).waitFor();
+        await jobs(page).getByRole("button", { name: /^Cancel Export/ }).click();
+        await jobs(page).getByText(/^Cancelled after \d+ of 37\. No file was written\.$/).waitFor();
+      },
+    },
+    {
+      name: "jobs-failed",
+      path: INVOICES("export-fails"),
+      ready: (p) => peekStatus(p).getByText(/37 messages/),
+      prepare: async (page) => {
+        await exportAll(page);
+        await jobs(page).getByText("Export failed").waitFor();
+        await jobs(page).getByRole("button", { name: "Try again" }).waitFor();
+      },
+    },
+    {
+      // The drawer at a narrow window: the row stacks (title, bar, numbers and action).
+      name: "jobs-narrow",
+      path: INVOICES("export-slow"),
+      ready: (p) => peekStatus(p).getByText(/37 messages/),
+      prepare: async (page) => {
+        await page.setViewportSize({ width: 640, height: 800 });
+        await exportAll(page);
+        await jobs(page).getByText(/^([3-9]|\d\d) of 37$/).waitFor();
       },
     },
   ];
