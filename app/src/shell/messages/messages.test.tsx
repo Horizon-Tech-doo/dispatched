@@ -325,4 +325,28 @@ describe("message views", () => {
     await within(g).findAllByText("MaxDeliveryCountExceeded");
     expect(within(g).getByRole("columnheader", { name: /Seq/ })).not.toHaveAttribute("aria-sort");
   });
+
+  it("opens the detail with Enter and closes it with Escape", async () => {
+    renderShell("default", seedTab("invoice-generate", "queue", "dead-letter"));
+    const g = await grid();
+    await within(g).findAllByText("MaxDeliveryCountExceeded");
+    const row = within(g).getAllByRole("row")[1];
+    const seq = row.dataset.rowId!;
+    await userEvent.click(row);
+    // In jsdom the resizable panels swallow the pointer-down that would focus the grid.
+    act(() => g.focus());
+    expect(screen.queryByRole("region", { name: /^Message/ })).toBeNull();
+    await userEvent.keyboard("{Enter}");
+    const pane = await screen.findByRole("region", { name: `Message ${seq}` });
+    await within(pane).findByRole("tab", { name: "Body" });
+    // The pane follows the focused row.
+    await userEvent.keyboard("{ArrowDown}");
+    const next = await screen.findByRole("region", { name: `Message ${Number(seq) + 1}` });
+    await within(next).findByRole("tab", { name: "Body" });
+    act(() => void within(screen.getByRole("region", { name: /^Message/ })).getByRole("tab", { name: "Body" }).focus());
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("region", { name: /^Message/ })).toBeNull();
+    // The keyboard goes back to the grid.
+    expect(g).toHaveFocus();
+  });
 });

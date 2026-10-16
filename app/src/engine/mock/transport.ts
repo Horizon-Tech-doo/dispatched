@@ -20,7 +20,9 @@ export type Scenario =
   // Every peek page is refused: the identity lacks Listen.
   | "peek-error"
   // A peek's first page arrives; the next one never does (screenshots of a view still reading).
-  | "peek-slow";
+  | "peek-slow"
+  // Every message read for the detail pane has gone since the grid read it (received, expired or moved).
+  | "message-gone";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -540,7 +542,7 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
         connectedTo(args.profileId);
         return quietly(`Reading message ${args.sequence} of ${entity} failed`, started, () => {
           const m = fx.messagesOf(entity, scenario).find((x) => x.sequence_number === args.sequence && accepts(args.view as PeekView, x));
-          if (!m) return null;
+          if (!m || scenario === "message-gone") return null;
           return structuredClone(without(m, "sub")) satisfies MessageDetail;
         });
       }

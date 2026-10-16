@@ -53,7 +53,7 @@ describe("persisted state", () => {
       activeTab: "missing",
       expanded: ["t:a", 4],
       selected: 9,
-      layout: { treeSize: 900, drawerOpen: "yes", drawerSize: 25, drawerTab: "jobs" },
+      layout: { treeSize: 900, drawerOpen: "yes", drawerSize: 25, drawerTab: "jobs", detailSize: 5 },
     });
     expect(s.tabs).toEqual([
       { id: "orders", kind: "queue", subTab: "dead-letter" },
@@ -62,7 +62,8 @@ describe("persisted state", () => {
     expect(s.activeTab).toBe("orders");
     expect(s.expanded).toEqual(["t:a"]);
     expect(s.selected).toBeNull();
-    expect(s.layout).toEqual({ treeSize: emptyShell.layout.treeSize, drawerOpen: true, drawerSize: 25, drawerTab: "jobs" });
+    expect(s.layout).toEqual({ treeSize: emptyShell.layout.treeSize, drawerOpen: true, drawerSize: 25, drawerTab: "jobs", detailSize: 38 });
+    expect(parseProfileShell({ layout: { detailSize: 55 } }).layout.detailSize).toBe(55);
   });
 
   it("prefs fall back per field", () => {

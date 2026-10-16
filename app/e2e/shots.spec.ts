@@ -23,7 +23,7 @@ const seedTab = (id: string, kind: "queue" | "subscription", subTab: string, sce
   )}`;
 const peekStatus = (p: Page) => p.getByRole("status", { name: "Peek status" });
 
-export const shots: {
+type Shot = {
   name: string;
   path: string;
   scroll?: boolean;
@@ -34,7 +34,59 @@ export const shots: {
   holds?: (page: Page) => Locator;
   /** Capture the viewport only; for entries whose transient UI a full-page resize could dismiss. */
   viewportOnly?: boolean;
-}[] = [
+};
+
+const TRACKING = "shipment-events/subscriptions/tracking-sync";
+const DETAIL_VIEW = () => seedTab(TRACKING, "subscription", "dead-letter");
+/** Select the grid's `row`-th data row (0-based) and open the detail pane with Enter, then wait for its body. */
+const openRow = async (page: Page, row: number, body: string | RegExp = "Body") => {
+  await peekStatus(page).getByText(/100 messages/).waitFor();
+  await page.locator("[data-row-id]").nth(row).click();
+  await page.getByRole("grid").press("Enter");
+  await page.getByRole("region", { name: body }).first().waitFor();
+};
+
+/** The message detail pane. The mock's bodies by position: row 0 is binary (not UTF-8), 1 JSON, 2 XML, 3 text. */
+function detailShots(): Shot[] {
+  const pane = (p: Page) => p.getByRole("region", { name: /^Message \d+$/ });
+  return [
+    { name: "message-detail-json", path: DETAIL_VIEW(), prepare: (p) => openRow(p, 1) },
+    { name: "message-detail-xml", path: DETAIL_VIEW(), prepare: (p) => openRow(p, 2) },
+    { name: "message-detail-hex", path: DETAIL_VIEW(), prepare: (p) => openRow(p, 0, "Hex") },
+    {
+      name: "message-detail-properties",
+      path: DETAIL_VIEW(),
+      prepare: async (p) => {
+        await openRow(p, 1);
+        await pane(p).getByRole("tab", { name: "Properties" }).click();
+        await pane(p).getByRole("table", { name: "Custom properties" }).waitFor();
+      },
+    },
+    {
+      name: "message-detail-truncated",
+      path: DETAIL_VIEW(),
+      prepare: async (p) => {
+        await peekStatus(p).getByText(/100 messages/).waitFor();
+        await p.getByRole("radio", { name: "End" }).click();
+        await peekStatus(p).getByText("Last 100 messages").waitFor();
+        await p.getByRole("grid").focus();
+        await p.keyboard.press("End");
+        await p.keyboard.press("Enter");
+        await p.getByText(/^Showing the first 4\.0 MiB of 5\.0 MiB/).waitFor();
+      },
+    },
+    {
+      name: "message-detail-gone",
+      path: seedTab(TRACKING, "subscription", "dead-letter", "message-gone"),
+      prepare: async (p) => {
+        await openRow(p, 1, /^Message \d+$/);
+        await p.getByRole("heading", { name: "This message is no longer in the dead-letter queue" }).waitFor();
+      },
+    },
+  ];
+}
+
+export const shots: Shot[] = [
   { name: "catalogue", path: "/#catalogue", scroll: true },
   {
     name: "catalogue-tree",
@@ -709,6 +761,7 @@ export const shots: {
       await page.getByRole("grid").focus();
     },
   },
+  ...detailShots(),
 ];
 
 for (const colorScheme of ["dark", "light"] as const) {

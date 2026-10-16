@@ -1,12 +1,13 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { TAIL_MAX, normalizeFilter, usePeekStream, type EntityCounts, type FilterSpec, type MessageSummary, type PeekView } from "@/engine";
-import { Button, DataGrid, EmptyState, Problem, formatNumber, rowHeight } from "@/ui";
+import { Button, DataGrid, EmptyState, Panel, PanelGroup, Problem, ResizeHandle, formatNumber, rowHeight } from "@/ui";
 import { yearOf } from "../time";
 import { useShell } from "../context";
 import type { EntityTab } from "../state";
 import { VIEW_LABEL } from "../tabs/subtabs";
-import { buildColumns, optionalColumns, useColumnPrefs } from "./columns";
+import { buildColumns, optionalColumns, propColumn, useColumnPrefs } from "./columns";
+import { DetailPane } from "./DetailPane";
 import { FilterBar } from "./FilterBar";
 import { describePeekError } from "./peekError";
 import { Toolbar } from "./Toolbar";
@@ -43,17 +44,15 @@ export function MessagesView({
   counts,
   requiresSession,
   exportMenu,
-  detail,
 }: {
   tab: EntityTab;
   view: PeekView;
   counts: EntityCounts | null;
   requiresSession: boolean;
-  /** Slots the later features fill: the export menu, the detail pane. */
+  /** Slot the export feature fills. */
   exportMenu?: ReactNode;
-  detail?: ReactNode;
 }) {
-  const { conn, prefs, dispatch, openSheet } = useShell();
+  const { conn, prefs, shell, dispatch, openSheet } = useShell();
   const profileId = conn.profileId;
   const defaults = useMemo<ViewState>(
     () => ({ from: { kind: "start" }, topN: prefs.peekSize, filter: {}, filterOpen: false, sorting: null, detailOpen: false }),
@@ -64,6 +63,7 @@ export function MessagesView({
   // The filter bar takes focus only when the user opens it, not when a view with the bar already open is shown again.
   const [focusBar, setFocusBar] = useState(false);
   const filterToggle = useRef<HTMLButtonElement>(null);
+  const gridBox = useRef<HTMLDivElement>(null);
   const filterBarId = useId();
   const [columnIds, setColumnIds, resetColumns] = useColumnPrefs(view, requiresSession);
   const n = stream.messages.length;
@@ -90,6 +90,11 @@ export function MessagesView({
     setSelKey(selFor);
     setSel(noSelection);
   }
+  // Closing the pane hands the keyboard back to the grid, so the arrow keys keep working where the user left off.
+  const closeDetail = () => {
+    setVs({ detailOpen: false });
+    gridBox.current?.querySelector<HTMLElement>('[role="grid"]')?.focus();
+  };
   const qc = useQueryClient();
   const label = VIEW_LABEL[view];
   const propertyNames = useMemo(() => {
@@ -101,6 +106,8 @@ export function MessagesView({
   // A reset (never an invalidate) of every peek of this view: the hook starts a fresh round at Top N.
   const restart = () => {
     setSel(noSelection);
+    // Messages read earlier may have been received or moved since: the detail pane reads them again.
+    void qc.invalidateQueries({ queryKey: ["message", profileId, tab.id, view] });
     void qc.resetQueries({ queryKey: ["peek", profileId, tab.id, view] });
   };
   // Applying or clearing a filter is always a fresh read: a recently used filter must not come back from the cache
@@ -200,42 +207,64 @@ export function MessagesView({
           <Problem role="alert" title={failure.title} body={failure.body} detail={stream.error!.message} action={fixAction} />
         </div>
       )}
-      <div className="flex min-h-0 flex-1">
-        <div className="min-h-0 min-w-0 flex-1">
-          <DataGrid<MessageSummary>
-            label={`${label[0].toUpperCase()}${label.slice(1)}`}
-            columns={columns}
-            rows={stream.messages}
-            getRowId={(m) => String(m.sequence_number)}
-            selectedIds={sel.ids}
-            focusId={sel.focus}
-            onSelectionChange={(ids, focus) => setSel({ ids, focus })}
-            onActivate={() => setVs({ detailOpen: true })}
-            rowHeight={rowHeight[prefs.density]}
-            rowNumbers
-            sorting={vs.sorting}
-            onSortingChange={(sorting) => setVs({ sorting })}
-            loading={stream.loading}
-            error={paneError}
-            empty={
-              filtered ? (
-                <EmptyState
-                  title="No messages match this filter"
-                  body={`Scanned ${plural(stream.scanned, "message")}.`}
-                  action={<Button onClick={() => applyFilter({})}>Clear filter</Button>}
+      <div ref={gridBox} className="min-h-0 flex-1">
+        <PanelGroup
+          direction="horizontal"
+          onLayout={(sizes) => sizes.length === 2 && dispatch({ type: "layout", patch: { detailSize: Math.round(sizes[1]) } })}
+        >
+          <Panel id="grid" order={1} defaultSize={vs.detailOpen ? 100 - shell.layout.detailSize : 100} minSize={25} className="min-w-0">
+            <DataGrid<MessageSummary>
+              label={`${label[0].toUpperCase()}${label.slice(1)}`}
+              columns={columns}
+              rows={stream.messages}
+              getRowId={(m) => String(m.sequence_number)}
+              selectedIds={sel.ids}
+              focusId={sel.focus}
+              onSelectionChange={(ids, focus) => setSel({ ids, focus })}
+              onActivate={() => setVs({ detailOpen: true })}
+              rowHeight={rowHeight[prefs.density]}
+              rowNumbers
+              sorting={vs.sorting}
+              onSortingChange={(sorting) => setVs({ sorting })}
+              loading={stream.loading}
+              error={paneError}
+              empty={
+                filtered ? (
+                  <EmptyState
+                    title="No messages match this filter"
+                    body={`Scanned ${plural(stream.scanned, "message")}.`}
+                    action={<Button onClick={() => applyFilter({})}>Clear filter</Button>}
+                  />
+                ) : (
+                  <EmptyState
+                    title={EMPTY[view]}
+                    body={listed ? `The entity lists ${plural(listed, "message")} here; ${listedView!.since}. Peek again to check.` : undefined}
+                    action={listed ? <Button onClick={restart}>Peek again</Button> : undefined}
+                  />
+                )
+              }
+              initialRect={{ width: 900, height: 600 }}
+            />
+          </Panel>
+          {vs.detailOpen && (
+            <>
+              <ResizeHandle />
+              <Panel id="detail" order={2} defaultSize={shell.layout.detailSize} minSize={20} maxSize={70}>
+                <DetailPane
+                  profileId={profileId}
+                  entity={tab.id}
+                  view={view}
+                  sequence={sel.focus !== null ? Number(sel.focus) : null}
+                  onClose={closeDetail}
+                  onShowColumn={(name) => {
+                    const id = propColumn(name);
+                    if (!columnIds.includes(id)) setColumnIds([...columnIds, id]);
+                  }}
                 />
-              ) : (
-                <EmptyState
-                  title={EMPTY[view]}
-                  body={listed ? `The entity lists ${plural(listed, "message")} here; ${listedView!.since}. Peek again to check.` : undefined}
-                  action={listed ? <Button onClick={restart}>Peek again</Button> : undefined}
-                />
-              )
-            }
-            initialRect={{ width: 900, height: 600 }}
-          />
-        </div>
-        {vs.detailOpen && detail}
+              </Panel>
+            </>
+          )}
+        </PanelGroup>
       </div>
       <div role="status" aria-label="Peek status" className="flex h-[22px] shrink-0 items-center gap-2 border-t border-line px-3 text-11 text-muted">
         <span className="truncate tabular-nums">{status}</span>

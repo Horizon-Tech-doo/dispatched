@@ -53,7 +53,7 @@ export interface OpenTab { id: string; kind: EntityKind; subTab: SubTabId }
 /** A tab showing an entity. The same as `OpenTab` until the dashboard tab arrives; entity views take this type so
  *  they never have to handle the dashboard case. */
 export type EntityTab = OpenTab & { kind: EntityKind };
-export interface Layout { treeSize: number; drawerOpen: boolean; drawerSize: number; drawerTab: "jobs" | "activity" }
+export interface Layout { treeSize: number; drawerOpen: boolean; drawerSize: number; drawerTab: "jobs" | "activity"; detailSize: number }
 export interface ProfileShell { tabs: OpenTab[]; activeTab: string | null; expanded: string[]; selected: string | null; layout: Layout }
 
 export const MAX_TABS = 30;
@@ -62,7 +62,7 @@ export const emptyShell: ProfileShell = {
   activeTab: null,
   expanded: ["group:queues", "group:topics"],
   selected: null,
-  layout: { treeSize: 18, drawerOpen: true, drawerSize: 18, drawerTab: "activity" },
+  layout: { treeSize: 18, drawerOpen: true, drawerSize: 18, drawerTab: "activity", detailSize: 38 },
 };
 
 export function parseProfileShell(v: unknown): ProfileShell {
@@ -86,6 +86,7 @@ export function parseProfileShell(v: unknown): ProfileShell {
       drawerOpen: typeof l.drawerOpen === "boolean" ? l.drawerOpen : d.drawerOpen,
       drawerSize: num(l.drawerSize, 8, 70, d.drawerSize),
       drawerTab: oneOf(l.drawerTab, ["jobs", "activity"] as const, d.drawerTab),
+      detailSize: num(l.detailSize, 20, 70, d.detailSize),
     },
   };
 }
