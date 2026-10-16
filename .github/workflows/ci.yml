@@ -83,7 +83,7 @@ jobs:
           testing/emulator/emulator.sh down
   frontend:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: dispatched/app
