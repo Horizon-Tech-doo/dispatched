@@ -8,7 +8,7 @@ export function ToggleGroup<T extends string>({ label, values, options, onChange
   onChange(values: T[]): void;
 }) {
   return (
-    <div role="group" aria-label={label} className="inline-flex h-6 items-stretch rounded-ctl border border-line bg-field p-px">
+    <div role="group" aria-label={label} className="inline-flex h-6 items-stretch gap-px rounded-ctl border border-line bg-field p-px">
       {options.map((o) => {
         const on = values.includes(o.value);
         return (
@@ -19,7 +19,7 @@ export function ToggleGroup<T extends string>({ label, values, options, onChange
             onClick={() => onChange(on ? values.filter((v) => v !== o.value) : [...values, o.value])}
             className={cn(
               "rounded-[2px] px-2 text-12 focus-visible:outline focus-visible:outline-1 focus-visible:-outline-offset-1 focus-visible:outline-fg",
-              on ? "bg-selection text-fg" : "text-muted hover:text-fg",
+              on ? "bg-selection text-fg hover:bg-selection" : "text-muted hover:bg-hover hover:text-fg",
             )}
           >
             {o.label}

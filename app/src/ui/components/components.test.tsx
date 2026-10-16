@@ -97,4 +97,10 @@ describe("ToggleGroup", () => {
     await userEvent.click(screen.getByRole("button", { name: "Active" }));
     expect(onChange).toHaveBeenLastCalledWith([]);
   });
+  it("separates the buttons and gives on and off items their hover states", () => {
+    render(<ToggleGroup label="Counts" values={["a"]} options={[{ value: "a", label: "A" }, { value: "b", label: "B" }]} onChange={() => {}} />);
+    expect(screen.getByRole("group", { name: "Counts" }).className).toContain("gap-px");
+    expect(screen.getByRole("button", { name: "B" }).className).toContain("hover:bg-hover");
+    expect(screen.getByRole("button", { name: "A" }).className).toContain("hover:bg-selection");
+  });
 });

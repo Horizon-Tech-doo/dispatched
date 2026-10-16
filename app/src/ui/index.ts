@@ -30,3 +30,4 @@ export * from "./grid/DataGrid";
 export * from "./viewer/format";
 export * from "./viewer/CodeView";
 export * from "./viewer/HexView";
+export * from "./viewer/BodyState";

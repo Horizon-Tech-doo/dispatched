@@ -107,8 +107,15 @@ describe("detectFormat", () => {
     expect(detectFormat("  <a><b/></a>", "application/atom+xml")).toBe("xml");
   });
   it("formatBody returns the pretty text with the format, or the input unchanged", () => {
-    expect(formatBody('{"a":1}')).toEqual({ format: "json", text: '{\n  "a": 1\n}' });
-    expect(formatBody("hello")).toEqual({ format: "text", text: "hello" });
+    expect(formatBody('{"a":1}')).toEqual({ format: "json", text: '{\n  "a": 1\n}', formatted: true });
+    expect(formatBody("hello")).toEqual({ format: "text", text: "hello", formatted: false });
+  });
+  it("formatBody says when a body was too large to format and returns the raw text", () => {
+    const deep = "[".repeat(50_000) + "]".repeat(50_000);
+    expect(formatBody(deep, "application/json")).toEqual({ format: "text", text: deep, formatted: false, reason: "too-large" });
+    const deepXml = "<a>".repeat(60_000) + "</a>".repeat(60_000);
+    expect(formatBody(deepXml)).toEqual({ format: "text", text: deepXml, formatted: false, reason: "too-large" });
+    expect(formatBody("{oops", "application/json").reason).toBeUndefined();
   });
 });
 
@@ -116,9 +123,14 @@ describe("bytes", () => {
   it("decodes base64 and UTF-8, refusing invalid UTF-8", () => {
     const utf8 = new TextEncoder().encode("héllo");
     expect(utf8OrNull(utf8)).toBe("héllo");
-    expect(Array.from(base64ToBytes(btoa("Hi")))).toEqual([0x48, 0x69]);
+    expect(Array.from(base64ToBytes(btoa("Hi"))!)).toEqual([0x48, 0x69]);
     expect(utf8OrNull(new Uint8Array([0xff, 0xfe]))).toBeNull();
     expect(utf8OrNull(new Uint8Array())).toBe("");
+  });
+  it("base64ToBytes returns null instead of throwing on invalid input", () => {
+    expect(base64ToBytes("not base64 !!")).toBeNull();
+    expect(base64ToBytes("a")).toBeNull();
+    expect(Array.from(base64ToBytes("")!)).toEqual([]);
   });
   it("hexDump shows non-printables as dots", () => {
     const lines = hexDump(new Uint8Array([0x7b, 0x00, 0x41, 0xff]));

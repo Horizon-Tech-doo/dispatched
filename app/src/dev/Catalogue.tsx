@@ -6,7 +6,7 @@ import {
   CountBadge, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
   EmptyState, EntityGlyph, Problem, Field, Hint, IconButton, Input, Kbd, LabelSwatch, MenuShortcut, Panel, PanelGroup, ProdBadge,
   ResizeHandle, Segmented, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Sheet, SkeletonRows, Textarea,
-  CodeView, DataGrid, HexView, Tabs, TabsList, TabsTrigger, ThemeScope, ToggleGroup, TooltipProvider, Tree,
+  BodyState, CodeView, DataGrid, HexView, Tabs, TabsList, TabsTrigger, ThemeScope, ToggleGroup, TooltipProvider, Tree,
   labelColors, prettyJson, prettyXml, rowHeight, shortcutLabel, type Density, type EntityKind, type GridSort, type ThemeName, type TreeNode,
 } from "@/ui";
 
@@ -204,9 +204,32 @@ function ViewerDemo() {
         onChange={setCounts}
         options={[{ value: "active", label: "Active" }, { value: "dlq", label: "Dead-letter" }, { value: "scheduled", label: "Scheduled" }]}
       /></div>
-      <div className="h-[226px] w-full border border-line"><CodeView text={JSON_BODY} label="JSON body" /></div>
+      <div className="h-[178px] w-full border border-line"><CodeView text={JSON_BODY} label="JSON body" /></div>
       <div className="h-[130px] w-full border border-line"><CodeView text={XML_BODY} label="XML body" /></div>
-      <div className="h-[66px] w-full border border-line"><HexView bytes={HEX_BYTES} label="Hex body" /></div>
+      <div className="h-[82px] w-full border border-line"><HexView bytes={HEX_BYTES} label="Hex body" /></div>
+    </div>
+  );
+}
+
+const LONG_LINE = '{"payload":"' + Array.from({ length: 6000 }, (_, i) => ((i + 7) * 7919).toString(36)).join("") + '"}';
+const LONG_LINES = `${LONG_LINE}\n{"next":"short line after the cut one"}`;
+const CAPPED_LINES = Array.from({ length: 24 }, (_, i) => `2024-10-15T09:41:${String(i).padStart(2, "0")}Z  shipment 48${190 + i} scanned at Rotterdam`).join("\n");
+const BINARY_BYTES = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52, 0, 0, 0x01, 0x40, 0, 0, 0, 0xc8, 0x08, 0x06, 0, 0, 0, 0x7b, 0xcb, 0x2f]);
+
+function ViewerStatesDemo() {
+  return (
+    <div className="flex w-full flex-col gap-3">
+      <div className="h-[50px] w-full border border-line"><CodeView text={LONG_LINES} label="Long line" /></div>
+      <div className="h-[146px] w-full border border-line"><CodeView text={CAPPED_LINES} label="Capped lines" maxLines={8} /></div>
+      <div className="w-full border border-line px-3 py-1.5"><BodyState kind="empty" /></div>
+      <div className="w-full border border-line">
+        <div className="border-b border-line px-3 py-1.5"><BodyState kind="binary" /></div>
+        <div className="h-[50px]"><HexView bytes={BINARY_BYTES} label="Binary body" /></div>
+      </div>
+      <div className="w-full border border-line">
+        <div className="border-b border-line px-3 py-1.5"><BodyState kind="too-large" /></div>
+        <div className="h-[34px]"><CodeView text={"[".repeat(40) + "]".repeat(40)} label="Raw body" /></div>
+      </div>
     </div>
   );
 }
@@ -357,6 +380,9 @@ function Column({ theme, density }: { theme: ThemeName; density: Density }) {
         </Section>
         <Section title="Viewer">
           <ViewerDemo />
+        </Section>
+        <Section title="Viewer states">
+          <ViewerStatesDemo />
         </Section>
         <Section title="Loading and empty">
           <div className="w-72 border border-line"><SkeletonRows rows={4} columns={2} /></div>

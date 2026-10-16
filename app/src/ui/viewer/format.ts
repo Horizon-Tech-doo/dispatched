@@ -11,6 +11,9 @@ export const MAX_LINES = 500_000;
 /** Formatted output may grow to this many times the input (plus slack) before formatting gives up and the raw text shows. */
 const budgetFor = (inputLength: number) => inputLength * 8 + 65_536;
 
+/** Internal result of the formatters: the text is valid, but indenting it would exceed the size budget. */
+const OVER = Symbol("over budget");
+
 const isSpace = (c: number) => c === 32 || c === 10 || c === 13 || c === 9;
 
 /**
@@ -18,6 +21,11 @@ const isSpace = (c: number) => c === 32 || c === 10 || c === 13 || c === 9;
  * `null` when the text is not JSON, or when indenting would blow up (extreme nesting).
  */
 export function prettyJson(text: string): string | null {
+  const r = indentJson(text);
+  return r === OVER ? null : r;
+}
+
+function indentJson(text: string): string | typeof OVER | null {
   const src = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
   try {
     JSON.parse(src);
@@ -89,7 +97,7 @@ export function prettyJson(text: string): string | null {
       i = j;
     }
   }
-  return over ? null : out.join("");
+  return over ? OVER : out.join("");
 }
 
 /** Index just past the `>` that closes the tag starting at `i`, honouring quoted values and a DOCTYPE's `[ ]`. -1 when it never closes. */
@@ -148,6 +156,11 @@ const isCdata = (t: string) => t.startsWith("<![CDATA[");
 
 /** Indent XML by its tags; `null` when there are no tags, they do not nest, or indenting would blow up. */
 export function prettyXml(text: string): string | null {
+  const r = indentXml(text);
+  return r === OVER ? null : r;
+}
+
+function indentXml(text: string): string | typeof OVER | null {
   const src = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
   const tokens = tokenizeXml(src);
   if (!tokens || !tokens.some((t) => t.startsWith("<") && !t.startsWith("<?"))) return null;
@@ -201,33 +214,51 @@ export function prettyXml(text: string): string | null {
     add(t);
     stack.push(name);
   }
-  return !over && stack.length === 0 ? lines.join("\n") : null;
+  if (over) return OVER;
+  return stack.length === 0 ? lines.join("\n") : null;
+}
+
+export interface FormattedBody {
+  format: BodyFormat;
+  /** The display text: re-indented when `formatted`, the input unchanged otherwise. */
+  text: string;
+  /** True when `text` was re-indented. */
+  formatted: boolean;
+  /** Set when the body is JSON or XML that was too large to indent (extreme nesting): `text` is the raw input. */
+  reason?: "too-large";
 }
 
 /** The format of a body and its display text in one pass (so a 4 MiB body is parsed once). Content wins over the content type. */
-export function formatBody(text: string, contentType?: string | null): { format: BodyFormat; text: string } {
+export function formatBody(text: string, contentType?: string | null): FormattedBody {
   let at = 0;
   while (at < text.length && (isSpace(text.charCodeAt(at)) || text.charCodeAt(at) === 0xfeff)) at++;
   const head = text[at];
   const ct = (contentType ?? "").toLowerCase();
   if (head === "{" || head === "[" || ct.includes("json")) {
-    const pretty = prettyJson(text);
-    if (pretty !== null) return { format: "json", text: pretty };
+    const pretty = indentJson(text);
+    if (pretty === OVER) return { format: "text", text, formatted: false, reason: "too-large" };
+    if (pretty !== null) return { format: "json", text: pretty, formatted: true };
   }
   if (head === "<" || ct.includes("xml")) {
-    const pretty = prettyXml(text);
-    if (pretty !== null) return { format: "xml", text: pretty };
+    const pretty = indentXml(text);
+    if (pretty === OVER) return { format: "text", text, formatted: false, reason: "too-large" };
+    if (pretty !== null) return { format: "xml", text: pretty, formatted: true };
   }
-  return { format: "text", text };
+  return { format: "text", text, formatted: false };
 }
 
 export function detectFormat(text: string, contentType?: string | null): BodyFormat {
   return formatBody(text, contentType).format;
 }
 
-/** Decode standard base64. Throws on characters outside the alphabet (the engine only sends valid base64). */
-export function base64ToBytes(b64: string): Uint8Array {
-  const raw = atob(b64);
+/** Decode standard base64; `null` when the input is not valid base64. */
+export function base64ToBytes(b64: string): Uint8Array | null {
+  let raw: string;
+  try {
+    raw = atob(b64);
+  } catch {
+    return null;
+  }
   const out = new Uint8Array(raw.length);
   for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
   return out;
