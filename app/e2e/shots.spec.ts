@@ -358,9 +358,25 @@ export const shots: {
       await sheet.getByLabel("Name", { exact: true }).fill("Orders production");
       await sheet.getByLabel("Connection string").fill("Endpoint=sb://orders.servicebus.windows.net/;SharedAccessKeyName=reader;SharedAccessKey=c2VjcmV0");
       await sheet.getByRole("button", { name: "Test connection" }).click();
-      await sheet.getByText("Tested with these settings.").waitFor();
+      await sheet.getByRole("status").waitFor();
     },
     holds: (p) => p.getByRole("dialog", { name: "Add connection" }),
+    viewportOnly: true,
+  },
+  {
+    name: "profile-test-failed",
+    // One check failed (Management), so the other was skipped.
+    path: "/?scenario=forbidden",
+    ready: (p) => p.getByRole("list", { name: "Saved connections" }),
+    prepare: async (page) => {
+      await page.getByRole("button", { name: "Connection: Choose a connection" }).click();
+      await page.getByRole("menuitem", { name: "Manage connections…" }).click();
+      await page.getByRole("dialog", { name: "Connections" }).getByRole("button", { name: "Edit Logistics", exact: true }).click();
+      const sheet = page.getByRole("dialog", { name: "Edit Logistics", exact: true });
+      await sheet.getByRole("button", { name: "Test connection" }).click();
+      await sheet.getByText("Messaging not tested").waitFor();
+    },
+    holds: (p) => p.getByRole("dialog", { name: "Edit Logistics", exact: true }),
     viewportOnly: true,
   },
   {
@@ -421,7 +437,7 @@ export const shots: {
       const sheet = page.getByRole("dialog", { name: "Edit Logistics", exact: true });
       await sheet.getByLabel("Proxy").fill("http://proxy.corp:8080");
       await sheet.getByRole("button", { name: "Test connection" }).click();
-      await sheet.getByText("Tested with these settings.").waitFor();
+      await sheet.getByRole("status").waitFor();
     },
     holds: (p) => p.getByRole("dialog", { name: "Edit Logistics", exact: true }),
     viewportOnly: true,
@@ -468,9 +484,10 @@ export const shots: {
   },
   {
     name: "settings-accounts",
-    // Two kept sign-ins: the current account's (used by two connections) and another, signed-out account's.
-    path: "/?scenario=tenant-sign-in",
-    ready: (p) => p.getByRole("list", { name: "Saved connections" }),
+    // Two kept sign-ins: the current account's (used by two connections, one of them connected) and another
+    // account's whose token is gone.
+    path: "/?scenario=tenant-sign-in&autoconnect=p-logistics-dev",
+    ready: (p) => p.getByRole("button", { name: /^Connection: Logistics dev/ }),
     prepare: async (page) => {
       await page.keyboard.press("Shift"); // keyboard modality so :focus-visible matches
       await page.keyboard.press("ControlOrMeta+,");
@@ -478,7 +495,7 @@ export const shots: {
       const row = sheet.getByRole("listitem", { name: "ops@contoso.example" });
       await row.getByText(/Used by/).waitFor();
       await row.getByRole("button", { name: "Sign out" }).click();
-      await row.getByRole("button", { name: "Sign out ops@contoso.example" }).waitFor();
+      await row.getByText(/is connected and will disconnect/).waitFor();
     },
     holds: (p) => p.getByRole("dialog", { name: "Settings" }),
     viewportOnly: true,

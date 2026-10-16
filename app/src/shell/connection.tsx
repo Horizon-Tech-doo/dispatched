@@ -16,6 +16,8 @@ const idle: ConnState = { status: "idle", view: null, error: null, profileId: nu
 export function useConnectionController() {
   const qc = useQueryClient();
   const [s, setS] = useState<ConnState>(idle);
+  const current = useRef(s);
+  current.current = s;
   const autoTried = useRef(false);
   // Every connect or disconnect takes a number; a connect whose number is no longer the latest
   // finished after the user moved on, and its result is dropped.
@@ -49,6 +51,20 @@ export function useConnectionController() {
     void commands.settingsSet("last_profile", null).catch(() => {});
   }, [qc]);
 
+  /** The engine already closed this connection (its sign-in went away): drop the shell's state for it without
+   *  asking the engine to disconnect again. A no-op unless that connection is the one the shell shows. */
+  const closedByEngine = useCallback(
+    (profileId: string) => {
+      if (current.current.profileId !== profileId || current.current.status !== "connected") return;
+      latest.current++;
+      qc.removeQueries({ queryKey: ["entities"] });
+      qc.removeQueries({ queryKey: ["subscriptions"] });
+      setS(idle);
+      void commands.settingsSet("last_profile", null).catch(() => {});
+    },
+    [qc],
+  );
+
   const retry = useCallback(() => {
     if (s.profileId) void connect(s.profileId);
   }, [connect, s.profileId]);
@@ -64,7 +80,7 @@ export function useConnectionController() {
       .catch(() => {});
   }, [connect]);
 
-  return { ...s, connect, disconnect, retry };
+  return { ...s, connect, disconnect, closedByEngine, retry };
 }
 
 export type ConnectionController = ReturnType<typeof useConnectionController>;

@@ -205,16 +205,19 @@ export const useStartExport = () =>
 export const useSignIns = () => useQuery({ queryKey: keys.signIns, queryFn: commands.signInsList });
 
 /** Signs a stored sign-in out. The result's `closed_profile_id` names the connection the engine closed because
- *  it used that sign-in: the caller resets its connection state for it. */
-export function useSignOut() {
+ *  it used that sign-in: `onClosed` lets the caller reset its connection state for it. */
+export function useSignOut(onClosed?: (profileId: string) => void) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => commands.signOut(id),
+    // Hook-level, so it still runs when the component that started the sign-out has gone.
     // Signing out changes which profiles can connect (`bound_sign_in.live`), the tenants and the discovery too.
-    onSuccess: () =>
-      Promise.all(
+    onSuccess: (r) => {
+      if (r.closed_profile_id !== null) onClosed?.(r.closed_profile_id);
+      return Promise.all(
         [keys.signIns, keys.account, keys.profiles, ["tenants"], ["discovery"]].map((queryKey) => qc.invalidateQueries({ queryKey })),
-      ),
+      );
+    },
   });
 }
 

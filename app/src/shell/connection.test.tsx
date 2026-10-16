@@ -51,4 +51,19 @@ describe("connection controller", () => {
     await act(() => first);
     await waitFor(() => expect(result.current.status).toBe("idle"));
   });
+
+  it("drops the state of a connection the engine closed, without calling disconnect again", async () => {
+    const mock = createMockTransport("default");
+    setTransport(mock);
+    const { result } = renderHook(() => useConnectionController(), { wrapper: wrapper() });
+    await act(() => result.current.connect("p-logistics"));
+    expect(result.current.status).toBe("connected");
+    act(() => result.current.closedByEngine("p-partner")); // some other connection: nothing to do
+    expect(result.current.status).toBe("connected");
+    act(() => result.current.closedByEngine("p-logistics"));
+    expect(result.current.status).toBe("idle");
+    expect(result.current.profileId).toBeNull();
+    expect(mock.calls.some((c) => c.cmd === "disconnect")).toBe(false);
+    expect(mock.calls).toContainEqual({ cmd: "settings_set", args: { key: "last_profile", value: null } });
+  });
 });

@@ -1,17 +1,17 @@
-import { ChevronRight, CircleAlert, CircleCheck } from "lucide-react";
+import { ChevronRight, CircleAlert, CircleCheck, CircleMinus } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import {
   useAccount, useDeleteProfile, useProfiles, useSaveProfile, useTenants, useTestDraft,
   type Check, type ConnectionReport, type DiscoveredNamespace, type EngineError, type Profile, type ProfileDraft, type Transport,
 } from "@/engine";
 import {
-  Button, Field, Input, LabelSwatch, Segmented, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Sheet, Textarea,
+  Button, Field, Input, LabelSwatch, Problem, Segmented, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Sheet, Textarea,
   cn, labelColors,
 } from "@/ui";
 import { useShell } from "../context";
-import { placeError, sentence, type Errors } from "./profileErrors";
+import { checkAdvice, placeError, sentence, type Errors } from "./profileErrors";
 import { NamespacePicker } from "./NamespacePicker";
-import { SignInPanel, TenantSignInAction } from "./SignInPanel";
+import { SignInPanel, TenantSignInAction, useSigningIn } from "./SignInPanel";
 
 type AuthKind = "connection-string" | "entra";
 
@@ -61,23 +61,30 @@ function initial(p: Profile | undefined, auth: AuthKind | undefined): Form {
   };
 }
 
-function CheckLine({ label, c }: { label: string; c: Check }) {
-  const headline = c.status === "ok" ? `${label} works` : c.status === "failed" ? `${label} failed: ${sentence(c.message)}` : `${label} not tested`;
-  const detail = c.status === "ok" ? c.detail : c.status === "skipped" ? sentence(c.reason) : null;
+function CheckLine({ label, c }: { label: "Management" | "Messaging"; c: Check }) {
+  if (c.status === "failed")
+    return (
+      <li>
+        <Problem role="alert" title={`${label} failed`} body={checkAdvice(label, c.kind)} detail={c.message} />
+      </li>
+    );
+  const skipped = c.status === "skipped";
   return (
     <li className="flex items-start gap-1.5 text-12">
-      {c.status === "failed" ? (
-        <CircleAlert aria-hidden="true" className="mt-px size-3.5 shrink-0 text-accent" />
+      {skipped ? (
+        <CircleMinus aria-hidden="true" className="mt-px size-3.5 shrink-0 text-icon" />
       ) : (
         <CircleCheck aria-hidden="true" className="mt-px size-3.5 shrink-0 text-icon" />
       )}
       <span className="flex min-w-0 flex-col">
-        <span className="font-semibold">{headline}</span>
-        {detail && <span className="text-muted">{detail}</span>}
+        <span className="font-semibold">{skipped ? `${label} not tested` : `${label} works`}</span>
+        <span className="text-muted">{skipped ? sentence(c.reason) : c.detail}</span>
       </span>
     </li>
   );
 }
+
+const TRANSPORT_NAME: Record<Transport, string> = { amqp: "AMQP", websockets: "AMQP over WebSockets" };
 
 /** Add or edit a connection. An edit waits for the saved list so it never starts from an empty form. */
 export function ProfileSheet({ profileId, initialAuth }: { profileId: string | null; initialAuth?: AuthKind }) {
@@ -107,6 +114,12 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
   const [tested, setTested] = useState<{ report: ConnectionReport } | { error: EngineError } | null>(null);
   // Bumped by every edit: a result that arrives for an older form is dropped.
   const formVersion = useRef(0);
+  const signingIn = useSigningIn();
+  const resultBox = useRef<HTMLDivElement>(null);
+  // A result that has just arrived is brought into view, as little as it takes.
+  useEffect(() => {
+    if (tested) resultBox.current?.scrollIntoView({ block: "nearest" });
+  }, [tested]);
   const account = useAccount();
   // Signed in, a new Entra connection picks its namespace from a list; the typed fields stay one click away.
   const picker = !editing && f.auth === "entra" && !!account.data;
@@ -165,6 +178,9 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
   useEffect(() => {
     if (lastAccount.current === accountId) return;
     lastAccount.current = accountId;
+    // A test result is about the account it ran with; one still running is dropped too.
+    formVersion.current++;
+    setTested(null);
     setBrowsedTenant(null);
     setChoosing(true);
     if (hasPick.current) dropPick();
@@ -236,11 +252,11 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
     };
   }
 
-  // A test needs what a draft needs: a name, and a string (new or replaced) or a namespace.
-  const needsString = !editing || f.replaceSecret;
-  const canTest = f.name.trim() !== "" && (f.auth === "entra" ? f.namespace.trim() !== "" : !needsString || f.connectionString.trim() !== "");
-
   function runTest() {
+    // As Save: a form that can't make a draft says why, under the fields.
+    const e = validate();
+    setErrors(e);
+    if (Object.keys(e).length) return;
     const version = formVersion.current;
     const settle = (r: { report: ConnectionReport } | { error: EngineError }) => {
       if (version === formVersion.current) setTested(r);
@@ -303,9 +319,10 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
             </>
           ) : (
             <>
+              {signingIn && <p id={`${formId}-test-hint`} className="m-0 text-11 text-muted">Finish signing in to test.</p>}
               <div className="flex gap-2">
                 {editing && <Button variant="quiet" onClick={() => setConfirmDelete(true)}>Delete…</Button>}
-                <Button onClick={runTest} disabled={test.isPending || !canTest}>
+                <Button onClick={runTest} disabled={test.isPending || signingIn} aria-describedby={signingIn ? `${formId}-test-hint` : undefined}>
                   {test.isPending ? "Testing…" : "Test connection"}
                 </Button>
                 <div className="flex-1" />
@@ -534,23 +551,31 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
           {(ids) => <Textarea {...ids} mono value={f.pins} onChange={(e) => set("pins", e.target.value)} />}
         </Field>
 
-        {tested && "report" in tested && (
-          <div className="flex flex-col gap-1.5 border-t border-line pt-3">
-            <p className="m-0 text-11 text-muted">Tested with these settings.</p>
-            <ul aria-label="Connection test" className="m-0 flex list-none flex-col gap-1 p-0">
-              <CheckLine label="Management" c={tested.report.management} />
-              <CheckLine label="Messaging" c={tested.report.messaging} />
-            </ul>
+        {tested && (
+          <div ref={resultBox} role="status" className="flex flex-col gap-2 border-t border-line pt-3">
+            {"report" in tested ? (
+              <>
+                <p className="m-0 text-11 text-muted">
+                  Tested <span className="font-mono" data-selectable>{tested.report.host}</span> as {tested.report.auth}, {TRANSPORT_NAME[tested.report.transport]}.
+                </p>
+                <ul aria-label="Connection test" className="m-0 flex list-none flex-col gap-2 p-0">
+                  <CheckLine label="Management" c={tested.report.management} />
+                  <CheckLine label="Messaging" c={tested.report.messaging} />
+                </ul>
+              </>
+            ) : (
+              <Problem
+                role="alert"
+                title="Couldn't test the connection"
+                body={
+                  <>
+                    {sentence(tested.error.message)}
+                    {signInGone && account.data != null && tested.error.kind === "not_signed_in" && " Save the connection to use your current sign-in, then test again."}
+                  </>
+                }
+              />
+            )}
           </div>
-        )}
-        {tested && "error" in tested && (
-          <p className="m-0 flex items-start gap-1.5 border-t border-line pt-3 text-12">
-            <CircleAlert aria-hidden="true" className="mt-px size-3.5 shrink-0 text-accent" />
-            <span>
-              {sentence(tested.error.message)}
-              {signInGone && tested.error.kind === "not_signed_in" && " Save the connection to use your current sign-in, then test again."}
-            </span>
-          </p>
         )}
       </form>
     </Sheet>

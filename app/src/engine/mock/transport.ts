@@ -754,6 +754,13 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
               host = d.auth.namespace.includes(".") ? d.auth.namespace : `${d.auth.namespace}.servicebus.windows.net`;
               auth = `Entra ID ${s.user_principal}`;
             }
+            // As a namespace the identity can't manage: Management fails, and with no queue found Messaging is skipped.
+            if (scenario === "forbidden")
+              return {
+                host, emulator: false, transport: d.transport, auth,
+                management: { status: "failed", kind: "forbidden", message: "access denied (needs Manage): Unauthorized access. 'Manage' claim(s) are required to perform this operation." },
+                messaging: { status: "skipped", reason: "no queue could be discovered because the management check failed; pass an entity to test Listen" },
+              };
             return {
               host, emulator: false, transport: d.transport, auth,
               management: { status: "ok", detail: "listed 4 queues (Manage)" }, messaging: { status: "ok", detail: "peeked customs-docs (Listen)" },

@@ -23,3 +23,23 @@ export function placeError(e: Pick<EngineError, "kind" | "message">): Errors {
   }
   return { general: m };
 }
+
+/** What to do about a failed check of a connection test, from the engine's error kind. */
+export function checkAdvice(label: "Management" | "Messaging", kind: string): string {
+  switch (kind) {
+    case "forbidden":
+      return label === "Management"
+        ? "This identity can't manage the namespace. Give it the Manage right, or use another identity."
+        : "This identity can't read messages. Give it the Listen right, or use another identity.";
+    case "auth":
+    case "not_signed_in":
+      return "The credentials were refused. Check them, or sign in again.";
+    case "network":
+    case "timeout":
+      return "Couldn't reach the namespace. Check the network, the proxy and the transport.";
+    case "not_found":
+      return "The namespace or entity wasn't found. Check the namespace name.";
+    default:
+      return "Check the connection settings and test again.";
+  }
+}
