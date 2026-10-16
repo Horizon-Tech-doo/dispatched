@@ -160,8 +160,11 @@ export function useEntityDetails(profileId: string | null, kind: EntityKindName,
     queryFn: () => commands.entityDetails(profileId!, kind, entity),
     enabled: profileId !== null,
     refetchInterval: refetchMs > 0 ? refetchMs : false,
-    // Keep showing the last details while the same profile reloads, never another profile's.
-    placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[1] === profileId ? prev : undefined),
+    // Keep showing the last details only while the same entity reloads, never another entity's or profile's.
+    placeholderData: (prev, prevQuery) => {
+      const k = prevQuery?.queryKey;
+      return k?.[1] === profileId && k?.[2] === kind && k?.[3] === entity ? prev : undefined;
+    },
   });
 }
 

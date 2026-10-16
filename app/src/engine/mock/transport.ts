@@ -99,8 +99,17 @@ function matches(m: MockMessage, f: FilterSpec): boolean {
       let node: unknown = JSON.parse(textOf(m));
       for (const part of path.replace(/^\$\.?/, "").split(".").filter(Boolean)) node = (node as Record<string, unknown> | null)?.[part];
       if (node === undefined) return false;
-      const want = f.body_json_equals?.trim();
-      if (want && JSON.stringify(node) !== want && String(node) !== want) return false;
+      // As core `BodyFilter::json`: the text as typed (blank means no expected value), as JSON or else a bare string.
+      const typed = f.body_json_equals;
+      if (typed?.trim()) {
+        let want: unknown = typed;
+        try {
+          want = JSON.parse(typed);
+        } catch {
+          // a bare string
+        }
+        if (JSON.stringify(node) !== JSON.stringify(want)) return false;
+      }
     } catch {
       return false;
     }

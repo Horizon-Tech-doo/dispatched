@@ -201,6 +201,18 @@ describe("M1c commands on the mock", () => {
     expect(subj.messages.every((m) => m.subject === "invoice.ready")).toBe(true);
   });
 
+  it("uses regex and expected-value text as typed, spaces included, as the engine does", async () => {
+    setTransport(createMockTransport("default", 0));
+    await commands.connect("p-logistics");
+    const peek = (filter: object) =>
+      commands.peekPage("p-logistics", { entity: "invoice-generate", view: "active", from: { kind: "start" }, max: 500, filter });
+    expect((await peek({ body_regex: "^Label" })).messages.length).toBeGreaterThan(0);
+    expect((await peek({ body_regex: " ^Label" })).messages).toHaveLength(0);
+    expect((await peek({ body_regex: "   " })).messages).toHaveLength(500);
+    expect((await peek({ body_json_path: "$.status", body_json_equals: "held" })).messages.length).toBeGreaterThan(0);
+    expect((await peek({ body_json_path: "$.status", body_json_equals: " held" })).messages).toHaveLength(0);
+  });
+
   it("exports to the path the save dialog picked, once, with progress and a summary", async () => {
     const mock = createMockTransport("default", 0);
     setTransport(mock);

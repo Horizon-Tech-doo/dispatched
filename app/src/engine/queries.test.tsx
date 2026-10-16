@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { setTransport } from "./ipc";
 import { createMockTransport } from "./mock/transport";
 import * as commands from "./commands";
-import { createQueryClient, keys, useDeleteProfile, useEntities, useFilterCheck, useProfiles, useSaveProfile, useSignOut, useTenants } from "./queries";
+import { createQueryClient, keys, useDeleteProfile, useEntities, useEntityDetails, useFilterCheck, useProfiles, useSaveProfile, useSignOut, useTenants } from "./queries";
 import { EngineError } from "./ipc";
 
 function wrapper() {
@@ -100,5 +100,22 @@ describe("queries", () => {
     expect(await result.current.mutateAsync("oid-1")).toEqual({ closed_profile_id: null });
     expect(seeded.slice(0, 5).map((k) => client.getQueryState(k)?.isInvalidated)).toEqual([true, true, true, true, true]);
     expect(client.getQueryState(keys.entities("p-partner"))?.isInvalidated).toBe(false);
+  });
+
+  it("never shows another entity's details while the next one loads", async () => {
+    const mock = createMockTransport("default", 20);
+    setTransport(mock);
+    await commands.connect("p-logistics");
+    type P = { kind: "queue" | "subscription"; entity: string };
+    const { result, rerender } = renderHook(({ kind, entity }: P) => useEntityDetails("p-logistics", kind, entity), {
+      wrapper: wrapper(),
+      initialProps: { kind: "queue", entity: "invoice-generate" } as P,
+    });
+    await waitFor(() => expect(result.current.data?.name).toBe("invoice-generate"));
+    rerender({ kind: "queue", entity: "label-print" });
+    expect(result.current.data).toBeUndefined();
+    await waitFor(() => expect(result.current.data?.name).toBe("label-print"));
+    rerender({ kind: "subscription", entity: "shipment-events/subscriptions/tracking-sync" });
+    expect(result.current.data).toBeUndefined();
   });
 });
