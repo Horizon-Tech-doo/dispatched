@@ -734,7 +734,7 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
             if (error) {
               const e = new EngineError(error.kind, error.message);
               // As `tracked`: a cancel is logged as its message without an error.
-              activity(error.kind === "cancelled" ? error.message.replace(/\.$/, "") : `${title} failed`, started, error.kind === "cancelled" ? null : e);
+              activity(error.kind === "cancelled" ? error.message.replace(/\.$/, "") : `${title} to ${name} failed`, started, error.kind === "cancelled" ? null : e);
               job({ type: "finished", id, error, summary: null, output: null, written: null, missing: null, file_name: null });
               return;
             }

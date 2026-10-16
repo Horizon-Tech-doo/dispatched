@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as commands from "./commands";
 import { EngineError, setTransport, toEngineError } from "./ipc";
 import { createMockTransport } from "./mock/transport";
@@ -406,5 +406,18 @@ describe("export job events on the mock", () => {
     const events = await run("export-fails", { kind: "all", filter: {} }, 500);
     expect(events.filter((e) => e.type === "progress")).toHaveLength(1);
     expect(events.at(-1)).toMatchObject({ type: "finished", error: { kind: "network" }, written: null, missing: null, file_name: null });
+  });
+
+  it("logs a failed export as Rust does: the title, then the file, then failed", async () => {
+    const mock = createMockTransport("export-fails", 0);
+    setTransport(mock);
+    await commands.connect("p-logistics");
+    const log: { action: string; error: unknown }[] = [];
+    await mock.listen("activity", (e) => log.push(e as never));
+    const picked = await commands.pickExportPath("invoice-generate", "dead-letter", "json");
+    await commands.exportStart("p-logistics", { entity: "invoice-generate", view: "dead-letter", scope: { kind: "all", filter: {} }, format: "json", pick: picked!.pick });
+    await vi.waitFor(() => expect(log.some((e) => e.error)).toBe(true), { timeout: 2000 });
+    const line = log.find((e) => e.error)!;
+    expect(line.action).toBe(`Export invoice-generate (dead-letter queue) to ${picked!.name} failed`);
   });
 });
