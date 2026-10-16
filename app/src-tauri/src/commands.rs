@@ -296,11 +296,13 @@ pub async fn pick_export_path(
     entity: String,
     view: PeekView,
     format: String,
+    local_offset_minutes: Option<i32>,
 ) -> Result<Option<PickedPath>, CommandError> {
     use tauri_plugin_dialog::DialogExt;
-    // `time` can't read the local offset in a multi-threaded process on Unix, so the name is UTC.
-    let name =
-        ops::export::suggested_file_name(&entity, view, &format, time::OffsetDateTime::now_utc());
+    // The user's clock: `time` can't read the local offset soundly in a multi-threaded process on
+    // Unix, so the webview says it. Without it, the name is UTC and marked `Z`.
+    let now = ops::export::stamp_time(time::OffsetDateTime::now_utc(), local_offset_minutes);
+    let name = ops::export::suggested_file_name(&entity, view, &format, now);
     let (label, ext) = if format.eq_ignore_ascii_case("ndjson") {
         ("NDJSON", "ndjson")
     } else {

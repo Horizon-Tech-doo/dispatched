@@ -182,7 +182,19 @@ fn messages(n: u64) -> String {
     )
 }
 
-/// `{entity-slug}-{view}-{yyyyMMdd-HHmm}.{ext}`; anything but letters, digits, `.`, `_`, `-` becomes `-`.
+/// The time to stamp an export name with: `utc` in the user's zone, given as minutes east of UTC
+/// (the webview's `-Date.getTimezoneOffset()`; `time` can't read the local offset soundly in a
+/// multi-threaded process on Unix). `None`, or an offset no zone has, keeps UTC.
+pub fn stamp_time(utc: time::OffsetDateTime, offset_minutes: Option<i32>) -> time::OffsetDateTime {
+    offset_minutes
+        .filter(|m| m.abs() < 18 * 60)
+        .and_then(|m| time::UtcOffset::from_whole_seconds(m * 60).ok())
+        .map_or(utc, |o| utc.to_offset(o))
+}
+
+/// `{entity-slug}-{view}-{yyyyMMdd-HHmm}.{ext}` in `now`'s zone; a UTC time is marked
+/// `{yyyyMMdd-HHmm}Z`, since it is not the user's clock. Anything but letters, digits, `.`, `_`, `-`
+/// becomes `-`.
 pub fn suggested_file_name(
     entity: &str,
     view: PeekView,
@@ -204,8 +216,9 @@ pub fn suggested_file_name(
     } else {
         "json"
     };
+    let zone = if now.offset().is_utc() { "Z" } else { "" };
     format!(
-        "{slug}-{}-{:04}{:02}{:02}-{:02}{:02}.{ext}",
+        "{slug}-{}-{:04}{:02}{:02}-{:02}{:02}{zone}.{ext}",
         view.as_str(),
         now.year(),
         u8::from(now.month()),
@@ -975,12 +988,30 @@ mod tests {
                 "json",
                 at
             ),
-            "events-subscriptions-audit-dead-letter-20261016-0941.json"
+            "events-subscriptions-audit-dead-letter-20261016-0941Z.json"
         );
         assert_eq!(
             suggested_file_name("a b:c", PeekView::Active, "ndjson", at),
-            "a-b-c-active-20261016-0941.ndjson"
+            "a-b-c-active-20261016-0941Z.ndjson"
         );
+    }
+
+    #[test]
+    fn suggested_names_use_the_users_local_time_or_say_utc() {
+        let utc = time::macros::datetime!(2026-10-16 07:41 UTC);
+        // UTC+2, as the webview reports it (minutes east of UTC).
+        assert_eq!(
+            suggested_file_name("orders", PeekView::Active, "json", stamp_time(utc, Some(120))),
+            "orders-active-20261016-0941.json"
+        );
+        // Unknown or impossible offsets: UTC, marked `Z`.
+        for offset in [None, Some(24 * 60), Some(-24 * 60)] {
+            assert_eq!(
+                suggested_file_name("orders", PeekView::Active, "json", stamp_time(utc, offset)),
+                "orders-active-20261016-0741Z.json",
+                "{offset:?}"
+            );
+        }
     }
 
     #[test]

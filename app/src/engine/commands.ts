@@ -1,3 +1,4 @@
+import { localOffsetMinutes } from "./exportName";
 import { call } from "./ipc";
 import type {
   AccountView, AppInfo, ConnectionReport, ConnectionView, DashboardView, DiscoveryView, EntityDetails, EntityKindName, EntityListing, ExportFormat,
@@ -46,7 +47,9 @@ export const listSessions = (profileId: string, entity: string) => call<SessionL
 export const dashboard = (profileId: string) => call<DashboardView>("dashboard", { profileId });
 /** The native save dialog, with a suggested file name; `null` when the user cancels it. The path stays in the
  *  engine under the returned one-time `pick`, which `exportStart` takes. */
-export const pickExportPath = (entity: string, view: PeekView, format: ExportFormat) => call<PickedPath | null>("pick_export_path", { entity, view, format });
+/** The save dialog. `localOffsetMinutes` lets the engine stamp the suggested name in the user's local time. */
+export const pickExportPath = (entity: string, view: PeekView, format: ExportFormat) =>
+  call<PickedPath | null>("pick_export_path", { entity, view, format, localOffsetMinutes: localOffsetMinutes() });
 /** Starts an export job (events on `onJob`). An unknown or spent pick fails with `invalid`
  *  "Choose where to save the export."; a request refused before the job starts keeps its pick. */
 export const exportStart = (profileId: string, request: ExportRequest) => call<JobStarted>("export_start", { profileId, request });

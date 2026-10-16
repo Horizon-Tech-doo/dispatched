@@ -47,7 +47,10 @@ describe("export", () => {
     expect(within(sheet).getByText(/^invoice-generate-dead-letter-\d{8}-\d{4}\.ndjson$/)).toBeInTheDocument();
     await userEvent.click(within(sheet).getByRole("button", { name: "Export 37 messages…" }));
     await waitFor(() => expect(mock.calls.some((c) => c.cmd === "export_start")).toBe(true));
-    expect(mock.calls.find((c) => c.cmd === "pick_export_path")!.args).toEqual({ entity: "invoice-generate", view: "dead-letter", format: "ndjson" });
+    // The webview says its zone, so the dialog's suggested name is in the user's local time.
+    expect(mock.calls.find((c) => c.cmd === "pick_export_path")!.args).toEqual({
+      entity: "invoice-generate", view: "dead-letter", format: "ndjson", localOffsetMinutes: -new Date().getTimezoneOffset(),
+    });
     const { profileId, request } = startOf(mock);
     expect(profileId).toBe("p-logistics");
     expect(request).toMatchObject({ entity: "invoice-generate", view: "dead-letter", format: "ndjson", scope: { kind: "all", filter: {} }, total_hint: 37 });
