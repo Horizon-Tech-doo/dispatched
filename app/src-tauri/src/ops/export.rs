@@ -440,17 +440,55 @@ pub fn start(
     Ok(JobStarted { id })
 }
 
+/// Explorer's one argument that selects `file`: `/select,"<path>"`. Explorer parses its own command
+/// line, so the quoted path must reach it as typed (see `reveal`), not re-escaped by the runtime.
+pub fn explorer_select_arg(file: &Path) -> OsString {
+    let mut arg = OsString::from("/select,\"");
+    arg.push(file);
+    arg.push("\"");
+    arg
+}
+
+/// Explorer from the Windows directory (`%WINDIR%`), so a program of that name earlier on the search
+/// path or in the current directory is never run. Without it, the bare name.
+#[cfg(any(windows, test))]
+pub fn explorer_path(windir: Option<OsString>) -> PathBuf {
+    match windir.filter(|d| !d.is_empty()) {
+        Some(dir) => PathBuf::from(dir).join("explorer.exe"),
+        None => PathBuf::from("explorer.exe"),
+    }
+}
+
 /// The program and arguments that show `file` in the platform's file manager: selected in
 /// Finder (`open -R`) or Explorer (`/select,`); elsewhere its folder is opened.
 pub fn reveal_command(file: &Path, os: &str) -> (&'static str, Vec<OsString>) {
     match os {
         "macos" => ("open", vec!["-R".into(), file.into()]),
-        "windows" => ("explorer", vec!["/select,".into(), file.into()]),
+        "windows" => ("explorer.exe", vec![explorer_select_arg(file)]),
         _ => (
             "xdg-open",
             vec![file.parent().unwrap_or(file).as_os_str().to_owned()],
         ),
     }
+}
+
+/// The process that shows the file. On Windows the single `/select,"<path>"` argument goes in raw, from
+/// Explorer in `%WINDIR%`; elsewhere the arguments are ordinary.
+#[cfg(windows)]
+fn reveal_process(_program: &str, args: Vec<OsString>) -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+    let mut cmd = std::process::Command::new(explorer_path(std::env::var_os("WINDIR")));
+    for arg in args {
+        cmd.raw_arg(arg);
+    }
+    cmd
+}
+
+#[cfg(not(windows))]
+fn reveal_process(program: &str, args: Vec<OsString>) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args);
+    cmd
 }
 
 /// Show a finished export's file in the file manager. Only files this app wrote can be shown.
@@ -466,8 +504,7 @@ pub fn reveal(jobs: &Jobs, id: &str) -> Result<(), CommandError> {
     }
     let os = std::env::consts::OS;
     let (program, args) = reveal_command(&file, os);
-    let status = std::process::Command::new(program)
-        .args(args)
+    let status = reveal_process(program, args)
         .status()
         .map_err(|e| CommandError::new("io", format!("Couldn't show the file: {e}")))?;
     // Explorer exits with 1 even when it showed the file.
@@ -871,12 +908,40 @@ mod tests {
         let (prog, args) = reveal_command(f, "windows");
         assert_eq!(
             (prog, args),
-            ("explorer", vec![OsString::from("/select,"), f.into()])
+            (
+                "explorer.exe",
+                vec![OsString::from("/select,\"/data/exports/out.json\"")]
+            )
         );
         let (prog, args) = reveal_command(f, "linux");
         assert_eq!(
             (prog, args),
             ("xdg-open", vec![OsString::from("/data/exports")])
+        );
+    }
+
+    #[test]
+    fn explorer_gets_one_raw_select_argument_with_the_path_quoted() {
+        // Explorer parses its own command line: `/select,` and the quoted path are one argument, so a
+        // path with spaces or commas stays whole. Built here on every platform, passed raw on Windows.
+        let f = Path::new(r"C:\Users\Ana Maria\My exports, final\out.json");
+        assert_eq!(
+            explorer_select_arg(f),
+            OsString::from(r#"/select,"C:\Users\Ana Maria\My exports, final\out.json""#)
+        );
+    }
+
+    #[test]
+    fn explorer_is_resolved_from_the_windows_directory() {
+        assert_eq!(
+            explorer_path(Some(OsString::from("C:\\Windows"))),
+            Path::new("C:\\Windows").join("explorer.exe")
+        );
+        // Without %WINDIR%, the bare name is left to the system's own search.
+        assert_eq!(explorer_path(None), PathBuf::from("explorer.exe"));
+        assert_eq!(
+            explorer_path(Some(OsString::new())),
+            PathBuf::from("explorer.exe")
         );
     }
 
