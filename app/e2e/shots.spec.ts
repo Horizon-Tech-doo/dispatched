@@ -38,7 +38,8 @@ export const shots: {
     prepare: async (page) => {
       await page.getByRole("heading", { name: "Grid" }).first().evaluate((el) => el.scrollIntoView({ block: "start" }));
       await page.keyboard.press("Shift"); // keyboard modality so :focus-visible matches
-      await page.getByRole("grid", { name: "Dead-lettered messages" }).first().focus();
+      // The light column's grid, so the focus ring shows in light here and in dark in catalogue-grid-sorted.
+      await page.getByRole("grid", { name: "Dead-lettered messages", exact: true }).last().focus();
     },
   },
   {
@@ -49,11 +50,13 @@ export const shots: {
       // The catalogue renders a dark and a light copy side by side: sort both.
       for (const grid of await page.getByRole("grid", { name: "Dead-lettered messages", exact: true }).all()) {
         const seq = grid.getByRole("button", { name: "Seq" });
-        await seq.click();
-        await seq.click();
+        // By keyboard, so the pointer never hovers a header and :focus-visible still matches at the end.
+        await seq.focus();
+        await page.keyboard.press("Enter");
+        await page.keyboard.press("Enter");
       }
       await page.keyboard.press("Shift"); // keyboard modality so :focus-visible matches
-      await page.getByRole("grid", { name: "Dead-lettered messages" }).first().focus();
+      await page.getByRole("grid", { name: "Dead-lettered messages", exact: true }).first().focus();
     },
   },
   {

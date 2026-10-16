@@ -47,7 +47,8 @@ export interface DataGridProps<R> {
 }
 
 const HEADER_HEIGHT = 24;
-const ROW_NUMBER_WIDTH = "44px";
+// Wide enough for five digits plus the gutter padding and rule.
+const ROW_NUMBER_WIDTH = "52px";
 const SKELETON_WIDTHS = ["w-[62%]", "w-[48%]", "w-[71%]", "w-[39%]", "w-[56%]", "w-[66%]", "w-[44%]", "w-[58%]"];
 
 export function DataGrid<R>(p: DataGridProps<R>) {
@@ -56,7 +57,9 @@ export function DataGrid<R>(p: DataGridProps<R>) {
   // The range anchor is a row id, so it survives re-sorting.
   const anchor = useRef<string | null>(null);
 
-  // Stable identity per value: the sorted row model is memoised on this array, so a fresh one per render re-sorts every render.
+  // Keep the sorting array's identity stable per value. TanStack memoises the sorted row model on it, and its row-model
+  // memo onChange resets the page index (setState), so a fresh array per render would loop: re-render, memo miss, reset.
+  // `autoResetPageIndex: false` (below) cuts that loop at its source since the grid has no pagination.
   const sortId = p.sorting?.id;
   const sortDesc = p.sorting?.desc;
   const sortingState = useMemo<SortingState>(() => (sortId === undefined ? [] : [{ id: sortId, desc: !!sortDesc }]), [sortId, sortDesc]);
@@ -67,6 +70,7 @@ export function DataGrid<R>(p: DataGridProps<R>) {
     getSortedRowModel: getSortedRowModel(),
     getRowId: p.getRowId,
     manualSorting: false,
+    autoResetPageIndex: false,
     enableSorting: !!p.onSortingChange,
     enableSortingRemoval: true,
     enableMultiSort: false,
@@ -112,6 +116,7 @@ export function DataGrid<R>(p: DataGridProps<R>) {
 
   function selectRange(to: number) {
     const from = (anchor.current != null ? indexOf.get(anchor.current) : undefined) ?? (focusIndex >= 0 ? focusIndex : to);
+    anchor.current = idAt(from) ?? null; // a missing or never-set anchor becomes the row the range started from
     const [a, b] = from <= to ? [from, to] : [to, from];
     const ids = new Set(rows.slice(a, b + 1).map((r) => r.id));
     p.onSelectionChange(ids, idAt(to) ?? null);
@@ -145,6 +150,8 @@ export function DataGrid<R>(p: DataGridProps<R>) {
     }
     if (to === null) return;
     e.preventDefault();
+    // From a header button the focus moves back to the grid so aria-activedescendant announces the row.
+    if (e.target !== e.currentTarget) scrollRef.current?.focus();
     if (e.shiftKey) selectRange(to);
     else selectOnly(to);
   }
@@ -170,7 +177,7 @@ export function DataGrid<R>(p: DataGridProps<R>) {
     <div role="status" aria-label="Loading">
       {Array.from({ length: 10 }, (_, r) => (
         <div key={r} data-skeleton-row className="grid items-center px-2.5" style={{ height: p.rowHeight, gridTemplateColumns: template }}>
-          {p.rowNumbers && <div className="px-1"><Skeleton className="ml-auto w-[60%]" /></div>}
+          {p.rowNumbers && <div className="border-r border-line pl-1 pr-2.5"><Skeleton className="ml-auto w-[60%]" /></div>}
           {leafColumns.map((c, ci) => (
             <div key={c.id} className="px-1">
               <Skeleton className={cn(SKELETON_WIDTHS[(r + ci * 3) % SKELETON_WIDTHS.length], c.columnDef.meta?.align === "end" && "ml-auto")} />
@@ -188,6 +195,7 @@ export function DataGrid<R>(p: DataGridProps<R>) {
   ) : null;
 
   return (
+    <div className="relative h-full">
     <div
       ref={scrollRef}
       role="grid"
@@ -198,7 +206,7 @@ export function DataGrid<R>(p: DataGridProps<R>) {
       aria-busy={p.loading || undefined}
       aria-activedescendant={body == null && focusRendered ? `${domId}-${p.focusId}` : undefined}
       onKeyDown={onKeyDown}
-      className="relative h-full overflow-auto focus-visible:outline focus-visible:outline-1 focus-visible:-outline-offset-1 focus-visible:outline-fg"
+      className="peer relative h-full overflow-auto outline-none"
     >
       {/* Sizes to the header's max-content so absolutely positioned rows span the full scroll width. */}
       <div className="w-max min-w-full">
@@ -209,7 +217,7 @@ export function DataGrid<R>(p: DataGridProps<R>) {
         style={{ height: HEADER_HEIGHT, gridTemplateColumns: template }}
       >
         {p.rowNumbers && (
-          <div role="columnheader" className="truncate px-1 text-right">
+          <div role="columnheader" aria-label="Row number" className="truncate border-r border-line pl-1 pr-2.5 text-right">
             #
           </div>
         )}
@@ -222,20 +230,21 @@ export function DataGrid<R>(p: DataGridProps<R>) {
               key={h.id}
               role="columnheader"
               aria-sort={dir === "asc" ? "ascending" : dir === "desc" ? "descending" : undefined}
-              className={cn("truncate px-1", meta?.align === "end" && "text-right")}
+              className={cn("truncate", h.column.getCanSort() ? "h-full" : "px-1", meta?.align === "end" && "text-right")}
             >
               {h.column.getCanSort() ? (
                 <button
                   type="button"
                   onClick={h.column.getToggleSortingHandler()}
                   className={cn(
-                    "inline-flex max-w-full items-center gap-1 rounded-ctl text-muted hover:text-fg focus-visible:outline focus-visible:outline-1 focus-visible:outline-fg",
+                    "flex h-full w-full items-center gap-1 px-1 hover:bg-hover hover:text-fg focus-visible:outline focus-visible:outline-1 focus-visible:-outline-offset-1 focus-visible:outline-fg",
+                    dir ? "text-fg" : "text-muted",
                     meta?.align === "end" && "flex-row-reverse",
                   )}
                 >
                   <span className="truncate">{label}</span>
-                  {dir === "asc" && <ArrowUp aria-hidden="true" className="size-3 shrink-0 text-icon" />}
-                  {dir === "desc" && <ArrowDown aria-hidden="true" className="size-3 shrink-0 text-icon" />}
+                  {dir === "asc" && <ArrowUp aria-hidden="true" strokeWidth={1.5} className="size-3 shrink-0" />}
+                  {dir === "desc" && <ArrowDown aria-hidden="true" strokeWidth={1.5} className="size-3 shrink-0" />}
                 </button>
               ) : (
                 label
@@ -268,7 +277,7 @@ export function DataGrid<R>(p: DataGridProps<R>) {
                 style={{ height: p.rowHeight, transform: `translateY(${v.start - HEADER_HEIGHT}px)`, gridTemplateColumns: template }}
               >
                 {p.rowNumbers && (
-                  <div role="gridcell" className="truncate px-1 text-right font-mono text-11 tabular-nums text-muted">
+                  <div role="gridcell" className="truncate border-r border-line pl-1 pr-2.5 text-right font-mono text-11 tabular-nums text-muted">
                     {v.index + 1}
                   </div>
                 )}
@@ -290,6 +299,12 @@ export function DataGrid<R>(p: DataGridProps<R>) {
         </div>
       )}
       </div>
+    </div>
+    {/* The focus ring sits on an overlay: inside the scroller the sticky header would cover its top edge. */}
+    <div
+      aria-hidden="true"
+      className="pointer-events-none absolute inset-0 z-20 peer-focus-visible:outline peer-focus-visible:outline-1 peer-focus-visible:-outline-offset-1 peer-focus-visible:outline-fg"
+    />
     </div>
   );
 }

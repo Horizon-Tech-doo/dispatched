@@ -305,4 +305,51 @@ describe("DataGrid sorting and columns", () => {
     rerender(<Harness data={[]} error={<p>Can&apos;t peek</p>} />);
     expect(cellOf(screen.getByText("Can't peek"))).toHaveAttribute("aria-colspan", "3");
   });
+
+  it("anchors a range at the preset focus row when nothing was selected yet", async () => {
+    function Preset() {
+      const [sel, setSel] = useState<{ ids: Set<string>; focus: string | null }>({ ids: new Set(), focus: "48000" });
+      return (
+        <DataGrid<Msg>
+          label="Messages"
+          columns={sortable}
+          rows={rows(10)}
+          getRowId={(r) => String(r.seq)}
+          selectedIds={sel.ids}
+          focusId={sel.focus}
+          onSelectionChange={(ids, focus) => setSel({ ids, focus })}
+          rowHeight={22}
+          initialRect={{ width: 800, height: 600 }}
+        />
+      );
+    }
+    render(<Preset />);
+    screen.getByRole("grid").focus();
+    await userEvent.keyboard("{Shift>}{ArrowDown}{ArrowDown}{ArrowDown}{/Shift}");
+    expect(selectedRows().map((r) => r.getAttribute("data-row-id"))).toEqual(["48000", "48001", "48002", "48003"]);
+  });
+
+  it("returns focus to the grid when a navigation key is pressed on a header button", async () => {
+    render(<Sorted />);
+    const grid = screen.getByRole("grid");
+    sortButton().focus();
+    await userEvent.keyboard("j");
+    expect(grid).toHaveFocus();
+    expect(grid.getAttribute("aria-activedescendant")).toMatch(/-48000$/);
+    sortButton().focus();
+    await userEvent.keyboard(" ");
+    expect(sortButton()).toHaveFocus();
+  });
+
+  it("renders a bounded window of a sorted 10,000-row list", () => {
+    render(<Sorted rows={rows(10_000)} initial={{ id: "seq", desc: true }} />);
+    const rendered = screen.getAllByRole("row").length;
+    expect(rendered).toBeLessThan(120);
+    expect(seqColumn()[0]).toBe("57999");
+  });
+
+  it("labels the row-number column", () => {
+    render(<Sorted rowNumbers />);
+    expect(screen.getByRole("columnheader", { name: "Row number" })).toHaveTextContent("#");
+  });
 });
