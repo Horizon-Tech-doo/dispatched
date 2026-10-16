@@ -697,6 +697,27 @@ export const shots: Shot[] = [
     )}`,
     ready: (p) => p.getByRole("heading", { name: "This entity wasn't found" }),
   },
+  {
+    // A narrow window: the entity's sub-tabs do not fit, so they scroll with the active one in view and a soft edge says there are more.
+    name: "subtabs-narrow",
+    path: seedTab("returns-intake", "queue", "listener"),
+    ready: (p) => p.getByRole("tablist", { name: "Entity views" }).getByRole("tab", { name: "Listener", selected: true }),
+    prepare: async (page) => {
+      await page.setViewportSize({ width: 640, height: 800 });
+      const views = page.getByRole("tablist", { name: "Entity views" });
+      await expect.poll(() => views.evaluate((l) => l.scrollLeft > 0 && l.hasAttribute("data-overflow-start"))).toBe(true);
+    },
+  },
+  {
+    name: "subtabs-narrow-start",
+    path: seedTab("returns-intake", "queue", "overview"),
+    ready: (p) => p.getByRole("tablist", { name: "Entity views" }).getByRole("tab", { name: "Overview", selected: true }),
+    prepare: async (page) => {
+      await page.setViewportSize({ width: 640, height: 800 });
+      const views = page.getByRole("tablist", { name: "Entity views" });
+      await expect.poll(() => views.evaluate((l) => l.hasAttribute("data-overflow-end"))).toBe(true);
+    },
+  },
   ...(["palette", "palette-all", "palette-commands", "palette-empty"] as const).map((name) => ({
     name,
     path: "/?scenario=default&autoconnect=p-logistics",

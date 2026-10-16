@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./tabs";
 import { Sheet } from "./sheet";
 import { CommandGroup, CommandInput, CommandItem, CommandList, CommandPaletteDialog } from "./command";
@@ -67,6 +67,119 @@ describe("Tabs overflow", () => {
     await vi.waitFor(() => expect(list.scrollLeft).toBe(0));
     expect(scrollIntoView).not.toHaveBeenCalled();
     spy.mockRestore();
+  });
+});
+
+describe("Tabs that do not fit", () => {
+  let sizes = { scrollWidth: 300, clientWidth: 100 };
+  const watchers: (() => void)[] = [];
+  const stubLayout = () => {
+    vi.spyOn(HTMLElement.prototype, "scrollWidth", "get").mockImplementation(() => sizes.scrollWidth);
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(() => sizes.clientWidth);
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(cb: () => void) {
+          watchers.push(cb);
+        }
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+  };
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    watchers.length = 0;
+    sizes = { scrollWidth: 300, clientWidth: 100 };
+  });
+  const strip = () => (
+    <Tabs defaultValue="a">
+      <TabsList variant="underline" aria-label="Views">
+        <TabsTrigger value="a">Overview</TabsTrigger>
+        <TabsTrigger value="b">Scheduled</TabsTrigger>
+      </TabsList>
+    </Tabs>
+  );
+
+  it("marks the edge that has more tabs beyond it, and updates it as the strip scrolls", () => {
+    stubLayout();
+    render(strip());
+    const list = screen.getByRole("tablist");
+    expect(list).not.toHaveAttribute("data-overflow-start");
+    expect(list).toHaveAttribute("data-overflow-end");
+    list.scrollLeft = 80;
+    fireEvent.scroll(list);
+    expect(list).toHaveAttribute("data-overflow-start");
+    expect(list).toHaveAttribute("data-overflow-end");
+    list.scrollLeft = 200; // the far end: scrollWidth - clientWidth
+    fireEvent.scroll(list);
+    expect(list).toHaveAttribute("data-overflow-start");
+    expect(list).not.toHaveAttribute("data-overflow-end");
+  });
+
+  it("marks nothing when the tabs fit", () => {
+    sizes = { scrollWidth: 100, clientWidth: 100 };
+    stubLayout();
+    render(strip());
+    const list = screen.getByRole("tablist");
+    expect(list).not.toHaveAttribute("data-overflow-start");
+    expect(list).not.toHaveAttribute("data-overflow-end");
+  });
+
+  it("opens at the far end when the last tab is active, padding included, so no fade claims there is more", () => {
+    stubLayout();
+    const rect = (l: number, w: number) => ({ left: l, right: l + w, top: 0, bottom: 30, width: w, height: 30, x: l, y: 0, toJSON() {} }) as DOMRect;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.getAttribute("role") === "tablist") return rect(0, 100);
+      const list = this.closest<HTMLElement>('[role="tablist"]')!;
+      return rect((this.textContent === "Scheduled" ? 240 : 0) - list.scrollLeft, 50);
+    });
+    render(
+      <Tabs defaultValue="b">
+        <TabsList variant="underline" aria-label="Views">
+          <TabsTrigger value="a">Overview</TabsTrigger>
+          <TabsTrigger value="b">Scheduled</TabsTrigger>
+        </TabsList>
+      </Tabs>,
+    );
+    const list = screen.getByRole("tablist");
+    expect(list.scrollLeft).toBe(200); // scrollWidth - clientWidth, past the tab's own edge (190) by the padding
+    expect(list).toHaveAttribute("data-overflow-start");
+    expect(list).not.toHaveAttribute("data-overflow-end");
+  });
+
+  it("keeps the active tab in view when the strip resizes, until the person scrolls it themselves", () => {
+    sizes = { scrollWidth: 200, clientWidth: 100 };
+    stubLayout();
+    let left = 0;
+    const rect = (l: number, w: number) => ({ left: l, right: l + w, top: 0, bottom: 30, width: w, height: 30, x: l, y: 0, toJSON() {} }) as DOMRect;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.getAttribute("role") === "tablist") return rect(0, 100);
+      const list = this.closest<HTMLElement>('[role="tablist"]')!;
+      return rect((this.textContent === "Scheduled" ? 150 : 0) - list.scrollLeft, 50);
+    });
+    render(
+      <Tabs defaultValue="b">
+        <TabsList variant="underline" aria-label="Views">
+          <TabsTrigger value="a">Overview</TabsTrigger>
+          <TabsTrigger value="b">Scheduled</TabsTrigger>
+        </TabsList>
+      </Tabs>,
+    );
+    const list = screen.getByRole("tablist");
+    // On mount the active tab (right edge at 200) is brought into the 100px strip.
+    expect(list.scrollLeft).toBe(100);
+    list.scrollLeft = 0;
+    left = list.scrollLeft;
+    watchers.forEach((w) => w()); // a count arrived and a tab grew
+    expect(list.scrollLeft).toBe(100);
+    // The person scrolls back; the next resize leaves that alone.
+    fireEvent.wheel(list, { deltaY: -100 });
+    list.scrollLeft = left;
+    watchers.forEach((w) => w());
+    expect(list.scrollLeft).toBe(0);
   });
 });
 

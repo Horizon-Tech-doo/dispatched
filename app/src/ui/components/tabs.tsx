@@ -16,23 +16,60 @@ export function TabsList({
 }: ComponentProps<typeof TabsPrimitive.List> & { variant?: Variant }) {
   const listRef = useRef<HTMLDivElement | null>(null);
 
-  // Keep the active tab visible when many tabs overflow the strip. Only the list scrolls: `scrollIntoView`
-  // would also scroll every scrollable ancestor, the window included.
+  // When the tabs do not fit, the list scrolls sideways and the active tab is kept in view. Only the list scrolls:
+  // `scrollIntoView` would also scroll every scrollable ancestor, the window included. `data-overflow-start` and
+  // `data-overflow-end` mark which edges have more tabs beyond them; they fade in a gradient (the classes below).
   useEffect(() => {
     const list = listRef.current;
     if (!list || typeof MutationObserver === "undefined") return;
+    // Set once the person scrolls the strip themselves: tabs resizing afterwards (a count arriving) must not undo it.
+    let userScrolled = false;
+    const edges = () => {
+      const more = list.scrollWidth - list.clientWidth > 1;
+      const start = more && list.scrollLeft > 1;
+      const end = more && list.scrollLeft + list.clientWidth < list.scrollWidth - 1;
+      list.toggleAttribute("data-overflow-start", start);
+      list.toggleAttribute("data-overflow-end", end);
+    };
     const reveal = () => {
       const tab = list.querySelector<HTMLElement>('[role="tab"][data-state="active"]');
-      if (!tab) return;
-      const l = list.getBoundingClientRect();
-      const t = tab.getBoundingClientRect();
-      if (t.left < l.left) list.scrollLeft -= l.left - t.left;
-      else if (t.right > l.right) list.scrollLeft += t.right - l.right;
+      if (tab) {
+        const l = list.getBoundingClientRect();
+        const t = tab.getBoundingClientRect();
+        if (t.left < l.left) list.scrollLeft -= l.left - t.left;
+        else if (t.right > l.right) list.scrollLeft += t.right - l.right;
+        // The first and last tab reveal the strip's own padding too, so no fade claims there are more tabs.
+        const tabs = list.querySelectorAll('[role="tab"]');
+        if (tab === tabs[0]) list.scrollLeft = 0;
+        else if (tab === tabs[tabs.length - 1]) list.scrollLeft = Math.max(list.scrollLeft, list.scrollWidth - list.clientWidth);
+      }
+      edges();
     };
+    const onActivated = () => {
+      userScrolled = false;
+      reveal();
+    };
+    const onUser = () => (userScrolled = true);
     reveal();
-    const observer = new MutationObserver(reveal);
-    observer.observe(list, { attributes: true, attributeFilter: ["data-state"], subtree: true });
-    return () => observer.disconnect();
+    const states = new MutationObserver((records) => {
+      if (records.some((r) => r.type === "attributes")) onActivated();
+      else edges();
+    });
+    states.observe(list, { attributes: true, attributeFilter: ["data-state"], childList: true, subtree: true });
+    // The strip or a tab changed size (the window, a count arriving): keep the active tab in view unless the person scrolled.
+    const sizes = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => (userScrolled ? edges() : reveal()));
+    sizes?.observe(list);
+    for (const child of Array.from(list.children)) sizes?.observe(child);
+    list.addEventListener("scroll", edges, { passive: true });
+    list.addEventListener("wheel", onUser, { passive: true });
+    list.addEventListener("pointerdown", onUser, { passive: true });
+    return () => {
+      states.disconnect();
+      sizes?.disconnect();
+      list.removeEventListener("scroll", edges);
+      list.removeEventListener("wheel", onUser);
+      list.removeEventListener("pointerdown", onUser);
+    };
   }, []);
 
   const handleWheel = (event: WheelEvent<HTMLDivElement>) => {
@@ -53,6 +90,11 @@ export function TabsList({
         onWheel={handleWheel}
         className={cn(
           "flex min-w-0 items-stretch overflow-x-auto [scrollbar-width:none]",
+          // A soft edge where more tabs are hidden: zero-width sticky ends that paint a short gradient over the tabs.
+          "[--tabs-fade:var(--c-content)] before:pointer-events-none before:sticky before:left-0 before:z-10 before:-mr-7 before:w-7 before:shrink-0 before:self-stretch before:bg-linear-to-r before:from-(--tabs-fade) before:to-transparent before:opacity-0 before:content-['']",
+          "after:pointer-events-none after:sticky after:right-0 after:z-10 after:-ml-7 after:w-7 after:shrink-0 after:self-stretch after:bg-linear-to-l after:from-(--tabs-fade) after:to-transparent after:opacity-0 after:content-['']",
+          "data-[overflow-start]:before:opacity-100 data-[overflow-end]:after:opacity-100",
+          variant === "strip" && "[--tabs-fade:var(--c-chrome)]",
           variant === "strip" ? "h-[30px] bg-chrome" : "h-7 gap-0.5 px-2.5",
           className,
         )}
