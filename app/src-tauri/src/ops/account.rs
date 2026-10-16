@@ -154,7 +154,10 @@ pub async fn sign_in(
                                 user_code: None,
                                 message: "Finish signing in in your browser.".into(),
                             });
-                            let _ = open::that(url);
+                            // The same `https` check as `open_sign_in_page`: the library's URL is not trusted blindly.
+                            if let Some(page) = browser_target(url) {
+                                let _ = open::that(page);
+                            }
                         })
                         .await
                 };
@@ -176,6 +179,11 @@ pub fn cancel(state: &AppState) {
 /// A browser page the app may open for a sign-in: an `https` URL only.
 fn https_url(url: &str) -> Option<url::Url> {
     url::Url::parse(url).ok().filter(|u| u.scheme() == "https")
+}
+
+/// What the browser sign-in's callback may open: the URL when it is `https`, else nothing.
+fn browser_target(url: &str) -> Option<String> {
+    https_url(url).map(|u| u.to_string())
 }
 
 /// The prompt URL of one running `sign_in`, kept in `AppState::last_prompt_url` for "Open sign-in
@@ -572,6 +580,22 @@ mod tests {
         assert_eq!(prompt_url(&s).as_deref(), Some(PROMPT));
         drop(second);
         assert_eq!(prompt_url(&s), None);
+    }
+
+    #[test]
+    fn the_browser_callback_opens_only_https_pages() {
+        assert_eq!(
+            browser_target("https://login.microsoftonline.com/x?a=1").as_deref(),
+            Some("https://login.microsoftonline.com/x?a=1")
+        );
+        for bad in [
+            "http://login.example",
+            "file:///Applications/Calculator.app",
+            "javascript:alert(1)",
+            "not a url",
+        ] {
+            assert_eq!(browser_target(bad), None, "{bad}");
+        }
     }
 
     #[test]
