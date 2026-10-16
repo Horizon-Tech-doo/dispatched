@@ -7,7 +7,7 @@ The emulator column comes from the gate `emulator_m1c` and the local test runs. 
 | Connect, tenant and namespace picker, tree | emulator gates `emulator_m0`/`emulator_m1` (connect, list) | ✅ both namespaces | not run |
 | Views (active, scheduled, deferred, DLQ, transfer DLQ) | ✅ gate `emulator_m1`; browse flows in mock + e2e | not run (peek was refused, see L1) | not run |
 | From the end | ✅ gate `emulator_m1c` (tail peek) | not run | not run |
-| From a sequence number | ✅ gate `emulator_m1c` (selected sequences); mock + e2e | not run | not run |
+| From a sequence number | ✅ mock + e2e; core unit tests | not run | not run |
 | Peek more | mock + e2e | not run | not run |
 | Property, body and JSONPath filters | ✅ gate `emulator_m1` | not run | not run |
 | Detail pane and body formats | mock + e2e | not run | not run |
