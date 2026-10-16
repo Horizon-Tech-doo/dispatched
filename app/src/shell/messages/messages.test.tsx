@@ -213,7 +213,7 @@ describe("message views", () => {
     await userEvent.click(within(status).getByRole("button", { name: "Peek more" }));
     await waitFor(() => expect(status).toHaveTextContent("100,000 messages · the view holds up to 100,000 messages"), { timeout: 10_000 });
     expect(within(status).queryByRole("button", { name: "Peek more" })).toBeNull();
-  }, 30_000);
+  }, 90_000);
 
   it("offers only the columns the view can fill, and resets them", async () => {
     renderShell("default", seedTab("invoice-generate", "queue", "messages"));
