@@ -313,6 +313,33 @@ describe("Drawer", () => {
     expect(await within(jobs).findByText("Cancelled")).toBeInTheDocument();
   });
 
+  it("a job stopped by a closing connection says so, not Cancelled", async () => {
+    const jobs = await jobsTab();
+    act(() => jobStore.apply(started("j1", "Export orders (dead-letter queue)", 37, "orders.json")));
+    act(() => jobStore.apply(progress("j1", 5, 37)));
+    act(() => jobStore.apply(finished("j1", { error: { kind: "stopped", message: "Export stopped: the connection closed." } })));
+    const row = within(jobs).getByRole("listitem");
+    expect(within(row).getByText("Stopped: the connection closed after 5 of 37. No file was written.")).toBeInTheDocument();
+    expect(within(row).getByText("Stopped")).toBeInTheDocument();
+    expect(within(row).queryByText(/Cancelled/)).toBeNull();
+    expect(row.querySelector("svg")).toBeNull();
+    expect(within(row).queryByText("Export failed")).toBeNull();
+  });
+
+  it("disconnecting stops a running export, and the row and the log say the connection closed", async () => {
+    renderShell("export-slow", { last_profile: "p-logistics" });
+    const jobs = await screen.findByRole("region", { name: "Jobs and activity" });
+    act(() => within(jobs).getByRole("tab", { name: /Jobs/ }).focus());
+    await screen.findByRole("tree", { name: "Namespace" });
+    const pick = await commands.pickExportPath("invoice-generate", "dead-letter", "json");
+    await commands.exportStart("p-logistics", { entity: "invoice-generate", view: "dead-letter", scope: { kind: "all", filter: {} }, format: "json", pick: pick!.pick });
+    await within(jobs).findByRole("button", { name: /^Cancel Export invoice-generate/ });
+    await act(() => commands.disconnect());
+    expect(await within(jobs).findByText("Stopped")).toBeInTheDocument();
+    expect(within(jobs).getByText(/^Stopped: the connection closed/)).toBeInTheDocument();
+    await waitFor(() => expect(activityStore.all().some((e) => e.action === "Export stopped: the connection closed" && e.error === null)).toBe(true));
+  });
+
   it("offers Show activity with the running job count whenever the drawer is hidden", async () => {
     renderShell("default", { last_profile: "p-logistics" });
     const drawer = await screen.findByRole("region", { name: "Jobs and activity" });

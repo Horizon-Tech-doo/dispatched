@@ -10,6 +10,7 @@ function startedMessage(j: Job): string {
 /** What a screen reader hears when a job ends. */
 function finishedMessage(j: Job): string {
   if (j.error?.kind === "cancelled") return `${j.title} was cancelled.`;
+  if (j.error?.kind === "stopped") return `${j.title} stopped: the connection closed.`;
   if (j.error) return `${j.title} failed.`;
   return j.written != null ? `${j.title} finished: ${plural(j.written, "message")} written.` : `${j.title} finished.`;
 }

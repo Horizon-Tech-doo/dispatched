@@ -272,19 +272,21 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
   const outputs = new Map<string, string>();
   const picks = new Map<string, string>();
   const job = (e: JobEvent) => emit("job", e);
-  /** As `Jobs::cancel`: true while the job runs; it finishes (cancelled, no file) once it notices. */
-  const cancelJob = (id: string) => {
+  /** As `Jobs::cancel`: true while the job runs; it finishes (cancelled, no file) once it notices. `byClose`: as
+   *  `Jobs::close_running`, it finishes as `stopped` (the connection closed) instead. */
+  const cancelJob = (id: string, byClose = false) => {
     const j = running.get(id);
     if (!j) return false;
     if (!j.cancelling) {
       j.cancelling = true;
       clearTimeout(j.timer);
-      setTimeout(() => j.finish({ kind: "cancelled", message: "Export cancelled." }), 0);
+      const why = byClose ? { kind: "stopped", message: "Export stopped: the connection closed." } : { kind: "cancelled", message: "Export cancelled." };
+      setTimeout(() => j.finish(why), 0);
     }
     return true;
   };
-  /** Closing the connection (disconnect, another connect, signing out its sign-in) cancels its exports. */
-  const cancelRunning = () => [...running.keys()].forEach(cancelJob);
+  /** Closing the connection (disconnect, another connect, signing out its sign-in) stops its exports. */
+  const cancelRunning = () => [...running.keys()].forEach((id) => cancelJob(id, true));
   /** The prompt of the sign-in that is waiting, for "Open sign-in page". */
   let lastPrompt: { url: string } | null = null;
 
@@ -681,6 +683,8 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
         const name = suggestedFileName(args.entity as string, args.view as PeekView, args.format as string);
         const dir = "/Users/ops/Downloads";
         const pick = `pick-${Math.random().toString(36).slice(2, 12)}`;
+        // As `Jobs::pick`: a new pick replaces any unspent one (one export sheet is open at a time).
+        picks.clear();
         picks.set(pick, `${dir}/${name}`);
         return { pick, name, dir } satisfies PickedPath;
       }
@@ -739,8 +743,9 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
             running.delete(id);
             if (error) {
               const e = new EngineError(error.kind, error.message);
-              // As `tracked`: a cancel is logged as its message without an error.
-              activity(error.kind === "cancelled" ? error.message.replace(/\.$/, "") : `${title} to ${name} failed`, started, error.kind === "cancelled" ? null : e);
+              // As `tracked`: a cancel (or a stop because the connection closed) is logged as its message without an error.
+              const stop = error.kind === "cancelled" || error.kind === "stopped";
+              activity(stop ? error.message.replace(/\.$/, "") : `${title} to ${name} failed`, started, stop ? null : e);
               job({ type: "finished", id, error, summary: null, output: null, written: null, missing: null, file_name: null });
               return;
             }

@@ -4,37 +4,58 @@ use horizon_azure_kit::safety::CancellationToken;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// How long an unspent pick stays valid.
+const PICK_TTL: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Default)]
 struct Entry {
     cancel: Option<CancellationToken>,
     output: Option<PathBuf>,
+    /// Stopped because its connection closed (disconnect, another connect, sign-out), not by the user.
+    stopped_by_close: bool,
 }
 
 #[derive(Default)]
 pub struct Jobs {
     inner: Mutex<HashMap<String, Entry>>,
-    /// Paths the native save dialog returned, by one-time pick id. Exports write only to these:
-    /// the webview names a pick, never a path, and the dialog has asked "replace?" for each.
-    picks: Mutex<HashMap<String, PathBuf>>,
+    /// Paths the native save dialog returned, by one-time pick id, with when they were picked.
+    /// Exports write only to these: the webview names a pick, never a path, and the dialog has
+    /// asked "replace?" for each. At most one is unspent, and only for [`PICK_TTL`].
+    picks: Mutex<HashMap<String, (PathBuf, Instant)>>,
 }
 
 impl Jobs {
-    /// Remember a path the save dialog returned. Returns its pick id.
+    /// Remember a path the save dialog returned. Returns its pick id. It replaces any unspent
+    /// pick: one export sheet is open at a time, so an older pick is from a sheet that was closed
+    /// and must not stay a valid write authorisation.
     pub fn pick(&self, path: PathBuf) -> String {
         let id = format!("pick-{}", uuid::Uuid::new_v4().simple());
-        self.picks.lock().unwrap().insert(id.clone(), path);
+        let mut picks = self.picks.lock().unwrap();
+        picks.clear();
+        picks.insert(id.clone(), (path, Instant::now()));
         id
     }
 
-    /// The picked path, once: a pick authorises one export.
+    /// The picked path, once: a pick authorises one export. `None` once it is older than
+    /// [`PICK_TTL`].
     pub fn take_pick(&self, id: &str) -> Option<PathBuf> {
-        self.picks.lock().unwrap().remove(id)
+        self.take_pick_at(id, Instant::now())
+    }
+
+    /// [`Jobs::take_pick`] as of `now`.
+    pub fn take_pick_at(&self, id: &str, now: Instant) -> Option<PathBuf> {
+        let (path, at) = self.picks.lock().unwrap().remove(id)?;
+        (now.saturating_duration_since(at) <= PICK_TTL).then_some(path)
     }
 
     /// Put back a pick that was taken for an export that did not start.
     pub fn restore_pick(&self, id: &str, path: PathBuf) {
-        self.picks.lock().unwrap().insert(id.to_string(), path);
+        self.picks
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), (path, Instant::now()));
     }
 
     /// A new job id and its cancel token.
@@ -46,6 +67,7 @@ impl Jobs {
             Entry {
                 cancel: Some(token.clone()),
                 output: None,
+                stopped_by_close: false,
             },
         );
         (id, token)
@@ -68,13 +90,62 @@ impl Jobs {
         }
     }
 
-    /// Ask every running job to stop (their connection is closing). Returns how many.
+    /// Ask every running job to stop. Returns how many.
     pub fn cancel_running(&self) -> usize {
-        let inner = self.inner.lock().unwrap();
-        let running: Vec<&CancellationToken> =
-            inner.values().filter_map(|e| e.cancel.as_ref()).collect();
-        running.iter().for_each(|t| t.cancel());
-        running.len()
+        self.stop_running(false)
+    }
+
+    /// Ask every running job to stop because its connection is closing (disconnect, another
+    /// connect, sign-out): they finish as `stopped`, not `cancelled`. Returns how many.
+    pub fn close_running(&self) -> usize {
+        self.stop_running(true)
+    }
+
+    fn stop_running(&self, by_close: bool) -> usize {
+        let mut inner = self.inner.lock().unwrap();
+        let mut n = 0;
+        for e in inner.values_mut() {
+            if let Some(t) = &e.cancel {
+                // Marked before the cancel, so the job sees the reason when it notices.
+                e.stopped_by_close |= by_close;
+                t.cancel();
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// Whether job `id` was stopped by its connection closing.
+    pub fn stopped_by_close(&self, id: &str) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .get(id)
+            .is_some_and(|e| e.stopped_by_close)
+    }
+
+    /// Whether any job is still running.
+    pub fn any_running(&self) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .values()
+            .any(|e| e.cancel.is_some())
+    }
+
+    /// Cancel every running job and wait, at most `limit`, until all have ended (an export's
+    /// temp file is removed before its job ends). For app exit, which skips destructors. True
+    /// when none is left running.
+    pub async fn stop_all_and_wait(&self, limit: Duration) -> bool {
+        self.cancel_running();
+        let deadline = Instant::now() + limit;
+        while self.any_running() {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        true
     }
 
     /// Mark a job finished, keeping the file it wrote.
@@ -117,13 +188,45 @@ mod tests {
         let jobs = Jobs::default();
         assert!(jobs.take_pick("pick-none").is_none());
         let a = jobs.pick("/tmp/a.json".into());
-        let b = jobs.pick("/tmp/b.json".into());
-        assert!(a.starts_with("pick-") && a != b);
+        assert!(a.starts_with("pick-"));
         assert_eq!(jobs.take_pick(&a).unwrap().to_string_lossy(), "/tmp/a.json");
         assert!(jobs.take_pick(&a).is_none(), "spent");
         jobs.restore_pick(&a, "/tmp/a.json".into());
         assert_eq!(jobs.take_pick(&a).unwrap().to_string_lossy(), "/tmp/a.json");
+    }
+
+    #[test]
+    fn a_new_pick_replaces_an_unspent_one() {
+        let jobs = Jobs::default();
+        let a = jobs.pick("/tmp/a.json".into());
+        let b = jobs.pick("/tmp/b.json".into());
+        assert_ne!(a, b);
+        assert!(jobs.take_pick(&a).is_none(), "replaced by the newer pick");
         assert_eq!(jobs.take_pick(&b).unwrap().to_string_lossy(), "/tmp/b.json");
+    }
+
+    #[test]
+    fn an_unspent_pick_expires_after_ten_minutes() {
+        let jobs = Jobs::default();
+        let a = jobs.pick("/tmp/a.json".into());
+        let later = Instant::now() + Duration::from_secs(10 * 60 + 1);
+        assert!(jobs.take_pick_at(&a, later).is_none(), "expired");
+        assert!(jobs.take_pick(&a).is_none(), "and gone");
+        let b = jobs.pick("/tmp/b.json".into());
+        let soon = Instant::now() + Duration::from_secs(9 * 60);
+        assert!(jobs.take_pick_at(&b, soon).is_some());
+    }
+
+    #[test]
+    fn close_running_marks_the_jobs_stopped_by_the_connection() {
+        let jobs = Jobs::default();
+        let (a, ta) = jobs.start();
+        let (b, _tb) = jobs.start();
+        jobs.cancel(&b);
+        assert_eq!(jobs.close_running(), 2);
+        assert!(ta.is_cancelled());
+        assert!(jobs.stopped_by_close(&a));
+        assert!(!jobs.stopped_by_close("nope"));
     }
 
     #[test]

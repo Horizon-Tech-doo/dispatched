@@ -125,6 +125,12 @@ fn now_rfc3339() -> String {
 /// Run `work` and record one activity entry: `describe(&value)` on success,
 /// `failed` plus the error on failure. A cancelled operation is the user's choice,
 /// not a failure: it is recorded as its message ("Sign-in cancelled") with no error.
+/// A cancel by the user (`cancelled`) or a stop because the connection closed (`stopped`): the
+/// operation ended as asked, so it is logged as its message, not as a failure.
+fn is_stop(e: &CommandError) -> bool {
+    matches!(e.kind, "cancelled" | "stopped")
+}
+
 pub async fn tracked<T>(
     ev: &dyn Events,
     failed: &str,
@@ -136,7 +142,8 @@ pub async fn tracked<T>(
     let duration_ms = started.elapsed().as_millis() as u64;
     let (action, error) = match &result {
         Ok(v) => (describe(v), None),
-        Err(e) if e.kind == "cancelled" => (e.message.trim_end_matches('.').to_string(), None),
+        // Cancelled by the user, or stopped because the connection closed: not failures.
+        Err(e) if is_stop(e) => (e.message.trim_end_matches('.').to_string(), None),
         Err(e) => (
             failed.to_string(),
             Some(ActivityError {
@@ -164,7 +171,7 @@ pub async fn tracked_failures<T>(
     let started = Instant::now();
     let result = work.await;
     if let Err(e) = &result
-        && e.kind != "cancelled"
+        && !is_stop(e)
     {
         ev.activity(ActivityEntry {
             at: now_rfc3339(),

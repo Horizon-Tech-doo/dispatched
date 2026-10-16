@@ -259,7 +259,7 @@ describe("M1c commands on the mock", () => {
     await expect(commands.jobReveal(job.id)).rejects.toMatchObject({ kind: "not_found" });
   });
 
-  it("cancels running exports when the connection closes", async () => {
+  it("stops running exports when the connection closes, as stopped (not cancelled)", async () => {
     const slow = createMockTransport("export-slow", 0);
     setTransport(slow);
     await commands.connect("p-logistics");
@@ -270,7 +270,7 @@ describe("M1c commands on the mock", () => {
     expect(done[0]).toMatchObject({ type: "started", total: 3 });
     await commands.disconnect();
     await new Promise((r) => setTimeout(r, 20));
-    expect(done.at(-1)).toMatchObject({ type: "finished", error: { kind: "cancelled" } });
+    expect(done.at(-1)).toMatchObject({ type: "finished", error: { kind: "stopped", message: "Export stopped: the connection closed." } });
   });
 
   it("lists sessions, rules, details and the dashboard", async () => {

@@ -422,13 +422,19 @@ pub fn start(
     tokio::spawn(async move {
         // The activity log names the file; the job row has it on its own line.
         let failed = format!("{} to {} failed", plan.title, plan.file_name);
-        let result = tracked(
-            &*ev,
-            &failed,
-            run(plan, &*source, &cancel, &*ev, &job_id),
-            |s| s.summary.clone(),
-        )
-        .await;
+        let work = async {
+            run(plan, &*source, &cancel, &*ev, &job_id)
+                .await
+                .map_err(|e| {
+                    // Cancelled because the connection closed, not by the user: say so.
+                    if e.kind == "cancelled" && jobs.stopped_by_close(&job_id) {
+                        CommandError::new("stopped", "Export stopped: the connection closed.")
+                    } else {
+                        e
+                    }
+                })
+        };
+        let result = tracked(&*ev, &failed, work, |s| s.summary.clone()).await;
         match result {
             Ok(s) => {
                 jobs.finish(&job_id, Some(s.path.clone()));
@@ -1269,5 +1275,72 @@ mod tests {
         let log = ev.activity.lock().unwrap();
         assert_eq!(log[0].action, "Export cancelled");
         assert!(log[0].error.is_none());
+    }
+
+    /// A job mid-export: started on a slow source, with its first page written.
+    async fn mid_export(dir: &Path) -> (Arc<Recorder>, Arc<Jobs>, String) {
+        let ev = Arc::new(Recorder::default());
+        let jobs = Arc::new(Jobs::default());
+        let pick = remember_pick(&jobs, dir.join("out.json")).pick;
+        let started = start(
+            &jobs,
+            Arc::new(Slow(100_000)),
+            ev.clone(),
+            request(&pick, all()),
+        )
+        .unwrap();
+        for _ in 0..400 {
+            if ev
+                .jobs
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|j| matches!(j, JobEvent::Progress { .. }))
+            {
+                return (ev, jobs, started.id);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("the job never wrote a page");
+    }
+
+    #[tokio::test]
+    async fn a_job_stopped_by_a_closing_connection_says_so_not_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ev, jobs, _id) = mid_export(dir.path()).await;
+        assert_eq!(jobs.close_running(), 1);
+        let JobEvent::Finished { error, .. } = finished(&ev).await else {
+            unreachable!()
+        };
+        assert_eq!(
+            error.map(|e| (e.kind, e.message)),
+            Some((
+                "stopped".into(),
+                "Export stopped: the connection closed.".into()
+            ))
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        let log = ev.activity.lock().unwrap();
+        assert_eq!(log[0].action, "Export stopped: the connection closed");
+        assert!(log[0].error.is_none(), "not a failure");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn app_exit_stops_running_exports_and_waits_until_their_temp_files_are_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_ev, jobs, _id) = mid_export(dir.path()).await;
+        assert!(
+            std::fs::read_dir(dir.path()).unwrap().count() > 0,
+            "the temp file exists while the job runs"
+        );
+        assert!(
+            jobs.stop_all_and_wait(std::time::Duration::from_secs(2))
+                .await
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "no temp file is left behind"
+        );
     }
 }

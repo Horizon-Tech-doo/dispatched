@@ -37,9 +37,10 @@ function ActivityLog() {
       data-selectable
     >
       {entries.map((e) => {
-        // A cancelled operation is the user's choice, not a failure: neutral line, no alert mark.
+        // A cancelled operation is the user's choice, not a failure: neutral line, no alert mark. So is a job stopped
+        // because its connection closed.
         const cancelled = e.error?.kind === "cancelled";
-        const failed = e.error != null && !cancelled;
+        const failed = e.error != null && !cancelled && e.error.kind !== "stopped";
         return (
           <div key={e.id} className="grid grid-cols-[64px_minmax(0,1fr)_72px] gap-x-3 px-3.5 leading-[18px]">
             <span className="text-faint">{formatClock(e.at)}</span>
@@ -94,7 +95,9 @@ function JobRow({ j }: { j: Job }) {
   const [cancelling, setCancelling] = useState(false);
   const [revealFailed, setRevealFailed] = useState(false);
   const cancelled = j.error?.kind === "cancelled";
-  const failed = j.error != null && !cancelled;
+  // Stopped because its connection closed (disconnect, another connection, sign-out): not the user's cancel, not a failure.
+  const stopped = j.error?.kind === "stopped";
+  const failed = j.error != null && !cancelled && !stopped;
   const running = !j.finished;
   const manager = fileManagerName();
   const pct = j.total ? Math.min(100, (j.done / j.total) * 100) : 0;
@@ -108,7 +111,8 @@ function JobRow({ j }: { j: Job }) {
     commands.jobReveal(j.id).catch(() => setRevealFailed(true));
   };
   const retry = j.retry;
-  const state = running ? counts(j) : cancelled ? "Cancelled" : failed ? counts(j) : "Done";
+  const state = running ? counts(j) : cancelled ? "Cancelled" : stopped ? "Stopped" : failed ? counts(j) : "Done";
+  const sofar = j.total != null ? counts(j) : `${formatNumber(j.done)} written`;
   const missing = j.missing ?? 0;
   return (
     <li className="grid grid-cols-1 gap-y-1.5 px-3.5 py-2 text-12 @[560px]:grid-cols-[minmax(200px,1fr)_minmax(120px,200px)_max-content] @[560px]:items-start @[560px]:gap-x-4">
@@ -127,7 +131,12 @@ function JobRow({ j }: { j: Job }) {
         )}
         {cancelled && (
           <span className="block text-11 text-muted">
-            {j.done > 0 ? `Cancelled after ${j.total != null ? counts(j) : `${formatNumber(j.done)} written`}.` : "Cancelled."} No file was written.
+            {j.done > 0 ? `Cancelled after ${sofar}.` : "Cancelled."} No file was written.
+          </span>
+        )}
+        {stopped && (
+          <span className="block text-11 text-muted">
+            {j.done > 0 ? `Stopped: the connection closed after ${sofar}.` : "Stopped: the connection closed."} No file was written.
           </span>
         )}
         {failed && j.error && (
