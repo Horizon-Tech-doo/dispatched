@@ -33,7 +33,18 @@ export function createActivityStore() {
   };
 }
 
-export interface Job { id: string; title: string; done: number; total: number | null; error: ActivityError | null; finished: boolean }
+export interface Job {
+  id: string;
+  title: string;
+  done: number;
+  total: number | null;
+  error: ActivityError | null;
+  finished: boolean;
+  /** What a finished job did, e.g. `Exported 37 messages to x.json`; null while running and after a failure. */
+  summary: string | null;
+  /** The file a finished export wrote, in full (for Show in folder). */
+  output: string | null;
+}
 
 export function createJobStore() {
   const s = createStore<Job>();
@@ -41,12 +52,12 @@ export function createJobStore() {
     apply(e: JobEvent) {
       const jobs = s.get();
       if (e.type === "started") {
-        const job: Job = { id: e.id, title: e.title, done: 0, total: e.total, error: null, finished: false };
+        const job: Job = { id: e.id, title: e.title, done: 0, total: e.total, error: null, finished: false, summary: null, output: null };
         // A job that starts again under the same id replaces the old one.
         return s.set(jobs.some((j) => j.id === e.id) ? jobs.map((j) => (j.id === e.id ? job : j)) : [...jobs, job]);
       }
       if (!jobs.some((j) => j.id === e.id)) return;
-      s.set(jobs.map((j) => (j.id !== e.id ? j : e.type === "progress" ? { ...j, done: e.done, total: e.total } : { ...j, finished: true, error: e.error })));
+      s.set(jobs.map((j) => (j.id !== e.id ? j : e.type === "progress" ? { ...j, done: e.done, total: e.total } : { ...j, finished: true, error: e.error, summary: e.summary, output: e.output })));
     },
     all: s.get,
     clear: () => s.set([]),

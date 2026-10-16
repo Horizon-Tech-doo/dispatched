@@ -106,6 +106,31 @@ describe("Drawer", () => {
     expect(fill(drawer)).toBe("40%");
   });
 
+  it("finished jobs keep their summary and offer Show in folder", async () => {
+    const { mock } = renderShell("default", { last_profile: "p-logistics" });
+    const drawer = await screen.findByRole("region", { name: "Jobs and activity" });
+    act(() => jobStore.apply({ type: "started", id: "j1", title: "Export x", total: 2 }));
+    act(() => within(drawer).getByRole("tab", { name: /Jobs/ }).focus());
+    // Running: Cancel (named by its job), no folder button yet.
+    expect(within(drawer).getByRole("button", { name: "Cancel Export x" })).toBeInTheDocument();
+    expect(within(drawer).queryByRole("button", { name: "Show in folder" })).toBeNull();
+    act(() => jobStore.apply({ type: "finished", id: "j1", error: null, summary: "Exported 2 messages to x.json", output: "/tmp/x.json" }));
+    expect(within(drawer).getByText("Exported 2 messages to x.json")).toBeInTheDocument();
+    expect(within(drawer).queryByRole("button", { name: /^Cancel/ })).toBeNull();
+    await userEvent.click(within(drawer).getByRole("button", { name: "Show in folder" }));
+    expect(mock.calls.some((c) => c.cmd === "job_reveal" && (c.args as { id: string }).id === "j1")).toBe(true);
+  });
+
+  it("a failed reveal says so beside the job", async () => {
+    renderShell("default", { last_profile: "p-logistics" });
+    const drawer = await screen.findByRole("region", { name: "Jobs and activity" });
+    act(() => jobStore.apply({ type: "started", id: "gone", title: "Export x", total: 2 }));
+    act(() => jobStore.apply({ type: "finished", id: "gone", error: null, summary: "Exported 2 messages to x.json", output: "/tmp/x.json" }));
+    act(() => within(drawer).getByRole("tab", { name: /Jobs/ }).focus());
+    await userEvent.click(within(drawer).getByRole("button", { name: "Show in folder" }));
+    expect(await within(drawer).findByText(/Couldn't show the file/)).toBeInTheDocument();
+  });
+
   it("offers Show activity with the running job count whenever the drawer is hidden", async () => {
     renderShell("default", { last_profile: "p-logistics" });
     const drawer = await screen.findByRole("region", { name: "Jobs and activity" });

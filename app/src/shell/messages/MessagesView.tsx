@@ -1,7 +1,10 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { Download } from "lucide-react";
+import { useId, useMemo, useRef, useState } from "react";
 import { TAIL_MAX, normalizeFilter, usePeekStream, type EntityCounts, type FilterSpec, type MessageSummary, type PeekView } from "@/engine";
-import { Button, DataGrid, EmptyState, Panel, PanelGroup, Problem, ResizeHandle, formatNumber, rowHeight } from "@/ui";
+import {
+  Button, DataGrid, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, EmptyState, Panel, PanelGroup, Problem, ResizeHandle, formatNumber, rowHeight,
+} from "@/ui";
 import { yearOf } from "../time";
 import { useShell } from "../context";
 import type { EntityTab } from "../state";
@@ -43,14 +46,11 @@ export function MessagesView({
   view,
   counts,
   requiresSession,
-  exportMenu,
 }: {
   tab: EntityTab;
   view: PeekView;
   counts: EntityCounts | null;
   requiresSession: boolean;
-  /** Slot the export feature fills. */
-  exportMenu?: ReactNode;
 }) {
   const { conn, prefs, shell, dispatch, openSheet } = useShell();
   const profileId = conn.profileId;
@@ -164,6 +164,26 @@ export function MessagesView({
   const listedView = LISTED[view];
   const listed = counts && listedView ? listedView.count(counts) : 0;
 
+  // Export: the whole view (with its filter and session), the selected rows, or one message from the detail pane.
+  // The sheet gets what the view holds now; the engine reads the messages again when the export runs.
+  const exportSheet = (selected: number[]) =>
+    openSheet({ kind: "export", entity: tab.id, view, filter: vs.filter, selected, total: counts && listedView ? listedView.count(counts) : null });
+  const selectedSequences = () => [...sel.ids].map(Number).sort((a, b) => a - b);
+  const exportMenu = (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="quiet" disabled={!profileId}>
+          <Download aria-hidden="true" className="text-icon" />
+          Export
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuItem onSelect={() => exportSheet([])}>Export all…</DropdownMenuItem>
+        {sel.ids.size > 0 && <DropdownMenuItem onSelect={() => exportSheet(selectedSequences())}>Export {formatNumber(sel.ids.size)} selected…</DropdownMenuItem>}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <Toolbar
@@ -258,6 +278,7 @@ export function MessagesView({
                   sequence={sel.focus !== null ? Number(sel.focus) : null}
                   onClose={closeDetail}
                   onPeekAgain={restart}
+                  onExport={(sequence) => exportSheet([sequence])}
                   shownProps={shownProps}
                   onShowColumn={(name) => {
                     const id = propColumn(name);

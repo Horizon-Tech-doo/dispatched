@@ -1,5 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type Dispatch, type ReactNode } from "react";
+import type { FilterSpec, PeekView } from "@/engine";
 import { useTheme } from "@/ui";
 import { startEventCapture } from "./drawer/activity";
 import { useConnectionController, type ConnectionController } from "./connection";
@@ -12,6 +13,9 @@ export type SheetState =
   | { kind: "profiles" }
   | { kind: "settings" }
   | { kind: "update" }
+  /** Export messages of one view: `selected` are the grid's selected sequence numbers (or one message's), `total` the
+   *  view's listed count (null when unknown). */
+  | { kind: "export"; entity: string; view: PeekView; filter: FilterSpec; selected: number[]; total: number | null }
   | null;
 
 interface ShellContextValue {

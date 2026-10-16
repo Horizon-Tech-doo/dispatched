@@ -130,6 +130,57 @@ function detailShots(): Shot[] {
   ];
 }
 
+/** The export sheet and the Jobs tab. */
+function exportShots(): Shot[] {
+  const INVOICES = (scenario = "default") => seedTab("invoice-generate", "queue", "dead-letter", scenario);
+  const openExport = async (page: Page, item: string | RegExp) => {
+    await page.getByRole("button", { name: "Export", exact: true }).click();
+    await page.getByRole("menuitem", { name: item }).click();
+    await page.getByRole("dialog", { name: "Export messages" }).waitFor();
+  };
+  const jobs = (p: Page) => p.getByRole("region", { name: "Jobs and activity" });
+  return [
+    {
+      // Three rows selected, so both scopes are offered.
+      name: "export-sheet",
+      path: INVOICES(),
+      ready: (p) => peekStatus(p).getByText(/37 messages/),
+      prepare: async (page) => {
+        await page.getByRole("grid").focus();
+        await page.keyboard.press("Home");
+        await page.keyboard.press("Shift+ArrowDown");
+        await page.keyboard.press("Shift+ArrowDown");
+        await openExport(page, /^Export 3 selected/);
+      },
+      holds: (p) => p.getByRole("dialog", { name: "Export messages" }),
+      viewportOnly: true,
+    },
+    {
+      name: "jobs-running",
+      path: INVOICES("export-slow"),
+      ready: (p) => peekStatus(p).getByText(/37 messages/),
+      prepare: async (page) => {
+        await openExport(page, "Export all…");
+        await page.getByRole("dialog", { name: "Export messages" }).getByRole("button", { name: "Choose file and export" }).click();
+        await jobs(page).getByRole("button", { name: /^Cancel Export invoice-generate/ }).waitFor();
+        // Let a few messages through so the bar and the count show progress.
+        await jobs(page).getByText(/^\d+ \/ 37$/).filter({ hasText: /^([3-9]|\d\d) \/ 37$/ }).waitFor();
+      },
+    },
+    {
+      name: "jobs-done",
+      path: INVOICES(),
+      ready: (p) => peekStatus(p).getByText(/37 messages/),
+      prepare: async (page) => {
+        await openExport(page, "Export all…");
+        await page.getByRole("dialog", { name: "Export messages" }).getByRole("button", { name: "Choose file and export" }).click();
+        await jobs(page).getByText(/^Exported 37 messages to /).waitFor();
+        await jobs(page).getByRole("button", { name: "Show in folder" }).waitFor();
+      },
+    },
+  ];
+}
+
 export const shots: Shot[] = [
   { name: "catalogue", path: "/#catalogue", scroll: true },
   {
@@ -806,6 +857,7 @@ export const shots: Shot[] = [
     },
   },
   ...detailShots(),
+  ...exportShots(),
 ];
 
 for (const colorScheme of ["dark", "light"] as const) {

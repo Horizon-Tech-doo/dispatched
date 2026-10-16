@@ -1,8 +1,9 @@
 import { ChevronDown, CircleAlert } from "lucide-react";
-import { useLayoutEffect, useRef } from "react";
-import { EmptyState, Hint, IconButton, Tabs, TabsContent, TabsList, TabsTrigger, formatClock, formatDuration, formatNumber } from "@/ui";
+import { useLayoutEffect, useRef, useState } from "react";
+import { commands } from "@/engine";
+import { Button, EmptyState, Hint, IconButton, Tabs, TabsContent, TabsList, TabsTrigger, formatClock, formatDuration, formatNumber } from "@/ui";
 import { useShell } from "../context";
-import { useActivity, useJobs } from "./activity";
+import { useActivity, useJobs, type Job } from "./activity";
 
 function ActivityLog() {
   const entries = useActivity();
@@ -59,38 +60,78 @@ function ActivityLog() {
   );
 }
 
+/** One job: its title and summary, a progress line, and what can be done with it (Cancel while it runs, Show in
+ *  folder once an export has written its file). */
+function JobRow({ j }: { j: Job }) {
+  const [cancelling, setCancelling] = useState(false);
+  const [revealFailed, setRevealFailed] = useState(false);
+  const cancelled = j.error?.kind === "cancelled";
+  const failed = j.error != null && !cancelled;
+  // Full only when it finished without an error, even if it ended short of its total; otherwise what was done.
+  const pct = j.finished && !j.error ? 100 : j.total ? Math.min(100, (j.done / j.total) * 100) : 0;
+  const counts = `${formatNumber(j.done)}${j.total ? ` / ${formatNumber(j.total)}` : ""}`;
+  const cancel = () => {
+    setCancelling(true);
+    // False: the job had already ended, and its finish event is on its way. An error: it is still running.
+    commands.jobCancel(j.id).catch(() => setCancelling(false));
+  };
+  const reveal = () => {
+    setRevealFailed(false);
+    commands.jobReveal(j.id).catch(() => setRevealFailed(true));
+  };
+  return (
+    <li className="grid grid-cols-[minmax(200px,1fr)_200px_max-content] items-start gap-x-4 px-3.5 py-2 text-12">
+      <span className="min-w-0">
+        <span className="block truncate">{j.title}</span>
+        {j.summary && !j.error && (
+          <span className="block truncate text-11 text-muted" title={j.summary}>
+            {j.summary}
+          </span>
+        )}
+        {failed && j.error && (
+          <span className="mt-0.5 flex items-start gap-1.5 font-mono text-11 text-fg">
+            <CircleAlert aria-hidden="true" className="mt-0.5 size-3 shrink-0 text-accent" />
+            <span className="min-w-0 break-words">{j.error.message}</span>
+          </span>
+        )}
+        {revealFailed && (
+          <span role="alert" className="mt-0.5 flex items-start gap-1.5 text-11 text-fg">
+            <CircleAlert aria-hidden="true" className="mt-0.5 size-3 shrink-0 text-accent" />
+            <span className="min-w-0">Couldn&apos;t show the file. It may have been moved or deleted.</span>
+          </span>
+        )}
+      </span>
+      <span className="mt-[7px] block h-[3px] bg-line" aria-hidden="true">
+        <span className="block h-[3px] bg-fg" style={{ width: `${pct}%` }} />
+      </span>
+      <span className="flex items-center justify-end gap-3">
+        <span className="min-w-[96px] whitespace-nowrap text-right font-mono text-11 tabular-nums text-muted">
+          {cancelled ? "Cancelled" : failed ? counts : j.finished ? "Done" : counts}
+        </span>
+        {!j.finished && (
+          <Button size="sm" className="h-[18px]" disabled={cancelling} onClick={cancel} aria-label={`Cancel ${j.title}`}>
+            {cancelling ? "Cancelling…" : "Cancel"}
+          </Button>
+        )}
+        {j.finished && !j.error && j.output && (
+          <Button size="sm" className="h-[18px]" onClick={reveal}>
+            Show in folder
+          </Button>
+        )}
+      </span>
+    </li>
+  );
+}
+
 function JobsList() {
   const jobs = useJobs();
   if (!jobs.length)
     return <EmptyState title="No jobs" body="Exports and bulk operations show their progress here, and keep running while you work." />;
   return (
     <ul className="m-0 list-none p-0">
-      {jobs.map((j) => {
-        const cancelled = j.error?.kind === "cancelled";
-        const failed = j.error != null && !cancelled;
-        // Full only when it finished without an error, even if it ended short of its total; otherwise what was done.
-        const pct = j.finished && !j.error ? 100 : j.total ? Math.min(100, (j.done / j.total) * 100) : 0;
-        const counts = `${formatNumber(j.done)}${j.total ? ` / ${formatNumber(j.total)}` : ""}`;
-        return (
-          <li key={j.id} className="grid grid-cols-[minmax(200px,1fr)_200px_max-content] items-start gap-x-4 px-3.5 py-2 text-12">
-            <span className="min-w-0">
-              <span className="block truncate">{j.title}</span>
-              {failed && j.error && (
-                <span className="mt-0.5 flex items-start gap-1.5 font-mono text-11 text-fg">
-                  <CircleAlert aria-hidden="true" className="mt-0.5 size-3 shrink-0 text-accent" />
-                  <span className="min-w-0 break-words">{j.error.message}</span>
-                </span>
-              )}
-            </span>
-            <span className="mt-[7px] block h-[3px] bg-line" aria-hidden="true">
-              <span className="block h-[3px] bg-fg" style={{ width: `${pct}%` }} />
-            </span>
-            <span className="min-w-[96px] whitespace-nowrap text-right font-mono text-11 tabular-nums text-muted">
-              {cancelled ? "Cancelled" : failed ? counts : j.finished ? "Done" : counts}
-            </span>
-          </li>
-        );
-      })}
+      {jobs.map((j) => (
+        <JobRow key={j.id} j={j} />
+      ))}
     </ul>
   );
 }

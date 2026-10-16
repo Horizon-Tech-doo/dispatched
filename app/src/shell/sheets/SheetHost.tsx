@@ -1,4 +1,5 @@
 import { useShell } from "../context";
+import { ExportSheet } from "../messages/ExportSheet";
 import { ProfileSheet } from "./ProfileSheet";
 import { ProfilesSheet } from "./ProfilesSheet";
 import { SettingsSheet } from "./SettingsSheet";
@@ -17,6 +18,8 @@ export function SheetHost() {
       return <SettingsSheet />;
     case "update":
       return <UpdateSheet />;
+    case "export":
+      return <ExportSheet {...sheet} />;
     default:
       return null;
   }
