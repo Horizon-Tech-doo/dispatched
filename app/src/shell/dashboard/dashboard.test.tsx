@@ -123,7 +123,7 @@ describe("dashboard", () => {
     const text = await navigator.clipboard.readText();
     expect(await screen.findByRole("button", { name: "Copied" })).toBeInTheDocument();
     expect(text.split("\n")[0]).toBe("Entity\tTopic\tKind\tStatus\tActive\tDead-letter\tScheduled\tTransfer\tTransfer DLQ");
-    expect(text).toContain("invoice-generate\t\tqueue\tActive\t1284\t37\t0\t0\t0");
+    expect(text).toContain("invoice-generate\t\tqueue\tActive\t1284\t37\t3\t0\t0");
   });
 
   it("copies the rows in the order the grid shows them", async () => {

@@ -27,6 +27,7 @@ export function Field({
   error,
   detail,
   inline,
+  hideLabel,
   children,
 }: {
   label: string;
@@ -36,6 +37,8 @@ export function Field({
   detail?: ReactNode;
   /** The label sits left of the control, in a column this many px wide, and the messages line up with the control. */
   inline?: number;
+  /** The label stays in the DOM, for screen readers and as the control's name, but is not drawn. */
+  hideLabel?: boolean;
   children: (ids: FieldControlProps) => ReactNode;
 }) {
   const id = useId();
@@ -60,7 +63,7 @@ export function Field({
     );
   return (
     <div className="flex flex-col gap-1">
-      <label htmlFor={id} className="text-12 font-semibold text-muted">
+      <label htmlFor={id} className={hideLabel ? "sr-only" : "text-12 font-semibold text-muted"}>
         {label}
       </label>
       {children({ id, "aria-describedby": describedBy, "aria-invalid": error ? true : undefined })}

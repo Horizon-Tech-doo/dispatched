@@ -420,6 +420,68 @@ function dashboardShots(): Shot[] {
   ];
 }
 
+/** Tree counts, highlight swatches, copy actions and the per-connection explorer options. */
+function explorerShots(): Shot[] {
+  const rules = [
+    { id: "r1", color: "rose", match: { kind: "count", count: "dead-letter", atLeast: 200 } },
+    { id: "r2", color: "blue", match: { kind: "name", pattern: "^invoice-" } },
+  ];
+  const path = (explorer: Record<string, unknown>, treeSize = 18) =>
+    `/?scenario=default&autoconnect=p-logistics&seed=${encodeURIComponent(
+      JSON.stringify({
+        "shell:p-logistics": {
+          tabs: [], activeTab: null, expanded: ["group:queues", "group:topics", "t:shipment-events"], selected: null,
+          layout: { treeSize, drawerOpen: false, drawerSize: 18, drawerTab: "activity" },
+          explorer,
+        },
+      }),
+    )}`;
+  const tree = (p: Page) => p.getByRole("tree", { name: "Namespace" });
+  const ready = (p: Page) => tree(p).getByRole("treeitem", { name: "tracking-sync" });
+  return [
+    {
+      // Rules mark returns-intake and tracking-sync (dead letters at 200 or more) and invoice-generate (by name); counts are
+      // active, scheduled and dead-letter. The swatch is the only colour apart from the amber dead-letter numbers.
+      name: "tree-highlights",
+      path: path({ counts: ["active", "scheduled", "dead-letter"], rules, openOn: "overview" }),
+      ready,
+    },
+    {
+      name: "tree-menu-copy",
+      path: path({ counts: ["active", "dead-letter"], rules: [], openOn: "overview" }),
+      ready,
+      prepare: async (page) => {
+        await tree(page).getByRole("treeitem", { name: "invoice-generate" }).click({ button: "right" });
+      },
+      holds: (p) => p.getByRole("menu"),
+      viewportOnly: true,
+    },
+    {
+      // Two rules, the second with a pattern that does not parse: the sheet says why and Save waits.
+      name: "explorer-options",
+      path: path({
+        counts: ["active", "scheduled", "dead-letter"],
+        rules: [rules[0], { id: "r3", color: "violet", match: { kind: "name", pattern: "^(returns" } }],
+        openOn: "dead-letter",
+      }),
+      ready,
+      prepare: async (page) => {
+        await page.getByRole("button", { name: "Explorer options" }).click();
+        const sheet = page.getByRole("dialog", { name: "Explorer options for Logistics" });
+        await sheet.getByText(/Not a valid pattern/).waitFor();
+      },
+      holds: (p) => p.getByRole("dialog", { name: "Explorer options for Logistics" }),
+      viewportOnly: true,
+    },
+    {
+      // A narrow tree: counts never truncate, the names give way.
+      name: "tree-highlights-narrow",
+      path: path({ counts: ["active", "scheduled", "dead-letter"], rules, openOn: "overview" }, 11),
+      ready,
+    },
+  ];
+}
+
 export const shots: Shot[] = [
   { name: "catalogue", path: "/#catalogue", scroll: true },
   {
@@ -1099,6 +1161,7 @@ export const shots: Shot[] = [
   ...overviewShots(),
   ...sessionsAndRulesShots(),
   ...dashboardShots(),
+  ...explorerShots(),
 ];
 
 for (const colorScheme of ["dark", "light"] as const) {

@@ -3,6 +3,7 @@ import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } fr
 import { commands, useEntityDetails, useProfiles, useSubscriptionsFor, type EntityCounts, type EntityDetails, type SubscriptionInfo } from "@/engine";
 import { Button, CountBadge, EmptyState, Hint, IconButton, Problem, Skeleton, SkeletonRows, cn, formatBytes, formatClock, formatNumber } from "@/ui";
 import { useShell } from "../context";
+import { copyFailureBody } from "../copyFailure";
 import { entityIdOf } from "../entityId";
 import { deadLetterUrl, entityUrl } from "../entityUrls";
 import type { EntityTab } from "../state";
@@ -90,14 +91,6 @@ function Address({ label, copyLabel, value }: { label: string; copyLabel: string
       )}
     </div>
   );
-}
-
-/** What went wrong with the copy, in plain words; the engine's own sentence stays as the detail. */
-function copyFailureBody(message: string): string {
-  if (/only works for/.test(message)) return "This connection's string is scoped to another entity, so its key can't open this one. Use a connection string for the whole namespace.";
-  if (/no stored connection string/.test(message)) return "Edit the connection and paste the connection string again.";
-  if (/not a valid entity name/.test(message)) return "This entity's name can't go into a connection string. Copy the URL instead.";
-  return "Try again. If it keeps failing, the detail below says why.";
 }
 
 function ConnectionStringCopy({ profileId, entity, eligible, entra }: { profileId: string | null; entity: string; eligible: boolean; entra: boolean }) {

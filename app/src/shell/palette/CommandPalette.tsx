@@ -9,12 +9,13 @@ import { buildCommands, paletteHint, type PaletteCommand } from "./commands";
 
 /** Up to this many topics the palette loads every topic's subscriptions so they can be searched. */
 const MAX_PREFETCH_TOPICS = 50;
-const GROUPS = ["Go to", "Connections", "App"] as const;
+const GROUPS = ["Go to", "This entity", "Connections", "App"] as const;
 
 export function CommandPalette() {
-  const { paletteOpen, setPaletteOpen, conn, shell, dispatch, openSheet, refresh, setPrefs } = useShell();
+  const { paletteOpen, setPaletteOpen, conn, shell, dispatch, openSheet, refresh, setPrefs, copyConnectionString } = useShell();
   const connected = conn.status === "connected";
   const profiles = useProfiles().data ?? [];
+  const active = profiles.find((p) => p.id === conn.profileId);
   const listing = useEntities(connected ? conn.profileId : null).data;
   const topics = listing?.topics ?? [];
   const searchAll = topics.length <= MAX_PREFETCH_TOPICS;
@@ -32,6 +33,15 @@ export function CommandPalette() {
     subs,
     profiles,
     activeProfileId: connected ? conn.profileId : null,
+    activeTab: (() => {
+      const t = shell.tabs.find((x) => x.id === shell.activeTab);
+      return t && t.kind !== "dashboard" ? { id: t.id, kind: t.kind } : null;
+    })(),
+    host: active?.host ?? conn.view?.host ?? "",
+    // Until the profile list is known an Entra profile can't be told from the others: offer no connection string.
+    entra: active === undefined || active.auth.kind === "entra",
+    copy: (text) => void navigator.clipboard?.writeText(text).catch(() => {}),
+    copyConnectionString: (id) => void copyConnectionString(id),
     open: (tab) => {
       dispatch({ type: "open", tab });
       // Show the entity in the tree too: open the rows above it and select its row. The dashboard has no row.

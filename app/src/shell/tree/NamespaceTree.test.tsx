@@ -236,4 +236,113 @@ describe("NamespaceTree", () => {
     expect(within(menu).getByRole("menuitem", { name: "Open" })).toHaveAttribute("aria-disabled", "true");
     expect(within(menu).getByRole("menuitem", { name: "Refresh" })).not.toHaveAttribute("aria-disabled", "true");
   });
+
+  it("shows the chosen counts and a highlight swatch from the connection's rules", async () => {
+    renderShell("default", {
+      last_profile: "p-logistics",
+      "shell:p-logistics": {
+        tabs: [], activeTab: null, expanded: ["group:queues"], selected: null,
+        layout: { treeSize: 18, drawerOpen: false, drawerSize: 18, drawerTab: "activity" },
+        explorer: { counts: ["active", "scheduled", "dead-letter"], rules: [{ id: "r", color: "rose", match: { kind: "count", count: "dead-letter", atLeast: 100 } }], openOn: "dead-letter" },
+      },
+    });
+    const t = await tree();
+    const returns = await within(t).findByRole("treeitem", { name: /returns-intake/ });
+    expect(returns.querySelector('[style*="--label-rose"]')).not.toBeNull();
+    expect(within(returns).getByText("highlighted")).toBeInTheDocument();
+    expect(within(t).getByRole("treeitem", { name: /invoice-generate/ }).querySelector('[style*="--label-"]')).toBeNull();
+    await userEvent.dblClick(within(t).getByRole("treeitem", { name: /label-print/ }));
+    expect(await screen.findByRole("tab", { name: /Dead-letter/, selected: true })).toBeInTheDocument();
+  });
+
+  it("shows only the counts that are chosen, dead letters last and scheduled only above zero", async () => {
+    renderShell("default", {
+      last_profile: "p-logistics",
+      "shell:p-logistics": {
+        tabs: [], activeTab: null, expanded: ["group:queues"], selected: null,
+        layout: { treeSize: 18, drawerOpen: false, drawerSize: 18, drawerTab: "activity" },
+        explorer: { counts: ["scheduled", "dead-letter"], rules: [], openOn: "overview" },
+      },
+    });
+    const t = await tree();
+    const row = await within(t).findByRole("treeitem", { name: "invoice-generate" });
+    expect(within(row).queryByText("1,284")).not.toBeInTheDocument();
+    expect(within(row).getByText("37").className).toContain("text-accent");
+    const quiet = within(t).getByRole("treeitem", { name: "label-print" });
+    expect(quiet.textContent).toBe("label-print");
+  });
+
+  it("highlights by name for topics and for pinned entities, whose counts are unknown", async () => {
+    renderShell("default", {
+      last_profile: "p-logistics",
+      "shell:p-logistics": {
+        tabs: [], activeTab: null, expanded: ["group:topics"], selected: null,
+        layout: { treeSize: 18, drawerOpen: false, drawerSize: 18, drawerTab: "activity" },
+        explorer: { counts: ["active"], rules: [{ id: "r", color: "violet", match: { kind: "name", pattern: "^shipment" } }], openOn: "overview" },
+      },
+    });
+    const t = await tree();
+    const topic = await within(t).findByRole("treeitem", { name: "shipment-events" });
+    expect(topic.querySelector('[style*="--label-violet"]')).not.toBeNull();
+  });
+
+  it("copies the URL and asks the engine for the connection string", async () => {
+    const user = userEvent.setup(); // installs the clipboard stub
+    const { mock } = renderShell("default", { last_profile: "p-logistics" });
+    const t = await tree();
+    const menuOn = async (name: string | RegExp) => fireEvent.contextMenu(await within(t).findByRole("treeitem", { name }));
+    await menuOn(/invoice-generate/);
+    await user.click(await screen.findByRole("menuitem", { name: "Copy URL" }));
+    expect(await navigator.clipboard.readText()).toBe("sb://sb-logistics-prod.servicebus.windows.net/invoice-generate");
+    await menuOn(/invoice-generate/);
+    await user.click(await screen.findByRole("menuitem", { name: "Copy dead-letter URL" }));
+    expect(await navigator.clipboard.readText()).toBe("sb://sb-logistics-prod.servicebus.windows.net/invoice-generate/$DeadLetterQueue");
+    await menuOn(/invoice-generate/);
+    await user.click(await screen.findByRole("menuitem", { name: "Copy connection string" }));
+    await waitFor(() => expect(mock.calls.some((c) => c.cmd === "copy_entity_connection_string")).toBe(true));
+    // The string never reaches the webview: only the outcome is shown.
+    expect(await screen.findByText(/Copied the connection string for invoice-generate/)).toBeInTheDocument();
+    expect(screen.queryByText(/SharedAccessKey/)).toBeNull();
+  });
+
+  it("says why the connection string could not be copied", async () => {
+    const user = userEvent.setup();
+    renderShell("copy-scoped", { last_profile: "p-logistics" });
+    const t = await tree();
+    fireEvent.contextMenu(await within(t).findByRole("treeitem", { name: /invoice-generate/ }));
+    await user.click(await screen.findByRole("menuitem", { name: "Copy connection string" }));
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).getByText("Couldn't copy the connection string")).toBeInTheDocument();
+    expect(within(alert).getByText(/scoped to another entity/)).toBeInTheDocument();
+    await user.click(within(alert).getByRole("button", { name: "Dismiss" }));
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("offers no dead-letter URL for a topic", async () => {
+    renderShell("default", { last_profile: "p-logistics" });
+    const t = await tree();
+    fireEvent.contextMenu(await within(t).findByRole("treeitem", { name: "shipment-events" }));
+    expect(await screen.findByRole("menuitem", { name: "Copy dead-letter URL" })).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByRole("menuitem", { name: "Copy URL" })).not.toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("disables the connection string on an Entra connection and says why", async () => {
+    renderShell("default", { last_profile: "p-logistics-dev" });
+    const t = await tree();
+    fireEvent.contextMenu(await within(t).findByRole("treeitem", { name: /invoice-generate/ }));
+    const item = await screen.findByRole("menuitem", { name: "Copy connection string" });
+    expect(item).toHaveAttribute("aria-disabled", "true");
+    expect(item).toHaveAttribute("title", expect.stringMatching(/Entra ID connections have no connection string/));
+  });
+
+  it("remembers the tree filter for the connection", async () => {
+    const { mock } = renderShell("default", { last_profile: "p-logistics" });
+    const box = await screen.findByRole("searchbox", { name: "Filter entities" });
+    await focus(box);
+    await userEvent.keyboard("invoice");
+    await waitFor(() => {
+      const saved = mock.calls.filter((c) => c.cmd === "settings_set" && (c.args as { key: string }).key === "shell:p-logistics").at(-1);
+      expect((saved?.args as { value: { treeFilter: string } } | undefined)?.value.treeFilter).toBe("invoice");
+    });
+  });
 });

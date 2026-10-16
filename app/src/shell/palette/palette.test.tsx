@@ -10,6 +10,10 @@ const ctx = () => ({
   subs: { "shipment-events": fx.subscriptions["shipment-events"] },
   profiles: fx.profiles.map((p) => ({ ...p, bound_sign_in: null })),
   activeProfileId: "p-logistics",
+  activeTab: null as { id: string; kind: "queue" | "topic" | "subscription" } | null,
+  host: "sb-logistics-prod.servicebus.windows.net",
+  entra: false,
+  copy: vi.fn(), copyConnectionString: vi.fn(),
   open: vi.fn(), connect: vi.fn(), openSheet: vi.fn(), refresh: vi.fn(), toggleDrawer: vi.fn(), setPrefs: vi.fn(),
 });
 
@@ -42,6 +46,30 @@ describe("buildCommands", () => {
     const cmds = buildCommands({ ...c, listing: { ...c.listing, known: [{ entity: "invoice-generate", subscription: null }] } });
     expect(cmds.filter((x) => x.label === "invoice-generate")).toHaveLength(1);
     expect(new Set(cmds.map((x) => x.id)).size).toBe(cmds.length);
+  });
+
+  it("opens the explorer options while connected only", () => {
+    const c = ctx();
+    buildCommands(c).find((x) => x.label === "Explorer options")!.run();
+    expect(c.openSheet).toHaveBeenCalledWith({ kind: "explorer-options" });
+    expect(buildCommands({ ...c, activeProfileId: null }).some((x) => x.label === "Explorer options")).toBe(false);
+  });
+
+  it("copies the URL and the connection string of the entity in the active tab", () => {
+    const c = { ...ctx(), activeTab: { id: "shipment-events/subscriptions/tracking-sync", kind: "subscription" as const } };
+    const cmds = buildCommands(c);
+    cmds.find((x) => x.label === "Copy URL of tracking-sync")!.run();
+    expect(c.copy).toHaveBeenCalledWith("sb://sb-logistics-prod.servicebus.windows.net/shipment-events/Subscriptions/tracking-sync");
+    cmds.find((x) => x.label === "Copy connection string of tracking-sync")!.run();
+    expect(c.copyConnectionString).toHaveBeenCalledWith("shipment-events/subscriptions/tracking-sync");
+  });
+
+  it("offers no entity copy commands without an entity tab, and no connection string on Entra", () => {
+    const c = ctx();
+    expect(buildCommands(c).some((x) => x.group === "This entity")).toBe(false);
+    const entra = buildCommands({ ...c, entra: true, activeTab: { id: "orders", kind: "queue" } });
+    expect(entra.map((x) => x.label)).toContain("Copy URL of orders");
+    expect(entra.some((x) => /connection string/.test(x.label))).toBe(false);
   });
 
   it("sets preferences from the theme and density commands", () => {

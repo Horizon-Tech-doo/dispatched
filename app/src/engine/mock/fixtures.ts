@@ -34,7 +34,7 @@ const q = (name: string, c: EntityCounts | null, extra: Partial<QueueInfo> = {})
 
 export const queues: QueueInfo[] = [
   q("customs-docs", counts(112, 0)),
-  q("invoice-generate", counts(1284, 37)),
+  q("invoice-generate", counts(1284, 37, 3)),
   q("label-print", counts(6, 0)),
   q("returns-intake", counts(48, 211), { requires_session: true }),
 ];

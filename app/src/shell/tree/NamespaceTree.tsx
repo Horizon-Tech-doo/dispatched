@@ -1,14 +1,17 @@
-import { CircleAlert } from "lucide-react";
+import { CircleAlert, SlidersHorizontal } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import { useEntities, useProfiles, useSubscriptionsFor } from "@/engine";
 import {
   Button, ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger,
-  CountBadge, EmptyState, EntityGlyph, Input, Problem, Skeleton, SkeletonRows, Tree, formatNumber, rowHeight,
+  CountBadge, EmptyState, EntityGlyph, IconButton, Input, LabelSwatch, Problem, Skeleton, SkeletonRows, Tree, formatNumber, rowHeight, type LabelColor,
 } from "@/ui";
 import { shortHost } from "../ConnectionSelector";
 import { useShell } from "../context";
+import { copyFailureBody } from "../copyFailure";
+import { deadLetterUrl, entityUrl } from "../entityUrls";
 import { keepTogether } from "../text";
-import { DASHBOARD_ID } from "../state";
+import { DASHBOARD_ID, MAX_FILTER_LENGTH, type CountKind } from "../state";
+import { compileRules, highlightOf, type Compiled } from "./highlight";
 import { describeListError } from "./listError";
 import { buildNodes, type NsNode, type SubsState } from "./model";
 
@@ -22,17 +25,31 @@ const glyphKind = (n: NsNode) => (n.kind === "known" && n.entity?.kind !== "subs
 /** Unlaid-out panes measure 0x0; the tree renders a screenful until it is measured. */
 const FLOOR = { width: 280, height: 640 };
 
-function Counts({ n }: { n: NsNode }) {
+const COUNT_TITLE: Record<CountKind, string> = { active: "Active", scheduled: "Scheduled", "transfer-dlq": "Transfer dead-letter", "dead-letter": "Dead-letter" };
+
+/** A row's marks, right-aligned and never truncated: the highlight swatch, then the chosen counts in the order active,
+ *  scheduled, transfer dead-letter, dead-letter. Active always shows; the others only above zero; dead letters are amber. */
+function Counts({ n, counts, color }: { n: NsNode; counts: CountKind[]; color: LabelColor | null }) {
   const c = n.counts;
+  const shown = (k: CountKind) => counts.includes(k);
+  const value = (k: CountKind) => (!c ? 0 : k === "active" ? c.active : k === "scheduled" ? c.scheduled : k === "transfer-dlq" ? c.transfer_dead_letter : c.dead_letter);
+  const optional = (["scheduled", "transfer-dlq"] as const).filter((k) => shown(k) && value(k) > 0);
   return (
     <span className="ml-auto flex min-w-[3ch] shrink-0 items-baseline justify-end gap-1.5 pl-1">
-      <CountBadge value={c?.active} quality={c ?? undefined} className="text-12" />
-      {c && c.dead_letter > 0 && <CountBadge value={c.dead_letter} quality={c} attention className="text-12" />}
+      {color && (
+        <span className="flex items-center self-center">
+          <LabelSwatch color={color} />
+          <span className="sr-only">highlighted</span>
+        </span>
+      )}
+      {shown("active") && <CountBadge value={c?.active} quality={c ?? undefined} title={COUNT_TITLE.active} className="text-12" />}
+      {c && optional.map((k) => <CountBadge key={k} value={value(k)} quality={c} title={COUNT_TITLE[k]} className="text-12" />)}
+      {c && shown("dead-letter") && c.dead_letter > 0 && <CountBadge value={c.dead_letter} quality={c} attention title={COUNT_TITLE["dead-letter"]} className="text-12" />}
     </span>
   );
 }
 
-function Row({ n, production, onRetry }: { n: NsNode; production: boolean; onRetry: (topic: string) => void }) {
+function Row({ n, production, onRetry, counts, rules }: { n: NsNode; production: boolean; onRetry: (topic: string) => void; counts: CountKind[]; rules: Compiled[] }) {
   switch (n.kind) {
     case "loading":
       return <Skeleton className="w-32" />;
@@ -63,7 +80,8 @@ function Row({ n, production, onRetry }: { n: NsNode; production: boolean; onRet
           {production && <span className="ml-auto shrink-0 pl-2 text-11 font-semibold tracking-[0.04em] text-accent">PROD</span>}
         </>
       );
-    default:
+    default: {
+      const color = highlightOf(n.label, n.counts, rules);
       return (
         <>
           <EntityGlyph kind={glyphKind(n)} className="shrink-0 text-icon" />
@@ -76,14 +94,15 @@ function Row({ n, production, onRetry }: { n: NsNode; production: boolean; onRet
           ) : (
             <span className="min-w-0 truncate" title={n.label}>{n.label}</span>
           )}
-          {n.kind !== "topic" && <Counts n={n} />}
+          {(n.kind !== "topic" || color) && <Counts n={n} counts={n.kind === "topic" ? [] : counts} color={color} />}
         </>
       );
+    }
   }
 }
 
 export function NamespaceTree() {
-  const { conn, shell, dispatch, prefs, openSheet } = useShell();
+  const { conn, shell, dispatch, prefs, openSheet, copyConnectionString, copyNotice, dismissCopyNotice } = useShell();
   const profileId = conn.profileId;
   const refetchMs = prefs.autoRefresh * 1000;
   const profile = useProfiles().data?.find((p) => p.id === profileId);
@@ -96,7 +115,9 @@ export function NamespaceTree() {
     [listing, shell.expanded],
   );
   const subQueries = useSubscriptionsFor(profileId, expandedTopics, refetchMs);
-  const [filter, setFilter] = useState("");
+  const filter = shell.treeFilter;
+  const setFilter = (value: string) => dispatch({ type: "treeFilter", value });
+  const rules = useMemo(() => compileRules(shell.explorer.rules), [shell.explorer.rules]);
   const [menuId, setMenuId] = useState<string | null>(null);
 
   const subs: Record<string, SubsState> = {};
@@ -107,7 +128,11 @@ export function NamespaceTree() {
   // useQueries returns a fresh array each render; key the memo on what the rows actually show.
   const subsKey = JSON.stringify(Object.entries(subs).map(([t, s]) => [t, s.pending, s.data, s.error?.message]));
 
-  const host = shortHost(profile?.host ?? conn.view?.host ?? "");
+  const fullHost = profile?.host ?? conn.view?.host ?? "";
+  const host = shortHost(fullHost);
+  const entra = profile?.auth.kind === "entra";
+  // Like the Overview's button: until the profile list is known an Entra profile can't be told from the others.
+  const canCopyString = profile !== undefined && !entra;
   const nodes = useMemo(
     () => (listing ? buildNodes({ host, listing, subs, expanded: new Set(shell.expanded), filter }) : []),
     // `subs` is covered by `subsKey`.
@@ -129,6 +154,8 @@ export function NamespaceTree() {
 
   const copy = (text: string) => void navigator.clipboard?.writeText(text).catch(() => {});
   const menuNode = menuId ? byId.get(menuId) : undefined;
+  const menuEntity = menuNode?.entity;
+  const menuDlqUrl = menuEntity && fullHost ? deadLetterUrl(fullHost, menuEntity.id, menuEntity.kind) : null;
 
   const summary = listing && !listing.limited ? `${formatNumber(listing.queues.length)} queues, ${formatNumber(listing.topics.length)} topics` : "";
   const editConnection = profileId ? () => openSheet({ kind: "profile", profileId }) : undefined;
@@ -145,10 +172,13 @@ export function NamespaceTree() {
   const banner = (children: ReactNode) => <div className="shrink-0 border-y border-line px-3 py-2.5">{children}</div>;
   return (
     <nav aria-label="Namespace" className="@container flex h-full min-h-0 flex-col">
-      <div className="flex h-[30px] shrink-0 items-center justify-between border-b border-line px-3">
+      <div className="flex h-[30px] shrink-0 items-center gap-1.5 border-b border-line pl-3 pr-1.5">
         <span className="font-semibold text-muted">Explorer</span>
         {/* Left out when the pane is too narrow to hold it beside the title. */}
-        <span className="hidden whitespace-nowrap text-11 tabular-nums text-faint @[230px]:inline">{summary}</span>
+        <span className="ml-auto hidden whitespace-nowrap text-11 tabular-nums text-faint @[230px]:inline">{summary}</span>
+        <IconButton label="Explorer options" className="ml-auto shrink-0 @[230px]:ml-0" onClick={() => openSheet({ kind: "explorer-options" })}>
+          <SlidersHorizontal />
+        </IconButton>
       </div>
       <div className="shrink-0 px-2 py-1.5">
         <Input
@@ -158,10 +188,27 @@ export function NamespaceTree() {
           placeholder="Filter"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
+          maxLength={MAX_FILTER_LENGTH}
           onKeyDown={(e) => e.key === "Escape" && setFilter("")}
           className="[&::-webkit-search-cancel-button]:appearance-none"
         />
       </div>
+      {copyNotice &&
+        banner(
+          copyNotice.failure ? (
+            <Problem
+              role="alert"
+              title="Couldn't copy the connection string"
+              body={copyFailureBody(copyNotice.failure)}
+              detail={copyNotice.failure}
+              action={<Button onClick={dismissCopyNotice}>Dismiss</Button>}
+            />
+          ) : (
+            <p role="status" className="m-0 text-11 text-muted">
+              {keepTogether(`Copied the connection string for ${copyNotice.entity}. It is scoped to that entity and was never shown.`, copyNotice.entity)}
+            </p>
+          ),
+        )}
       {entities.error && failure && listing &&
         banner(
           <Problem
@@ -212,7 +259,7 @@ export function NamespaceTree() {
                   onSelect={(id) => dispatch({ type: "select", nodeId: id })}
                   onActivate={activate}
                   onToggle={(id, expanded) => dispatch({ type: "toggleExpanded", nodeId: id, expanded })}
-                  renderRow={(n) => <Row n={n} production={profile?.production ?? conn.view?.production ?? false} onRetry={retryTopic} />}
+                  renderRow={(n) => <Row n={n} production={profile?.production ?? conn.view?.production ?? false} onRetry={retryTopic} counts={shell.explorer.counts} rules={rules} />}
                   rowHeight={rowHeight[prefs.density]}
                   initialRect={FLOOR}
                 />
@@ -221,8 +268,18 @@ export function NamespaceTree() {
             <ContextMenuContent>
               <ContextMenuItem disabled={!menuNode?.entity} onSelect={() => menuNode && activate(menuNode.id)}>Open</ContextMenuItem>
               <ContextMenuItem onSelect={() => dispatch({ type: "open", tab: { id: DASHBOARD_ID, kind: "dashboard" } })}>Open dashboard</ContextMenuItem>
+              <ContextMenuSeparator />
               <ContextMenuItem disabled={!menuNode?.entity} onSelect={() => menuNode && copy(menuNode.label)}>Copy name</ContextMenuItem>
               <ContextMenuItem disabled={!menuNode?.entity} onSelect={() => menuNode?.entity && copy(menuNode.entity.id)}>Copy entity path</ContextMenuItem>
+              <ContextMenuItem disabled={!menuEntity || !fullHost} onSelect={() => menuEntity && copy(entityUrl(fullHost, menuEntity.id, menuEntity.kind))}>Copy URL</ContextMenuItem>
+              <ContextMenuItem disabled={!menuDlqUrl} onSelect={() => menuDlqUrl && copy(menuDlqUrl)}>Copy dead-letter URL</ContextMenuItem>
+              <ContextMenuItem
+                disabled={!menuEntity || !canCopyString}
+                title={entra ? "Entra ID connections have no connection string. Copy the URL instead." : undefined}
+                onSelect={() => menuEntity && void copyConnectionString(menuEntity.id)}
+              >
+                Copy connection string
+              </ContextMenuItem>
               <ContextMenuSeparator />
               <ContextMenuItem onSelect={() => void entities.refetch()}>Refresh</ContextMenuItem>
             </ContextMenuContent>

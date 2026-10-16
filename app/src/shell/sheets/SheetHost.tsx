@@ -1,5 +1,6 @@
 import { useShell } from "../context";
 import { ExportSheet } from "../messages/ExportSheet";
+import { ExplorerOptionsSheet } from "./ExplorerOptionsSheet";
 import { ProfileSheet } from "./ProfileSheet";
 import { ProfilesSheet } from "./ProfilesSheet";
 import { SettingsSheet } from "./SettingsSheet";
@@ -18,6 +19,8 @@ export function SheetHost() {
       return <SettingsSheet />;
     case "update":
       return <UpdateSheet />;
+    case "explorer-options":
+      return <ExplorerOptionsSheet />;
     case "export":
       // Another export opened while one is up starts from its own choices.
       return <ExportSheet key={JSON.stringify(sheet)} {...sheet} />;
