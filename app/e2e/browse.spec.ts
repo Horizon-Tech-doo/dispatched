@@ -111,7 +111,10 @@ test("from the end, then back to paging with Peek more", async ({ page }) => {
 test("a read that fails says why and offers a way on", async ({ page }) => {
   await open(page, "peek-error", INVOICES, "queue", "dead-letter");
   await expect(page.getByRole("heading", { name: "Can't read the dead-letter queue" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Try again" })).toBeVisible();
+  // Trying again can't grant a right: the way out is the connection, and the advice names the key's missing right.
+  await expect(page.getByText("This key has no Listen right. Use a key whose policy includes Listen (or Manage).")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Edit connection" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Try again" })).toHaveCount(0);
   await expect(page.locator("[data-row-id]")).toHaveCount(0);
 });
 
