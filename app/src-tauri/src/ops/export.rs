@@ -185,21 +185,24 @@ fn messages(n: u64) -> String {
 /// The time to stamp an export name with: `utc` in the user's zone, given as minutes east of UTC
 /// (the webview's `-Date.getTimezoneOffset()`; `time` can't read the local offset soundly in a
 /// multi-threaded process on Unix). `None`, or an offset no zone has, keeps UTC.
-pub fn stamp_time(utc: time::OffsetDateTime, offset_minutes: Option<i32>) -> time::OffsetDateTime {
+pub fn stamp_time(
+    utc: time::OffsetDateTime,
+    offset_minutes: Option<i32>,
+) -> (time::OffsetDateTime, bool) {
     offset_minutes
-        .filter(|m| m.abs() < 18 * 60)
+        .filter(|m| m.unsigned_abs() < 18 * 60)
         .and_then(|m| time::UtcOffset::from_whole_seconds(m * 60).ok())
-        .map_or(utc, |o| utc.to_offset(o))
+        .map_or((utc, false), |o| (utc.to_offset(o), true))
 }
 
-/// `{entity-slug}-{view}-{yyyyMMdd-HHmm}.{ext}` in `now`'s zone; a UTC time is marked
-/// `{yyyyMMdd-HHmm}Z`, since it is not the user's clock. Anything but letters, digits, `.`, `_`, `-`
+/// `{entity-slug}-{view}-{yyyyMMdd-HHmm}.{ext}` in `now`'s zone; when `now` is not the user's clock
+/// (`local` false: the offset was unknown) the stamp is UTC and marked `{yyyyMMdd-HHmm}Z`. Anything but letters, digits, `.`, `_`, `-`
 /// becomes `-`.
 pub fn suggested_file_name(
     entity: &str,
     view: PeekView,
     format: &str,
-    now: time::OffsetDateTime,
+    (now, local): (time::OffsetDateTime, bool),
 ) -> String {
     let slug: String = entity
         .chars()
@@ -216,7 +219,7 @@ pub fn suggested_file_name(
     } else {
         "json"
     };
-    let zone = if now.offset().is_utc() { "Z" } else { "" };
+    let zone = if local { "" } else { "Z" };
     format!(
         "{slug}-{}-{:04}{:02}{:02}-{:02}{:02}{zone}.{ext}",
         view.as_str(),
@@ -986,12 +989,12 @@ mod tests {
                 "events/subscriptions/audit",
                 PeekView::DeadLetter,
                 "json",
-                at
+                (at, false)
             ),
             "events-subscriptions-audit-dead-letter-20261016-0941Z.json"
         );
         assert_eq!(
-            suggested_file_name("a b:c", PeekView::Active, "ndjson", at),
+            suggested_file_name("a b:c", PeekView::Active, "ndjson", (at, false)),
             "a-b-c-active-20261016-0941Z.ndjson"
         );
     }
@@ -1009,8 +1012,13 @@ mod tests {
             ),
             "orders-active-20261016-0941.json"
         );
+        // A user in UTC: their clock, so no `Z` (matches the sheet's preview).
+        assert_eq!(
+            suggested_file_name("orders", PeekView::Active, "json", stamp_time(utc, Some(0))),
+            "orders-active-20261016-0741.json"
+        );
         // Unknown or impossible offsets: UTC, marked `Z`.
-        for offset in [None, Some(24 * 60), Some(-24 * 60)] {
+        for offset in [None, Some(24 * 60), Some(-24 * 60), Some(i32::MIN)] {
             assert_eq!(
                 suggested_file_name("orders", PeekView::Active, "json", stamp_time(utc, offset)),
                 "orders-active-20261016-0741Z.json",
