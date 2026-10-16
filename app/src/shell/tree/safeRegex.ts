@@ -237,12 +237,15 @@ class Parser {
       tests.push(literal(a.ch));
     }
     const inClass: Test = (ch) => tests.some((t) => t(ch));
-    // Case-insensitive: a character matches when it, or its other-case form, is in the class (as JavaScript folds it).
-    const lowerOf = (ch: string) => {
-      const l = ch.toLowerCase();
-      return l.length === ch.length ? l : ch;
+    // Case-insensitive, as JavaScript folds it: a character also matches through a case partner of the same length that
+    // canonicalises to the same letter. The Kelvin sign (U+212A) and the Angstrom sign (U+212B) fold to `k` and `å` when
+    // lower-cased but are their own upper-case letters, so under JavaScript's rule they are not partners of those letters.
+    const partners = (ch: string): string[] => {
+      const out: string[] = [];
+      for (const other of [ch.toLowerCase(), ch.toUpperCase()]) if (other.length === ch.length && other !== ch && canon(other) === canon(ch)) out.push(other);
+      return out;
     };
-    const matches: Test = (ch) => inClass(ch) || inClass(lowerOf(ch)) || inClass(canon(ch));
+    const matches: Test = (ch) => inClass(ch) || partners(ch).some(inClass);
     return { t: "set", test: fast(negated ? not(matches) : matches) };
   }
 }

@@ -438,6 +438,21 @@ function explorerShots(): Shot[] {
     )}`;
   const tree = (p: Page) => p.getByRole("tree", { name: "Namespace" });
   const ready = (p: Page) => tree(p).getByRole("treeitem", { name: "tracking-sync" });
+  /** No row's content (name, counts, swatch) reaches past the tree's right edge (the tree is hidden from role queries while
+   *  a sheet is open, so it is found by its attributes). */
+  const fitsTheTree = async (page: Page) => {
+    const over = await page.locator('[role=tree][aria-label="Namespace"]').evaluate((t) => {
+      const edge = t.getBoundingClientRect().right - (t.offsetWidth - t.clientWidth); // minus a scrollbar
+      const out: string[] = [];
+      for (const row of t.querySelectorAll<HTMLElement>("[role=treeitem]"))
+        for (const el of row.querySelectorAll<HTMLElement>("*")) {
+          const r = el.getBoundingClientRect();
+          if (r.width > 0 && r.right > edge + 0.5) out.push(`${row.getAttribute("aria-label")}: ${Math.round((r.right - edge) * 10) / 10}px past the edge (${el.tagName.toLowerCase()})`);
+        }
+      return out;
+    });
+    expect(over, "row content past the tree's right edge").toEqual([]);
+  };
   return [
     {
       // Rules mark returns-intake and tracking-sync (dead letters at 200 or more) and invoice-generate (by name); counts are
@@ -445,6 +460,7 @@ function explorerShots(): Shot[] {
       name: "tree-highlights",
       path: path({ counts: ["active", "scheduled", "dead-letter"], rules, openOn: "overview" }),
       ready,
+      prepare: fitsTheTree,
     },
     {
       name: "tree-menu-copy",
@@ -469,6 +485,7 @@ function explorerShots(): Shot[] {
         await page.getByRole("button", { name: "Explorer options" }).click();
         const sheet = page.getByRole("dialog", { name: "Explorer options for Logistics" });
         await sheet.getByText(/Not a valid pattern/).waitFor();
+        await fitsTheTree(page);
       },
       holds: (p) => p.getByRole("dialog", { name: "Explorer options for Logistics" }),
       viewportOnly: true,
@@ -516,6 +533,7 @@ function explorerShots(): Shot[] {
       name: "tree-highlights-narrow",
       path: path({ counts: ["active", "scheduled", "transfer-dlq", "dead-letter"], rules, openOn: "overview" }, 11),
       ready,
+      prepare: fitsTheTree,
     },
   ];
 }

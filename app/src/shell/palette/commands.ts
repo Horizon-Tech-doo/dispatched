@@ -1,7 +1,7 @@
 import type { EntityListing, Profile, SubscriptionInfo } from "@/engine";
 import type { SheetState } from "../context";
 import { DASHBOARD_ID, type EntityKind, type Prefs } from "../state";
-import { entityIdOf, splitSubscriptionId } from "../entityId";
+import { displayName, entityIdOf } from "../entityId";
 import { entityUrl } from "../entityUrls";
 
 export interface PaletteCommand {
@@ -85,9 +85,8 @@ export function buildCommands(c: PaletteContext): PaletteCommand[] {
   for (const a of app) out.push({ ...a, group: "App" });
   const tab = c.activeTab;
   if (tab && c.activeProfileId !== null) {
-    const name = tab.kind === "subscription" ? splitSubscriptionId(tab.id).name : tab.id;
-    if (c.host) out.push({ id: "entity:url", group: "This entity", label: `Copy URL of ${name}`, keywords: ["address", "sb://"], run: () => c.copy(entityUrl(c.host, tab.id, tab.kind), `Copied the URL for ${name}`) });
-    if (!c.entra) out.push({ id: "entity:string", group: "This entity", label: `Copy connection string of ${name}`, keywords: ["key", "secret"], run: () => c.copyConnectionString(tab.id) });
+    if (c.host) out.push({ id: "entity:url", group: "This entity", label: `Copy URL of ${displayName(tab.id)}`, keywords: ["address", "sb://"], run: () => c.copy(entityUrl(c.host, tab.id, tab.kind), `Copied the URL for ${displayName(tab.id)}`) });
+    if (!c.entra) out.push({ id: "entity:string", group: "This entity", label: `Copy connection string of ${displayName(tab.id)}`, keywords: ["key", "secret"], run: () => c.copyConnectionString(tab.id) });
   }
   return out;
 }

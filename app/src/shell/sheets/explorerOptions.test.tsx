@@ -1,6 +1,7 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import * as highlight from "../tree/highlight";
 import { renderShell } from "../test-utils";
 
 // jsdom lays every element out at 0x0, so the resizable panels swallow pointer-downs: focus the box before typing.
@@ -163,5 +164,22 @@ describe("explorer options", () => {
     const active = within(sheet).getByRole("button", { name: "Active" });
     expect(active.querySelector("svg")).not.toBeNull();
     expect(within(sheet).getByRole("button", { name: "Scheduled" }).querySelector("svg")).toBeNull();
+  });
+
+  it("compiles a rule once per pattern, not again for another rule's keystroke", async () => {
+    const spy = vi.spyOn(highlight, "compileRules");
+    const { sheet } = await open();
+    await userEvent.click(within(sheet).getByRole("button", { name: "Add rule" }));
+    await userEvent.click(within(sheet).getByRole("button", { name: "Add rule" }));
+    await typeInto(within(sheet).getByLabelText("Rule 1 value"), "alpha");
+    await typeInto(within(sheet).getByLabelText("Rule 2 value"), "be");
+    // The sheet compiles one rule at a time; the tree compiles the saved list (empty here).
+    const compiled = () => spy.mock.calls.filter((c) => c[0].length === 1).map((c) => (c[0][0].match as { pattern: string }).pattern);
+    const alphaBefore = compiled().filter((p) => p === "alpha").length;
+    await userEvent.keyboard("ta"); // two more keystrokes in rule 2
+    expect(compiled().filter((p) => p === "alpha").length).toBe(alphaBefore);
+    expect(compiled()).toContain("beta");
+    expect(alphaBefore).toBe(1);
+    spy.mockRestore();
   });
 });

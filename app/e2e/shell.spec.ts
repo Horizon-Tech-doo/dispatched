@@ -274,3 +274,43 @@ test("a narrow window raises the tree to 200 px without changing its saved size;
   await expect.poll(width).toBeGreaterThanOrEqual(dragged - 3);
   await expect.poll(width).toBeLessThanOrEqual(dragged + 3);
 });
+
+/** Row content (name, counts, swatch) that reaches past the tree's right edge, as readable lines. */
+const pastTheEdge = (page: Page) =>
+  page.locator('[role=tree][aria-label="Namespace"]').evaluate((t) => {
+    const edge = t.getBoundingClientRect().right - (t.offsetWidth - t.clientWidth); // minus a scrollbar
+    const out: string[] = [];
+    for (const row of t.querySelectorAll<HTMLElement>("[role=treeitem]"))
+      for (const el of row.querySelectorAll<HTMLElement>("*")) {
+        const r = el.getBoundingClientRect();
+        if (r.width > 0 && r.right > edge + 0.5) out.push(`${row.getAttribute("aria-label")}: ${Math.round((r.right - edge) * 10) / 10}px past the edge (${el.tagName.toLowerCase()})`);
+      }
+    return out;
+  });
+
+for (const scenario of ["default", "forbidden"]) {
+  test(`no tree row overflows the pane at any width with every count and a rule on (${scenario})`, async ({ page }) => {
+    const explorer = {
+      counts: ["active", "scheduled", "transfer-dlq", "dead-letter"],
+      rules: [{ id: "r1", color: "rose", match: { kind: "count", count: "dead-letter", atLeast: 200 } }, { id: "r2", color: "violet", match: { kind: "name", pattern: "^(returns" } }],
+      openOn: "dead-letter",
+    };
+    for (const treeSize of [18, 14, 11]) {
+      const seed = encodeURIComponent(
+        JSON.stringify({
+          "shell:p-logistics": {
+            tabs: [], activeTab: null, expanded: ["group:queues", "group:topics", "t:shipment-events", "t:carrier-updates", "t:stock-levels"], selected: null,
+            layout: { treeSize, drawerOpen: false, drawerSize: 18, drawerTab: "activity" },
+            explorer,
+          },
+        }),
+      );
+      for (const width of [640, 1100, 1440, 1700, 1920, 2100]) {
+        await page.setViewportSize({ width, height: 900 });
+        await page.goto(`/?scenario=${scenario}&autoconnect=p-logistics&seed=${seed}`);
+        await expect(tree(page).getByRole("treeitem", { name: /^tracking-sync/ })).toBeVisible();
+        expect(await pastTheEdge(page), `${scenario}, tree ${treeSize}%, window ${width}px`).toEqual([]);
+      }
+    }
+  });
+}

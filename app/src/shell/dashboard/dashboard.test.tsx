@@ -299,7 +299,7 @@ describe("dashboard", () => {
     // `orders` may be a topic: one "Kind unknown" glyph, in the grid and in the tree's pinned group; a subscription is known.
     expect(within(row).getByTitle("Kind unknown")).toBeInTheDocument();
     expect(within(within(grid).getByRole("row", { name: /tracking-sync/ })).queryByTitle("Kind unknown")).toBeNull();
-    expect(within(within(screen.getByRole("tree", { name: /^Namespace(,|$)/ })).getByRole("treeitem", { name: /^orders/ })).getByTitle("Kind unknown")).toBeInTheDocument();
+    expect(within(within(screen.getByRole("tree", { name: /^Namespace(,| \(|$)/ })).getByRole("treeitem", { name: /^orders/ })).getByTitle("Kind unknown")).toBeInTheDocument();
     expect(within(row).getAllByText("?").length).toBeGreaterThan(0);
     // Nothing to filter by dead letters when no count is known.
     expect(screen.queryByRole("radio", { name: /With dead letters/ })).toBeNull();

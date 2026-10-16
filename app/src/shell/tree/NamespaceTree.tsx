@@ -1,5 +1,5 @@
 import { CircleAlert, SlidersHorizontal } from "lucide-react";
-import { useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useEntities, useProfiles, useSubscriptionsFor } from "@/engine";
 import {
   Button, ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger,
@@ -8,9 +8,11 @@ import {
 import { shortHost } from "../ConnectionSelector";
 import { useShell } from "../context";
 import { deadLetterUrl, entityUrl } from "../entityUrls";
+import { displayName } from "../entityId";
 import { keepTogether } from "../text";
 import { DASHBOARD_ID, MAX_FILTER_LENGTH, type CountKind } from "../state";
 import { compileRules, highlightOf, type Highlight } from "./highlight";
+import { marksTier, type MarksTier } from "./marksLayout";
 import { describeListError } from "./listError";
 import { buildNodes, type NsNode, type SubsState } from "./model";
 import type { EntityCounts } from "@/engine";
@@ -47,35 +49,39 @@ function slotWidths(all: (EntityCounts | null | undefined)[]): Record<CountKind,
   return w;
 }
 
-/** The row said in words, for a screen reader: its name, the counts it shows and the rule that marks it. */
-function rowLabel(n: NsNode, counts: CountKind[], highlight: Highlight | null): string | undefined {
+/** A count as it is spoken: `~48` is "about 48", `~48+` is "at least 48". */
+const spoken = (n: number, c: EntityCounts) => (c.truncated ? `at least ${formatCount(n)}` : c.approximate ? `about ${formatCount(n)}` : formatCount(n));
+
+/** The row said in words, for a screen reader: its name (a subscription with its topic) and the counts it shows, then
+ *  that it is highlighted; the rule behind the highlight is the description. */
+function rowLabel(n: NsNode, counts: CountKind[], highlight: Highlight | null): { label?: string; description?: string } {
   const parts: string[] = [];
-  if (n.kind !== "topic" && n.counts) for (const k of SLOTS) if (counts.includes(k) && showsValue(k, n.counts)) parts.push(`${formatCount(countOf(n.counts, k), n.counts)} ${COUNT_WORD[k]}`);
-  if (highlight) parts.push(`highlighted ${highlight.color}: ${highlight.description}`);
-  return parts.length ? [n.label, ...parts].join(", ") : undefined;
+  if (n.kind !== "topic" && n.counts) for (const k of SLOTS) if (counts.includes(k) && showsValue(k, n.counts)) parts.push(`${spoken(countOf(n.counts, k), n.counts)} ${COUNT_WORD[k]}`);
+  if (highlight) parts.push("highlighted");
+  const name = n.topic ? `${n.label} (${n.topic})` : n.label;
+  return {
+    label: parts.length || name !== n.label ? [name, ...parts].join(", ") : undefined,
+    description: highlight ? `${highlight.color}: ${highlight.description}` : undefined,
+  };
 }
 
-interface RowMarks { counts: CountKind[]; widths: Record<CountKind, number>; swatchSlot: boolean }
+interface RowMarks extends MarksTier { counts: CountKind[]; widths: Record<CountKind, number>; swatchSlot: boolean }
 
-/** A row's marks, right-aligned and never truncated: a fixed slot for each chosen count (active, scheduled, transfer
- *  DLQ, dead-letter; blank when there is nothing to show), then the highlight swatch in a slot of its own at the edge.
- *  Scheduled and transfer DLQ give way first when the pane is narrow. */
+const OPTIONAL_KINDS: CountKind[] = ["scheduled", "transfer-dlq"];
+
+/** A row's marks, right-aligned and never truncated: a slot for each chosen count (active, scheduled, transfer DLQ,
+ *  dead-letter; blank when there is nothing to show), then the highlight swatch in a slot of its own at the edge. The
+ *  slots are as wide as the widest value while the pane has room for that; in a narrow pane scheduled and transfer DLQ
+ *  give way first, and below that each count takes only what its value needs. */
 function Marks({ n, highlight, marks }: { n: TreeRow; highlight: Highlight | null; marks: RowMarks }) {
   const c = n.counts;
-  const kinds = n.kind === "topic" ? [] : SLOTS.filter((k) => marks.counts.includes(k));
+  const kinds = n.kind === "topic" ? [] : SLOTS.filter((k) => marks.counts.includes(k) && (marks.optional || !OPTIONAL_KINDS.includes(k)));
   if (!kinds.length && !marks.swatchSlot) return null;
   return (
-    <span className="ml-auto flex shrink-0 items-baseline justify-end gap-1 pl-1">
+    <span className={cn("ml-auto flex shrink-0 items-baseline justify-end pl-1", marks.fixed ? "gap-2" : "gap-1")}>
       {kinds.map((k) => {
         const slot = (children: ReactNode) => (
-          <span
-            key={k}
-            data-count-slot={k}
-            // Fixed slots from 230px up, where position must tell the kind; below, only what each value needs, so the
-            // counts that stay (active and dead-letter) fit beside a name that has to give way.
-            style={{ "--w": `${marks.widths[k]}ch` } as CSSProperties}
-            className={cn("inline-block text-right @[230px]:min-w-[var(--w)]", (k === "scheduled" || k === "transfer-dlq") && "hidden @[230px]:inline-block")}
-          >
+          <span key={k} data-count-slot={k} style={marks.fixed ? { minWidth: `${marks.widths[k]}ch` } : undefined} className="inline-block text-right">
             {children}
           </span>
         );
@@ -90,13 +96,13 @@ function Marks({ n, highlight, marks }: { n: TreeRow; highlight: Highlight | nul
       {marks.swatchSlot &&
         (highlight ? (
           <Hint label={`${capital(highlight.color)}: ${highlight.description}`}>
-            <span data-swatch-slot className="ml-0.5 flex size-2 shrink-0 items-center self-center">
+            <span data-swatch-slot className="flex size-2 shrink-0 items-center self-center">
               <LabelSwatch color={highlight.color} />
               <span className="sr-only">highlighted</span>
             </span>
           </Hint>
         ) : (
-          <span data-swatch-slot className="ml-0.5 size-2 shrink-0 self-center" />
+          <span data-swatch-slot className="size-2 shrink-0 self-center" />
         ))}
     </span>
   );
@@ -134,17 +140,19 @@ function Row({ n, production, onRetry, marks }: { n: TreeRow; production: boolea
         </>
       );
     default: {
+      // A name keeps six characters while every count has its slot; once the pane is tighter the counts come first.
+      const nameMin = marks.optional && marks.fixed ? "min-w-[6ch]" : "min-w-[2ch]";
       return (
         <>
           <EntityGlyph kind={glyphKind(n)} className="shrink-0 text-icon" />
           {n.kind === "known" && n.topic ? (
-            // Name first, topic after it as secondary text: only the topic gives way when the row is narrow.
+            // Name first, topic after it as secondary text: the topic gives way first when the row is narrow, then the name.
             <>
-              <span className="shrink-0" title={`${n.topic}/${n.label}`}>{n.label}</span>
-              <span className="min-w-0 truncate text-muted">{n.topic}</span>
+              <span className={cn("truncate", nameMin)} title={`${n.topic}/${n.label}`}>{n.label}</span>
+              <span className="min-w-0 truncate text-muted [flex-shrink:3]">{n.topic}</span>
             </>
           ) : (
-            <span className="min-w-[2ch] truncate @[230px]:min-w-[6ch]" title={n.label}>{n.label}</span>
+            <span className={cn("truncate", nameMin)} title={n.label}>{n.label}</span>
           )}
           <Marks n={n} highlight={n.highlight} marks={marks} />
         </>
@@ -199,7 +207,8 @@ export function NamespaceTree() {
       nodes.map((n) => {
         const entityRow = n.kind === "queue" || n.kind === "topic" || n.kind === "subscription" || n.kind === "known";
         const highlight = entityRow ? highlightOf(n.label, n.counts, rules) : null;
-        return { ...n, highlight, ariaLabel: entityRow ? rowLabel(n, chosen, highlight) : undefined };
+        const said = entityRow ? rowLabel(n, chosen, highlight) : {};
+        return { ...n, highlight, ariaLabel: said.label, ariaDescription: said.description };
       }),
     [nodes, rules, chosen],
   );
@@ -210,7 +219,21 @@ export function NamespaceTree() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [listing, subsKey],
   );
-  const marks: RowMarks = { counts: chosen, widths, swatchSlot: rules.length > 0 };
+  // How much of each row's marks the pane can hold, planned for the deepest entity row shown.
+  const navRef = useRef<HTMLElement>(null);
+  const [paneWidth, setPaneWidth] = useState(0);
+  useLayoutEffect(() => {
+    const el = navRef.current;
+    if (!el) return;
+    setPaneWidth(Math.round(el.getBoundingClientRect().width));
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => setPaneWidth(Math.round(el.getBoundingClientRect().width)));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const deepest = rows.reduce((d, n) => (n.entity || n.kind === "known" ? Math.max(d, n.depth) : d), 2);
+  const tier = marksTier(paneWidth, deepest, chosen, widths, rules.length > 0);
+  const marks: RowMarks = { counts: chosen, widths, swatchSlot: rules.length > 0, ...tier };
 
   const retryTopic = (topic: string) => void subQueries[expandedTopics.indexOf(topic)]?.refetch();
 
@@ -242,7 +265,7 @@ export function NamespaceTree() {
     );
   const banner = (children: ReactNode) => <div className="shrink-0 border-y border-line px-3 py-2.5">{children}</div>;
   return (
-    <nav aria-label="Namespace" className="@container flex h-full min-h-0 flex-col">
+    <nav ref={navRef} aria-label="Namespace" className="@container flex h-full min-h-0 flex-col">
       <div className="flex h-[30px] shrink-0 items-center gap-1.5 border-b border-line pl-3 pr-1.5">
         <span className="font-semibold text-muted">Explorer</span>
         {/* Left out when the pane is too narrow to hold it beside the title. */}
@@ -325,9 +348,9 @@ export function NamespaceTree() {
               <ContextMenuItem onSelect={() => dispatch({ type: "open", tab: { id: DASHBOARD_ID, kind: "dashboard" } })}>Open dashboard</ContextMenuItem>
               <ContextMenuSeparator />
               <ContextMenuItem disabled={!menuNode?.entity} onSelect={() => menuNode && copy(menuNode.label, `Copied the name ${menuNode.label}`)}>Copy name</ContextMenuItem>
-              <ContextMenuItem disabled={!menuNode?.entity} onSelect={() => menuNode?.entity && copy(menuNode.entity.id, `Copied the entity path for ${menuNode.label}`)}>Copy entity path</ContextMenuItem>
-              <ContextMenuItem disabled={!menuEntity || !fullHost} onSelect={() => menuEntity && menuNode && copy(entityUrl(fullHost, menuEntity.id, menuEntity.kind), `Copied the URL for ${menuNode.label}`)}>Copy URL</ContextMenuItem>
-              <ContextMenuItem disabled={!menuDlqUrl} onSelect={() => menuDlqUrl && menuNode && copy(menuDlqUrl, `Copied the dead-letter URL for ${menuNode.label}`)}>Copy dead-letter URL</ContextMenuItem>
+              <ContextMenuItem disabled={!menuNode?.entity} onSelect={() => menuEntity && copy(menuEntity.id, `Copied the entity path for ${displayName(menuEntity.id)}`)}>Copy entity path</ContextMenuItem>
+              <ContextMenuItem disabled={!menuEntity || !fullHost} onSelect={() => menuEntity && menuNode && copy(entityUrl(fullHost, menuEntity.id, menuEntity.kind), `Copied the URL for ${displayName(menuEntity.id)}`)}>Copy URL</ContextMenuItem>
+              <ContextMenuItem disabled={!menuDlqUrl} onSelect={() => menuDlqUrl && menuEntity && copy(menuDlqUrl, `Copied the dead-letter URL for ${displayName(menuEntity.id)}`)}>Copy dead-letter URL</ContextMenuItem>
               <ContextMenuItem
                 disabled={!menuEntity || !canCopyString}
                 title={entra ? "Entra ID connections have no connection string. Copy the URL instead." : undefined}

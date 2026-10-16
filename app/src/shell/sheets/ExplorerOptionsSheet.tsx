@@ -1,12 +1,12 @@
 import { ChevronDown, ChevronUp, X } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useEntities, useProfiles, useSubscriptionsFor, type EntityCounts } from "@/engine";
 import {
   Button, Field, IconButton, Input, LabelSwatch, Segmented, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Sheet, ToggleGroup, formatNumber, labelColors, type LabelColor,
 } from "@/ui";
 import { useShell } from "../context";
 import { COUNT_KINDS, MAX_PATTERN_LENGTH, MAX_RULES, type CountKind, type ExplorerOptions, type HighlightRule } from "../state";
-import { compileRules, ruleProblem } from "../tree/highlight";
+import { compileRules, ruleProblem, type Compiled } from "../tree/highlight";
 
 type MatchKey = "name" | CountKind;
 const MATCH: { value: MatchKey; label: string }[] = [
@@ -68,10 +68,20 @@ export function ExplorerOptionsSheet() {
     for (const q of subQueries) for (const sub of q.data ?? []) all.push({ name: sub.name, counts: sub.counts });
     return all;
   }, [listing, subQueries]);
+  // A rule is compiled once per pattern: typing in one rule does not recompile the others (or its own earlier forms).
+  const compiled = useRef(new Map<string, Compiled | null>());
   const matchesOf = (r: HighlightRule) => {
-    const [rule] = compileRules([r]);
+    const key = `${r.id}\0${JSON.stringify(r.match)}`;
+    let rule = compiled.current.get(key);
+    if (rule === undefined) {
+      rule = compileRules([r])[0] ?? null;
+      compiled.current.set(key, rule);
+    }
     return rule ? loaded.filter((e) => rule.test(e.name, e.counts)).length : 0;
   };
+  // Forms that are no longer on screen are forgotten.
+  const live = new Set(o.rules.map((r) => `${r.id}\0${JSON.stringify(r.match)}`));
+  for (const k of compiled.current.keys()) if (!live.has(k)) compiled.current.delete(k);
   const save = () => {
     if (o.rules.some((r) => ruleProblem(r))) return setTouched(new Set(o.rules.map((r) => r.id))); // show what is wrong
     // The tree draws counts in its own order whatever order they were switched on in.

@@ -76,11 +76,11 @@ describe("agrees with RegExp on the names a pattern is tried against", () => {
   const patterns = [
     "[]", "[^]", "x{,3}", "x{3", "x{3}", "x{2,}", "x{1,2}y", "[\\d-z]", "[a-]", "[-a]", "[a\\-z]", "[\\b]", "(|a)b", "a*?b", "a+?", "\\B", "\\b", "\\bsync\\b",
     "orders", "^orders", "orders$", "^orders-(eu|us)$", "^(a|b)*c$", "^$", "^", "$", ".", "^.$", "a.c", "\\.", "^\\w+-\\d+$", "[A-Z]{2}", "[^a-c]+", "(?:ab)+", "^(?:ab){2}$",
-    "a|b|", "|", "()", "(a)(b)", "^[\\w.-]+$", "\\s", "\\S+", "\\D", "[\\s\\d]", "-dlq$", "^invoice-", "x*", "^x*$", "é", "[à-ü]", "ß", "\\t", "[\\n]",
+    "a|b|", "|", "()", "(a)(b)", "^[\\w.-]+$", "\\s", "\\S+", "\\D", "[\\s\\d]", "-dlq$", "^invoice-", "x*", "^x*$", "é", "[à-ü]", "ß", "\\t", "[\\n]", "k", "[k]", "[a-z]", "K", "\u212a", "[\u212a]", "å", "[å]", "\u212b", "[\u212b]", "[^k]", "[^a-z]",
   ];
   const names = [
     "", "a", "b", "ab", "abc", "aab", "abab", "c", "bc", "xxx", "x", "x{,3}", "x{3", "xx", "xxy", "5", "-", "z", "\b", "Orders", "orders-eu", "ORDERS-US", "orders-ap", "x-orders", "invoice-generate", "label-print",
-    "a.c", "abc.", "tracking-sync", "sync", "synchro", "AB", "AB12", "ab-12", "A1", "dlq", "orders-dlq", "orders-dlq-x", "é", "É", "ß", "ü", " ", "a b", "a\tb", "a\nb", "-a-", "a-z", "3-z",
+    "a.c", "abc.", "tracking-sync", "sync", "synchro", "AB", "AB12", "ab-12", "A1", "dlq", "orders-dlq", "orders-dlq-x", "é", "É", "ß", "ü", " ", "a b", "a\tb", "a\nb", "-a-", "a-z", "3-z", "k", "K", "\u212a", "å", "Å", "\u212b",
   ];
   for (const p of patterns) {
     it(`/${p}/i`, () => {

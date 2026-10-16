@@ -15,3 +15,10 @@ export function splitSubscriptionId(id: string): { topic: string; name: string }
   if (at < 0) return { topic: "", name: id };
   return { topic: id.slice(0, at), name: id.slice(at + SEP.length) };
 }
+
+/** The entity as a person reads it: a queue or topic by name, a subscription as `name (topic)`. Copy messages, the
+ *  palette and the tree's row names all say it this way. */
+export function displayName(id: string): string {
+  const { topic, name } = splitSubscriptionId(id);
+  return topic ? `${name} (${topic})` : id;
+}

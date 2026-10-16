@@ -4,7 +4,7 @@ import { useEntityDetails, useProfiles, useSubscriptionsFor, type EntityCounts, 
 import { Button, CountBadge, EmptyState, Hint, IconButton, Problem, Skeleton, SkeletonRows, cn, formatBytes, formatClock, formatNumber } from "@/ui";
 import { useShell } from "../context";
 import { copyFailureBody } from "../copyFailure";
-import { entityIdOf } from "../entityId";
+import { displayName, entityIdOf } from "../entityId";
 import { deadLetterUrl, entityUrl } from "../entityUrls";
 import type { EntityTab } from "../state";
 import { formatProperty, groupProperties, isTimestamp, labelOf, propertiesJson } from "./labels";
@@ -307,8 +307,8 @@ export function OverviewView({ tab }: { tab: EntityTab }) {
         )}
         <section aria-label="Addresses">
           <h2 className={H2}>Addresses</h2>
-          <Address label="URL" copyLabel="Copy URL" value={url} said={`Copied the URL for ${tab.id}`} />
-          {kind !== "topic" && <Address label="Dead-letter URL" copyLabel="Copy dead-letter URL" value={dlq} said={`Copied the dead-letter URL for ${tab.id}`} />}
+          <Address label="URL" copyLabel="Copy URL" value={url} said={`Copied the URL for ${displayName(tab.id)}`} />
+          {kind !== "topic" && <Address label="Dead-letter URL" copyLabel="Copy dead-letter URL" value={dlq} said={`Copied the dead-letter URL for ${displayName(tab.id)}`} />}
           <ConnectionStringCopy entity={tab.id} eligible={eligible} entra={entra} />
         </section>
       </div>
