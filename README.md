@@ -4,7 +4,7 @@
 
 Dispatched is an open-source alternative to [ServiceBusExplorer](https://github.com/paolosalvatori/ServiceBusExplorer) that runs on Windows, macOS and Linux, signs in with Microsoft Entra ID, works with the Service Bus Emulator, and (soon) exposes an MCP server so agents can inspect and operate your messaging safely.
 
-> **Status:** M1a (core and CLI). Browse-only: sign-in, profiles, listing, peeking, filtering and export, from the CLI and the core library. Not ready for production use.
+> **Status:** M1c, desktop browse. Read-only: sign-in, profiles, a lazy entity tree, peek views, filters, detail, export, Overview, Sessions, Rules and a Dashboard, in the desktop app and (for browsing, filtering and export) the CLI. Nothing here changes or removes messages. Not ready for production use.
 > Auto-update: release builds are signed and publish an updater manifest (the in-app update prompt arrives with the M1 shell).
 
 ## Try it (CLI)
@@ -50,6 +50,10 @@ dispatched peek orders
 - `HTTPS_PROXY` routes a connection through an HTTP proxy and forces WebSockets. A profile can store a proxy as `--proxy http://host:port`, without credentials; it takes precedence over `HTTPS_PROXY`. For an authenticated proxy, set `HTTPS_PROXY=http://user:pass@host:port` and leave the profile's proxy unset.
 - The emulator supports neither WebSockets nor a proxy.
 - TLS trust: AMQP over TCP and WebSockets use the bundled webpki root store, while the HTTPS management calls (listing, counts) use the OS store. A TLS-inspecting proxy whose CA is only in the OS store may need follow-up work.
+
+### Desktop app
+
+The app browses the namespaces and profiles you connect, read-only. Each queue or subscription has sub-tabs for Messages, Dead-letter, Transfer DLQ, Scheduled, Deferred, Sessions (session-enabled entities) and Rules (subscriptions). Views can start at the first messages, from a sequence number, or from the end, with "Peek more" to continue. Filter by property expression, body text, regex or JSONPath, and by session. A detail pane shows the body (JSON, XML, text or hex) and every system and custom property. Export the current view or the selected rows to JSON or NDJSON; it runs as a job and writes only to the file you pick in the save dialog. The Overview shows an entity's properties and live counts. The Dashboard lists counts for every queue and subscription and can refresh on a timer. Peeks never lock, receive or settle a message.
 
 ## Develop
 
