@@ -1,3 +1,5 @@
+import { accessAdvice } from "../access";
+
 export interface ListErrorText {
   /** One plain sentence and the next step; the raw message goes beneath it. */
   message: string;
@@ -13,7 +15,7 @@ export function describeListError(kind: string, profile: { name: string; host: s
     case "timeout":
       return { message: `The connection to ${host} was interrupted. Check your network or VPN, then try again.`, fix: "retry" };
     case "forbidden":
-      return { message: `This identity isn't allowed to list ${host}. Grant it Manage rights or pin entities on the connection.`, fix: "retry" };
+      return { message: `${accessAdvice(["Manage"], profile.entra ? "entra" : "connection-string")} You can also pin entities on the connection.`, fix: "edit" };
     case "not_signed_in":
       return { message: `Your sign-in for ${name} has expired. Edit the connection to sign in again.`, fix: "edit" };
     case "auth":

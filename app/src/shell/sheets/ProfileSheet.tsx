@@ -61,11 +61,11 @@ function initial(p: Profile | undefined, auth: AuthKind | undefined): Form {
   };
 }
 
-function CheckLine({ label, c }: { label: "Management" | "Messaging"; c: Check }) {
+function CheckLine({ label, c, auth }: { label: "Management" | "Messaging"; c: Check; auth: AuthKind }) {
   if (c.status === "failed")
     return (
       <li>
-        <Problem role="alert" title={`${label} failed`} body={checkAdvice(label, c.kind)} detail={c.message} />
+        <Problem role="alert" title={`${label} failed`} body={checkAdvice(label, c.kind, auth)} detail={c.message} />
       </li>
     );
   const skipped = c.status === "skipped";
@@ -569,8 +569,8 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
                   Tested <span className="font-mono" data-selectable>{tested.report.host}</span> as {tested.report.auth}, {TRANSPORT_NAME[tested.report.transport]}.
                 </p>
                 <ul aria-label="Connection test" className="m-0 flex list-none flex-col gap-2 p-0">
-                  <CheckLine label="Management" c={tested.report.management} />
-                  <CheckLine label="Messaging" c={tested.report.messaging} />
+                  <CheckLine label="Management" c={tested.report.management} auth={f.auth} />
+                  <CheckLine label="Messaging" c={tested.report.messaging} auth={f.auth} />
                 </ul>
               </>
             ) : (

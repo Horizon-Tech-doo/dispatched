@@ -115,7 +115,7 @@ describe("NamespaceTree", () => {
     renderShell("forbidden", { last_profile: "p-logistics" });
     expect(await screen.findByRole("heading", { name: "Showing pinned entities only" })).toBeInTheDocument();
     expect(
-      sentence("This identity can't list entities in sb-logistics-prod. Grant it Manage rights to see everything, or edit this connection to pin more."),
+      sentence("This key has no Manage right. Use a key whose policy includes Manage. Or edit this connection to pin more."),
     ).toBeInTheDocument();
     expect(screen.queryByText(/needs Manage,EntityRead/)).not.toBeInTheDocument(); // the engine's wording is not echoed
     expect(within(await tree()).getByRole("treeitem", { name: /^orders(,| \(|$)/ })).toBeInTheDocument();

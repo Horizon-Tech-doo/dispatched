@@ -1,4 +1,5 @@
 import type { EngineError } from "@/engine";
+import { accessAdvice, type AuthKind } from "../access";
 
 export type Errors = Partial<Record<"name" | "connectionString" | "namespace" | "proxy" | "pins" | "signIn" | "general", string>>;
 
@@ -25,12 +26,10 @@ export function placeError(e: Pick<EngineError, "kind" | "message">): Errors {
 }
 
 /** What to do about a failed check of a connection test, from the engine's error kind. */
-export function checkAdvice(label: "Management" | "Messaging", kind: string): string {
+export function checkAdvice(label: "Management" | "Messaging", kind: string, auth: AuthKind): string {
   switch (kind) {
     case "forbidden":
-      return label === "Management"
-        ? "This identity can't manage the namespace. Give it the Manage right, or use another identity."
-        : "This identity can't read messages. Give it the Listen right, or use another identity.";
+      return accessAdvice([label === "Management" ? "Manage" : "Listen"], auth);
     case "auth":
     case "not_signed_in":
       return "The credentials were refused. Check them, or sign in again.";

@@ -2,6 +2,7 @@ import { Check, Copy, KeyRound } from "lucide-react";
 import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useEntityDetails, useProfiles, useSubscriptionsFor, type EntityCounts, type EntityDetails, type SubscriptionInfo } from "@/engine";
 import { Button, CountBadge, EmptyState, Hint, IconButton, Problem, Skeleton, SkeletonRows, cn, formatBytes, formatClock, formatNumber } from "@/ui";
+import { accessAdvice, isForbidden, rightsOf, useAuthKind } from "../access";
 import { useShell } from "../context";
 import { copyFailureBody } from "../copyFailure";
 import { displayName, entityIdOf } from "../entityId";
@@ -132,13 +133,20 @@ function ConnectionStringCopy({ entity, eligible, entra }: { entity: string; eli
 /** A topic's subscriptions with their counts; a name opens that subscription. */
 function SubscriptionsTable({ topic, profileId }: { topic: string; profileId: string | null }) {
   const { dispatch } = useShell();
+  const auth = useAuthKind();
   // Read again while the Overview is shown, like its details (the engine logs only failures of either).
   const [q] = useSubscriptionsFor(profileId, [topic], REFRESH_MS);
   const subs: SubscriptionInfo[] | undefined = q?.data;
   const body = ((): ReactNode => {
     if (!q || q.isPending) return <SkeletonRows rows={3} columns={3} />;
     if (!subs)
-      return <Problem title="Couldn't list the subscriptions" body="Try refreshing. If it keeps failing, the detail below says why." detail={q.error?.message} />;
+      return (
+        <Problem
+          title="Couldn't list the subscriptions"
+          body={isForbidden(q.error) ? accessAdvice(rightsOf(q.error!.message, "Manage"), auth) : "Try refreshing. If it keeps failing, the detail below says why."}
+          detail={q.error?.message}
+        />
+      );
     if (subs.length === 0) return <p className="m-0 text-12 text-muted">This topic has no subscriptions.</p>;
     const shown = subs.slice(0, MAX_SUBSCRIPTIONS);
     return (
@@ -236,7 +244,7 @@ function PropertiesSection({ d, hasCounts, fresh, maxMb }: { d: EntityDetails; h
 }
 
 export function OverviewView({ tab }: { tab: EntityTab }) {
-  const { conn, dispatch } = useShell();
+  const { conn, dispatch, openSheet } = useShell();
   const kind = tab.kind;
   const q = useEntityDetails(conn.profileId, kind, tab.id, REFRESH_MS);
   const profiles = useProfiles();
@@ -246,6 +254,7 @@ export function OverviewView({ tab }: { tab: EntityTab }) {
   // The button waits for the profile list: until it is known, an Entra profile can't be told from the others.
   const eligible = profiles.data !== undefined && profile !== undefined && !entra;
 
+  const denied = isForbidden(q.error);
   if (q.isPending) return <SkeletonRows rows={10} columns={2} />;
   if (!q.data)
     return (q.error as { kind?: string } | null)?.kind === "not_found" ? (
@@ -259,9 +268,15 @@ export function OverviewView({ tab }: { tab: EntityTab }) {
       <EmptyState
         tone="error"
         title="Couldn't read this entity"
-        body="Try again. If it keeps failing, the detail below says why."
+        body={denied ? accessAdvice(rightsOf(q.error!.message, "Manage"), entra ? "entra" : "connection-string") : "Try again. If it keeps failing, the detail below says why."}
         detail={q.error?.message}
-        action={<Button onClick={() => void q.refetch()}>Try again</Button>}
+        action={
+          denied && conn.profileId ? (
+            <Button onClick={() => openSheet({ kind: "profile", profileId: conn.profileId! })}>Edit connection</Button>
+          ) : (
+            <Button onClick={() => void q.refetch()}>Try again</Button>
+          )
+        }
       />
     );
 
@@ -302,7 +317,12 @@ export function OverviewView({ tab }: { tab: EntityTab }) {
               {c?.truncated ? "Counted by peeking, stopped at the limit. " : c?.approximate ? "Counted by peeking. " : ""}
               Updated {formatClock(new Date(q.dataUpdatedAt).toISOString())}, every 10 s.
             </p>
-            {q.isError && <Problem className="mt-2" title="Couldn't refresh the counts" body="Showing the last counts read." detail={q.error?.message} />}
+            {q.isError && <Problem
+                className="mt-2"
+                title="Couldn't refresh the counts"
+                body={denied ? `${accessAdvice(rightsOf(q.error!.message, "Manage"), entra ? "entra" : "connection-string")} Showing the last counts read.` : "Showing the last counts read."}
+                detail={q.error?.message}
+              />}
           </section>
         )}
         <section aria-label="Addresses">

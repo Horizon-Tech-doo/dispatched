@@ -2,6 +2,7 @@ import { CircleAlert } from "lucide-react";
 import { Fragment, type ReactNode } from "react";
 import { useRules, type RuleFilter, type RuleInfo } from "@/engine";
 import { Button, EmptyState, RuleGlyph, SkeletonRows } from "@/ui";
+import { accessAdvice, isForbidden, rightsOf, useAuthKind } from "../access";
 import { useShell } from "../context";
 import type { EntityTab } from "../state";
 
@@ -109,19 +110,28 @@ function Rule({ r }: { r: RuleInfo }) {
 }
 
 export function RulesView({ tab }: { tab: EntityTab }) {
-  const { conn } = useShell();
+  const { conn, openSheet } = useShell();
+  const auth = useAuthKind();
   const q = useRules(conn.profileId, tab.id);
   if (q.isPending) return <SkeletonRows rows={6} />;
-  if (q.isError)
+  if (q.isError) {
+    const denied = isForbidden(q.error);
     return (
       <EmptyState
         tone="error"
         title="Couldn't list the rules"
-        body="Listing rules needs Manage or Listen on this subscription."
+        body={denied ? accessAdvice(rightsOf(q.error.message, "Manage"), auth) : "Try again. If it keeps failing, the detail below says why."}
         detail={q.error.message}
-        action={<Button onClick={() => void q.refetch()}>Try again</Button>}
+        action={
+          denied && conn.profileId ? (
+            <Button onClick={() => openSheet({ kind: "profile", profileId: conn.profileId! })}>Edit connection</Button>
+          ) : (
+            <Button onClick={() => void q.refetch()}>Try again</Button>
+          )
+        }
       />
     );
+  }
   if (q.data.length === 0) return <EmptyState title="No rules" body="A subscription without rules receives no messages." />;
   return (
     <div className="h-full overflow-y-auto" data-shot-scroller>

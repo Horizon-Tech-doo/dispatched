@@ -85,7 +85,8 @@ describe("message views", () => {
   it("shows a peek error with the fix", async () => {
     renderShell("peek-error", seedTab("invoice-generate", "queue", "dead-letter"));
     expect(await screen.findByRole("heading", { name: "Can't read the dead-letter queue" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Edit connection" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
   });
 
   it("an empty view says so in plain words", async () => {

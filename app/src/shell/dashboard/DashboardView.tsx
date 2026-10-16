@@ -3,6 +3,7 @@ import { Check, ClipboardCopy } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useDashboard, type DashboardRow } from "@/engine";
 import { Button, CountBadge, DataGrid, EmptyState, EntityGlyph, Hint, Input, Problem, Segmented, cn, formatClock, formatNumber, rowHeight, type GridSort } from "@/ui";
+import { accessAdvice, rightsOf, useAuthKind } from "../access";
 import { useShell } from "../context";
 import { DASHBOARD_REFRESH, type DashboardRefresh } from "../state";
 import { compareValues, pathOf, sortRows, sortValue } from "./sort";
@@ -37,6 +38,7 @@ function countColumn(id: string, header: string, pick: (r: DashboardRow) => numb
 
 export function DashboardView() {
   const { conn, prefs, setPrefs, dispatch } = useShell();
+  const auth = useAuthKind();
   const q = useDashboard(conn.profileId, prefs.dashboardRefresh * 1000);
   const [sorting, setSorting] = useState<GridSort | null>({ id: "dlq", desc: true });
   const [show, setShow] = useState<"all" | "dlq">("all");
@@ -190,6 +192,7 @@ export function DashboardView() {
               <>
                 {failures.slice(0, MAX_TOPICS_SHOWN).map((f) => f.topic).join(", ")}
                 {failures.length > MAX_TOPICS_SHOWN && ` and ${formatNumber(failures.length - MAX_TOPICS_SHOWN)} more`}. {kinds.length === 1 ? "Reason" : "Reasons"}: {kinds.join(", ")}.
+                {kinds.includes("forbidden") && ` ${accessAdvice(rightsOf(failures.find((f) => f.kind === "forbidden")!.message, "Manage"), auth)}`}
               </>
             }
             detail={kinds.slice(0, MAX_REASONS_SHOWN).map((k) => failures.find((f) => f.kind === k)!.message).join(" | ")}

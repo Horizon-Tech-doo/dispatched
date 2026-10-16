@@ -12,6 +12,7 @@ import { VIEW_LABEL } from "../tabs/subtabs";
 import { buildColumns, optionalColumns, propColumn, useColumnPrefs } from "./columns";
 import { DetailPane } from "./DetailPane";
 import { FilterBar } from "./FilterBar";
+import { useAuthKind } from "../access";
 import { describePeekError } from "./peekError";
 import { Toolbar } from "./Toolbar";
 import { defaultViewState, useViewState, viewKey } from "./viewStore";
@@ -119,7 +120,8 @@ export function MessagesView({
   const tail = vs.from.kind === "end";
   const filtered = filterCount(vs.filter) > 0;
   // The error stays on the query while a retry is on its way: show it only when it can be acted on.
-  const failure = stream.error && stream.canRetry ? describePeekError(stream.error.kind, stream.error.message, label) : null;
+  const auth = useAuthKind();
+  const failure = stream.error && stream.canRetry ? describePeekError(stream.error.kind, stream.error.message, label, auth) : null;
   const atLimit = n + vs.topN > ROW_LIMIT;
   const canPeekMore = !stream.streaming && stream.canPeekMore && !atLimit;
   const end =

@@ -13,6 +13,7 @@ import { keepTogether } from "../text";
 import { DASHBOARD_ID, MAX_FILTER_LENGTH, type CountKind } from "../state";
 import { compileRules, highlightOf, type Highlight } from "./highlight";
 import { marksTier, type MarksTier } from "./marksLayout";
+import { accessAdvice } from "../access";
 import { describeListError } from "./listError";
 import { buildNodes, type NsNode, type SubsState } from "./model";
 import type { EntityCounts } from "@/engine";
@@ -300,7 +301,7 @@ export function NamespaceTree() {
         banner(
           <Problem
             title="Showing pinned entities only"
-            body={keepTogether(`This identity can't list entities in ${host}. Grant it Manage rights to see everything, or edit this connection to pin more.`, host)}
+            body={keepTogether(`${accessAdvice(["Manage"], entra ? "entra" : "connection-string")} Or edit this connection to pin more.`, host)}
             action={editConnection && <Button onClick={editConnection}>Edit connection</Button>}
           />,
         )}
@@ -312,7 +313,7 @@ export function NamespaceTree() {
         ) : listing?.limited && listing.known.length === 0 ? (
           <EmptyState
             title="No pinned entities"
-            body={keepTogether(`This identity can't list entities in ${host} and none are pinned. Edit this connection to pin the queues or subscriptions you use, or grant it Manage rights.`, host)}
+            body={keepTogether(`${accessAdvice(["Manage"], entra ? "entra" : "connection-string")} Or edit this connection to pin the queues or subscriptions you use.`, host)}
             action={editConnection && <Button onClick={editConnection}>Edit connection</Button>}
           />
         ) : nodes.length === 1 && filter.trim() ? (

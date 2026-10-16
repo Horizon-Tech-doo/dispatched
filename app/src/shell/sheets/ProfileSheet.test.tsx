@@ -276,7 +276,7 @@ describe("ProfileSheet details", () => {
     expect(status).toHaveTextContent("Tested sb-logistics-prod.servicebus.windows.net as SAS key reader, AMQP.");
     const alert = within(status).getByRole("alert");
     expect(within(alert).getByText("Management failed")).toBeInTheDocument();
-    expect(within(alert).getByText(/needs the Manage right|Give it the Manage right/)).toBeInTheDocument();
+    expect(within(alert).getByText("This key has no Manage right. Use a key whose policy includes Manage.")).toBeInTheDocument();
     expect(within(alert).getByText(/access denied \(needs Manage\)/)).toHaveClass("font-mono");
     expect(within(status).getByText("Messaging not tested")).toBeInTheDocument();
     expect(within(status).getByText(/the Management check failed/)).toBeInTheDocument();

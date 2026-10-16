@@ -1,3 +1,5 @@
+import { accessAdvice, rightsOf, type AuthKind } from "../access";
+
 export interface PeekErrorText {
   title: string;
   body: string;
@@ -6,13 +8,13 @@ export interface PeekErrorText {
 }
 
 /** What a failed peek means for the user, by engine error kind; the raw message goes on the detail line. */
-export function describePeekError(kind: string, message: string, viewLabel: string): PeekErrorText {
+export function describePeekError(kind: string, message: string, viewLabel: string, auth: AuthKind): PeekErrorText {
   if (/session/i.test(message) && /(requires|require|enabled|sessionful)/i.test(message))
     return { title: "This entity requires sessions", body: "Open Sessions and peek one session's messages.", fix: "sessions" };
   switch (kind) {
     case "forbidden": {
-      const right = /needs ([A-Za-z,]+)/.exec(message)?.[1] ?? "Listen";
-      return { title: `Can't read the ${viewLabel}`, body: `This identity needs ${right} on this entity to peek its messages.`, fix: "retry" };
+      // Trying again can't grant a right: the way out is the connection (another key, or a role assigned in Azure).
+      return { title: `Can't read the ${viewLabel}`, body: accessAdvice(rightsOf(message, "Listen"), auth), fix: "edit" };
     }
     case "not_found":
       return { title: "This entity wasn't found", body: "It may have been deleted or renamed. Refresh the tree to see what is there now.", fix: "retry" };

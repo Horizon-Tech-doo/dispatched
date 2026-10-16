@@ -3,6 +3,7 @@ import type { ColumnDef } from "@tanstack/react-table";
 import { useMemo, useState } from "react";
 import { useSessions, type SessionListing, type SessionSummary } from "@/engine";
 import { Button, DataGrid, EmptyState, Input, formatNumber, rowHeight, type GridSort } from "@/ui";
+import { accessAdvice, isForbidden, rightsOf, useAuthKind } from "../access";
 import { useShell } from "../context";
 import { peekSession } from "../messages/peekSession";
 import type { EntityTab } from "../state";
@@ -38,7 +39,8 @@ const time = (id: string, header: string, get: (s: SessionSummary) => string | n
 });
 
 export function SessionsView({ tab, requiresSession }: { tab: EntityTab; requiresSession: boolean | null }) {
-  const { conn, prefs, dispatch } = useShell();
+  const { conn, prefs, dispatch, openSheet } = useShell();
+  const auth = useAuthKind();
   const qc = useQueryClient();
   const q = useSessions(conn.profileId, tab.id, requiresSession !== false);
   const [filter, setFilter] = useState("");
@@ -127,9 +129,15 @@ export function SessionsView({ tab, requiresSession }: { tab: EntityTab; require
               <EmptyState
                 tone="error"
                 title="Couldn't list sessions"
-                body="Try again. If it keeps failing, the detail below says why."
+                body={isForbidden(q.error) ? accessAdvice(rightsOf(q.error.message, "Listen"), auth) : "Try again. If it keeps failing, the detail below says why."}
                 detail={q.error.message}
-                action={<Button onClick={() => void q.refetch()}>Try again</Button>}
+                action={
+                  isForbidden(q.error) && conn.profileId ? (
+                    <Button onClick={() => openSheet({ kind: "profile", profileId: conn.profileId! })}>Edit connection</Button>
+                  ) : (
+                    <Button onClick={() => void q.refetch()}>Try again</Button>
+                  )
+                }
               />
             ) : undefined
           }
