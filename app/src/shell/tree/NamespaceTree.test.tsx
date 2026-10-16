@@ -30,8 +30,13 @@ describe("NamespaceTree", () => {
     expect(within(none).getByText("112")).toBeInTheDocument();
     expect(within(none).queryByText("0")).not.toBeInTheDocument();
     const dead = within(t).getByRole("treeitem", { name: "returns-intake" });
-    expect(within(dead).getByText("0").className).toContain("text-muted");
     expect(within(dead).getByText("211").className).toContain("text-accent");
+    // A zero active count stays (billing: 0 active, 0 dead letters).
+    await userEvent.click(within(t).getByRole("treeitem", { name: "shipment-events" }));
+    await focus(t);
+    await userEvent.keyboard("{ArrowRight}");
+    const empty = await within(t).findByRole("treeitem", { name: "billing" });
+    expect(within(empty).getByText("0").className).toContain("text-muted");
   });
 
   it("counts are 12px and flush right, group rows are semibold muted", async () => {

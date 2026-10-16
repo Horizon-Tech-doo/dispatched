@@ -60,7 +60,7 @@ describe("job store", () => {
     s.apply({ type: "started", id: "j1", title: "Export dead letters", total: 3417 });
     s.apply({ type: "progress", id: "j1", done: 1920, total: 3417 });
     expect(s.all()[0]).toMatchObject({ done: 1920, total: 3417, finished: false });
-    s.apply({ type: "finished", id: "j1", error: null });
+    s.apply({ type: "finished", id: "j1", error: null, summary: null, output: null });
     expect(s.all()[0].finished).toBe(true);
     s.apply({ type: "progress", id: "unknown", done: 1, total: null });
     expect(s.all()).toHaveLength(1);

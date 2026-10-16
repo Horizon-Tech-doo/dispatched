@@ -73,7 +73,7 @@ describe("Drawer", () => {
     const drawer = await screen.findByRole("region", { name: "Jobs and activity" });
     act(() => jobStore.apply({ type: "started", id: "j1", title: "Export dead letters", total: 100 }));
     act(() => jobStore.apply({ type: "progress", id: "j1", done: 40, total: 100 }));
-    act(() => jobStore.apply({ type: "finished", id: "j1", error: null }));
+    act(() => jobStore.apply({ type: "finished", id: "j1", error: null, summary: null, output: null }));
     act(() => within(drawer).getByRole("tab", { name: /Jobs/ }).focus());
     expect(within(drawer).getByText("Done")).toBeInTheDocument();
     expect(fill(drawer)).toBe("100%");
@@ -84,7 +84,7 @@ describe("Drawer", () => {
     const drawer = await screen.findByRole("region", { name: "Jobs and activity" });
     act(() => jobStore.apply({ type: "started", id: "j1", title: "Export dead letters", total: 100 }));
     act(() => jobStore.apply({ type: "progress", id: "j1", done: 40, total: 100 }));
-    act(() => jobStore.apply({ type: "finished", id: "j1", error: { kind: "network", message: "connection reset by peer" } }));
+    act(() => jobStore.apply({ type: "finished", id: "j1", error: { kind: "network", message: "connection reset by peer" }, summary: null, output: null }));
     act(() => within(drawer).getByRole("tab", { name: /Jobs/ }).focus());
     expect(fill(drawer)).toBe("40%");
     const item = within(drawer).getByRole("listitem");
@@ -98,7 +98,7 @@ describe("Drawer", () => {
     const drawer = await screen.findByRole("region", { name: "Jobs and activity" });
     act(() => jobStore.apply({ type: "started", id: "j1", title: "Export dead letters", total: 100 }));
     act(() => jobStore.apply({ type: "progress", id: "j1", done: 40, total: 100 }));
-    act(() => jobStore.apply({ type: "finished", id: "j1", error: { kind: "cancelled", message: "Cancelled" } }));
+    act(() => jobStore.apply({ type: "finished", id: "j1", error: { kind: "cancelled", message: "Cancelled" }, summary: null, output: null }));
     act(() => within(drawer).getByRole("tab", { name: /Jobs/ }).focus());
     const item = within(drawer).getByRole("listitem");
     expect(within(item).getByText("Cancelled")).toBeInTheDocument();
@@ -113,7 +113,7 @@ describe("Drawer", () => {
     expect(await screen.findByRole("button", { name: "Show activity" })).toBeInTheDocument();
     act(() => jobStore.apply({ type: "started", id: "j1", title: "Export dead letters", total: 100 }));
     expect(await screen.findByRole("button", { name: "Show activity · 1 running" })).toBeInTheDocument();
-    act(() => jobStore.apply({ type: "finished", id: "j1", error: null }));
+    act(() => jobStore.apply({ type: "finished", id: "j1", error: null, summary: null, output: null }));
     expect(await screen.findByRole("button", { name: "Show activity" })).toBeInTheDocument();
   });
 });
