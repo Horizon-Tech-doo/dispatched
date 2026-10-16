@@ -442,9 +442,21 @@ pub fn start(
 
 /// Explorer's one argument that selects `file`: `/select,"<path>"`. Explorer parses its own command
 /// line, so the quoted path must reach it as typed (see `reveal`), not re-escaped by the runtime.
+/// The path is shown the way Explorer reads it: backslashes, and no verbatim (`\\?\`) prefix, which
+/// Explorer doesn't understand (the save dialog returns plain paths; this guards against any other).
 pub fn explorer_select_arg(file: &Path) -> OsString {
     let mut arg = OsString::from("/select,\"");
-    arg.push(file);
+    match file.to_str() {
+        Some(text) => {
+            let plain = match text.strip_prefix(r"\\?\UNC\") {
+                Some(rest) => format!(r"\\{rest}"),
+                None => text.strip_prefix(r"\\?\").unwrap_or(text).to_owned(),
+            };
+            arg.push(plain.replace('/', "\\"));
+        }
+        // Not valid Unicode (possible on Windows): as it is.
+        None => arg.push(file),
+    }
     arg.push("\"");
     arg
 }
@@ -910,7 +922,7 @@ mod tests {
             (prog, args),
             (
                 "explorer.exe",
-                vec![OsString::from("/select,\"/data/exports/out.json\"")]
+                vec![OsString::from("/select,\"\\data\\exports\\out.json\"")]
             )
         );
         let (prog, args) = reveal_command(f, "linux");
@@ -928,6 +940,25 @@ mod tests {
         assert_eq!(
             explorer_select_arg(f),
             OsString::from(r#"/select,"C:\Users\Ana Maria\My exports, final\out.json""#)
+        );
+    }
+
+    #[test]
+    fn explorer_gets_a_plain_backslash_path_even_from_a_verbatim_or_slashed_one() {
+        let arg = |p: &str| explorer_select_arg(Path::new(p));
+        // The save dialog hands back `C:\...`, but a verbatim (`\\?\`) or forward-slash path must not reach
+        // Explorer as is: it doesn't understand the prefix, and `/select,` wants backslashes.
+        assert_eq!(
+            arg(r"\\?\C:\data\out.json"),
+            OsString::from(r#"/select,"C:\data\out.json""#)
+        );
+        assert_eq!(
+            arg(r"\\?\UNC\server\share\out.json"),
+            OsString::from(r#"/select,"\\server\share\out.json""#)
+        );
+        assert_eq!(
+            arg("C:/data/sub/out.json"),
+            OsString::from(r#"/select,"C:\data\sub\out.json""#)
         );
     }
 
