@@ -13,15 +13,81 @@ use crate::namespace::{EntityPath, Namespace, PeekView, SubQueue};
 use crate::{Error, Result};
 use async_trait::async_trait;
 use horizon_azure_kit::safety::CancellationToken;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, MutexGuard};
 
-type Guard<'a> = MutexGuard<'a, Option<ServiceBusConnection>>;
+type Guard<'a, C> = MutexGuard<'a, Option<C>>;
+
+/// Opens and closes the connection a [`Lifecycle`] caches. The namespace is the real one; tests
+/// use a fake that counts opens.
+#[async_trait]
+trait Connector: Sync {
+    type Conn: PeekSource;
+    async fn open(&self) -> Result<Self::Conn>;
+    async fn close(&self, conn: Self::Conn);
+}
+
+#[async_trait]
+impl Connector for Namespace {
+    type Conn = ServiceBusConnection;
+    async fn open(&self) -> Result<ServiceBusConnection> {
+        ServiceBusConnection::open(self).await
+    }
+    async fn close(&self, conn: ServiceBusConnection) {
+        let _ = conn.close().await;
+    }
+}
+
+/// A lazily-opened, cached connection, open until [`Lifecycle::close`]. Closed means closed: no
+/// read opens it again, so a long per-batch read stops at its next batch.
+struct Lifecycle<C> {
+    slot: Mutex<Option<C>>,
+    closed: AtomicBool,
+}
+
+impl<C> Default for Lifecycle<C> {
+    fn default() -> Self {
+        Self {
+            slot: Mutex::new(None),
+            closed: AtomicBool::new(false),
+        }
+    }
+}
+
+impl<C: PeekSource> Lifecycle<C> {
+    /// The cached connection, opened on demand. Hold the guard for the whole operation.
+    /// After [`Lifecycle::close`] this is `Cancelled`, and nothing is opened.
+    async fn get<K: Connector<Conn = C>>(&self, connector: &K) -> Result<Guard<'_, C>> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(Error::Cancelled);
+        }
+        let mut guard = self.slot.lock().await;
+        // Checked again under the lock: a close that waited for this lock has taken the
+        // connection, and must not see it reopened.
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(Error::Cancelled);
+        }
+        if guard.is_none() {
+            *guard = Some(connector.open().await?);
+        }
+        Ok(guard)
+    }
+
+    /// Close the connection, if open, for good. Marked closed before waiting for the lock, so
+    /// a read that holds the lock for one batch ends at its next one.
+    async fn close<K: Connector<Conn = C>>(&self, connector: &K) {
+        self.closed.store(true, Ordering::SeqCst);
+        if let Some(conn) = self.slot.lock().await.take() {
+            connector.close(conn).await;
+        }
+    }
+}
 
 /// Browse and (from M2) operate one namespace.
 pub struct Explorer {
     ns: Namespace,
     mgmt: ManagementClient,
-    amqp: Mutex<Option<ServiceBusConnection>>,
+    amqp: Lifecycle<ServiceBusConnection>,
 }
 
 impl Explorer {
@@ -36,7 +102,7 @@ impl Explorer {
         Ok(Self {
             ns,
             mgmt,
-            amqp: Mutex::new(None),
+            amqp: Lifecycle::default(),
         })
     }
 
@@ -135,7 +201,7 @@ impl Explorer {
     async fn count_once(&self, entity: &EntityPath, cap: u32) -> Result<EntityCounts> {
         let mut guard = self.connection().await?;
         let result = count_sub_queues(guard.as_mut().expect("opened"), entity, cap).await;
-        Self::drop_if_broken(&mut guard, result).await
+        drop_if_broken(&self.ns, &mut guard, result).await
     }
 
     /// Peek `view` of `entity` according to `opts`.
@@ -160,7 +226,7 @@ impl Explorer {
     ) -> Result<PeekPage> {
         let mut guard = self.connection().await?;
         let result = scan_messages(guard.as_mut().expect("opened"), address, view, opts).await;
-        Self::drop_if_broken(&mut guard, result).await
+        drop_if_broken(&self.ns, &mut guard, result).await
     }
 
     /// The last `opts.max` matches of `view` ("from the end"); see [`peek_tail`]. Locks the
@@ -172,10 +238,8 @@ impl Explorer {
         opts: &PeekOptions,
     ) -> Result<PeekPage> {
         let address = entity.address(view.sub_queue());
-        with_one_retry(|_| async {
-            peek_tail(&mut PerBatch { explorer: self }, &address, view, opts).await
-        })
-        .await
+        with_one_retry(|_| async { peek_tail(&mut self.per_batch(), &address, view, opts).await })
+            .await
     }
 
     /// One message by sequence number, if it is still in `view`.
@@ -189,7 +253,7 @@ impl Explorer {
         with_one_retry(|_| async {
             let mut guard = self.connection().await?;
             let result = peek_one(guard.as_mut().expect("opened"), &address, view, sequence).await;
-            Self::drop_if_broken(&mut guard, result).await
+            drop_if_broken(&self.ns, &mut guard, result).await
         })
         .await
     }
@@ -207,7 +271,7 @@ impl Explorer {
     ) -> Result<SequenceCollection> {
         let address = entity.address(view.sub_queue());
         collect_sequences(
-            &mut PerBatch { explorer: self },
+            &mut self.per_batch(),
             &address,
             view,
             sequences,
@@ -227,65 +291,73 @@ impl Explorer {
             let mut guard = self.connection().await?;
             let result =
                 sessions::list_session_ids(guard.as_mut().expect("opened"), &address).await;
-            Self::drop_if_broken(&mut guard, result).await
+            drop_if_broken(&self.ns, &mut guard, result).await
         })
         .await;
         let tally = with_one_retry(|_| async {
-            sessions::tally_sessions(&mut PerBatch { explorer: self }, &address, Self::COUNT_CAP)
-                .await
+            sessions::tally_sessions(&mut self.per_batch(), &address, Self::COUNT_CAP).await
         })
         .await;
         sessions::combine(broker, tally)
     }
 
     /// The cached connection, opened on demand. Hold the guard for the whole operation.
-    async fn connection(&self) -> Result<Guard<'_>> {
-        let mut guard = self.amqp.lock().await;
-        if guard.is_none() {
-            *guard = Some(ServiceBusConnection::open(&self.ns).await?);
-        }
-        Ok(guard)
+    async fn connection(&self) -> Result<Guard<'_, ServiceBusConnection>> {
+        self.amqp.get(&self.ns).await
     }
 
-    /// Pass `result` through, dropping the cached connection after a connection-level failure
-    /// (see [`retry_after`]) so the next attempt starts clean.
-    async fn drop_if_broken<T>(guard: &mut Guard<'_>, result: Result<T>) -> Result<T> {
-        if let Some(conn) = take_if_broken(guard, &result) {
-            let _ = conn.close().await;
+    /// The cached connection as a [`PerBatch`] source.
+    fn per_batch(&self) -> PerBatch<'_, Namespace> {
+        PerBatch {
+            life: &self.amqp,
+            connector: &self.ns,
         }
-        result
     }
 
-    /// Close the AMQP connection, if open.
+    /// Close the AMQP connection, if open, for good: reads started before, including long
+    /// per-batch scans, stop at their next batch with [`Error::Cancelled`], and later reads fail
+    /// the same way without connecting. Management (HTTP) calls are unaffected.
     pub async fn close(&self) {
-        if let Some(conn) = self.amqp.lock().await.take() {
-            let _ = conn.close().await;
-        }
+        self.amqp.close(&self.ns).await;
     }
 }
 
-/// The explorer's cached connection as a [`PeekSource`] that holds the connection lock for one
-/// batch only, so other operations interleave between the batches of a long scan. A
-/// connection-level failure drops the cached connection, as `drop_if_broken` does.
-struct PerBatch<'a> {
-    explorer: &'a Explorer,
+/// Pass `result` through, dropping the cached connection after a connection-level failure
+/// (see [`retry_after`]) so the next attempt starts clean.
+async fn drop_if_broken<K: Connector, T>(
+    connector: &K,
+    guard: &mut Guard<'_, K::Conn>,
+    result: Result<T>,
+) -> Result<T> {
+    if let Some(conn) = take_if_broken(guard, &result) {
+        connector.close(conn).await;
+    }
+    result
+}
+
+/// A cached connection as a [`PeekSource`] that holds the connection lock for one batch only,
+/// so other operations interleave between the batches of a long scan. A connection-level
+/// failure drops the cached connection, as `drop_if_broken` does.
+struct PerBatch<'a, K: Connector> {
+    life: &'a Lifecycle<K::Conn>,
+    connector: &'a K,
 }
 
 #[async_trait]
-impl PeekSource for PerBatch<'_> {
+impl<K: Connector> PeekSource for PerBatch<'_, K> {
     async fn peek_batch(
         &mut self,
         address: &str,
         from: i64,
         max: u32,
     ) -> Result<Vec<PeekedMessage>> {
-        let mut guard = self.explorer.connection().await?;
+        let mut guard = self.life.get(self.connector).await?;
         let result = guard
             .as_mut()
             .expect("opened")
             .peek_batch(address, from, max)
             .await;
-        Explorer::drop_if_broken(&mut guard, result).await
+        drop_if_broken(self.connector, &mut guard, result).await
     }
 
     async fn peek_session_batch(
@@ -295,13 +367,13 @@ impl PeekSource for PerBatch<'_> {
         from: i64,
         max: u32,
     ) -> Result<Vec<PeekedMessage>> {
-        let mut guard = self.explorer.connection().await?;
+        let mut guard = self.life.get(self.connector).await?;
         let result = guard
             .as_mut()
             .expect("opened")
             .peek_session_batch(address, session_id, from, max)
             .await;
-        Explorer::drop_if_broken(&mut guard, result).await
+        drop_if_broken(self.connector, &mut guard, result).await
     }
 }
 
@@ -684,6 +756,128 @@ mod tests {
             assert!(slots[0].is_none());
             assert!(slots[1].is_some() && slots[2].is_some());
         }
+    }
+
+    /// A connection that serves `1..=n` and, on its first batch, announces itself and waits for
+    /// `gate`, so a test can close the lifecycle while a read is between batches.
+    struct Gated {
+        n: i64,
+        calls: Arc<AtomicUsize>,
+        started: Arc<tokio::sync::Notify>,
+        gate: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl PeekSource for Gated {
+        async fn peek_batch(
+            &mut self,
+            _address: &str,
+            from: i64,
+            max: u32,
+        ) -> Result<Vec<crate::messaging::PeekedMessage>> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.started.notify_one();
+                self.gate.notified().await;
+            }
+            Ok((from.max(1)..=self.n)
+                .take(max as usize)
+                .map(crate::messaging::test_message)
+                .collect())
+        }
+    }
+
+    /// Opens [`Gated`] connections and counts the opens.
+    struct CountingConnector {
+        opens: AtomicUsize,
+        calls: Arc<AtomicUsize>,
+        started: Arc<tokio::sync::Notify>,
+        gate: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl Connector for CountingConnector {
+        type Conn = Gated;
+        async fn open(&self) -> Result<Gated> {
+            self.opens.fetch_add(1, Ordering::SeqCst);
+            Ok(Gated {
+                n: 50_000,
+                calls: self.calls.clone(),
+                started: self.started.clone(),
+                gate: self.gate.clone(),
+            })
+        }
+        async fn close(&self, _conn: Gated) {}
+    }
+
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+
+    #[tokio::test]
+    async fn close_stops_a_running_per_batch_read_and_opens_nothing_new() {
+        let k = CountingConnector {
+            opens: AtomicUsize::new(0),
+            calls: Arc::default(),
+            started: Arc::default(),
+            gate: Arc::default(),
+        };
+        let life = Lifecycle::<Gated>::default();
+        let opts = PeekOptions::new(10).scan_limit(100_000);
+        let read = async {
+            peek_tail(
+                &mut PerBatch {
+                    life: &life,
+                    connector: &k,
+                },
+                "q",
+                PeekView::Active,
+                &opts,
+            )
+            .await
+        };
+        let close = async {
+            k.started.notified().await;
+            // Close while the first batch holds the lock; then let that batch finish.
+            tokio::join!(life.close(&k), async { k.gate.notify_one() });
+        };
+        let (out, ()) = tokio::join!(read, close);
+        assert!(
+            matches!(out, Err(Error::Cancelled)),
+            "the read stops at its next batch: {out:?}"
+        );
+        assert_eq!(
+            k.opens.load(Ordering::SeqCst),
+            1,
+            "no connection is reopened"
+        );
+        assert_eq!(k.calls.load(Ordering::SeqCst), 1, "no batch after close");
+    }
+
+    #[tokio::test]
+    async fn a_closed_explorer_refuses_reads_without_connecting() {
+        // `.invalid` never resolves, so nothing could connect even if the check were missing.
+        let cs = crate::connstr::ConnectionString::parse(
+            "Endpoint=sb://closed.invalid/;SharedAccessKeyName=k;SharedAccessKey=a2V5",
+        )
+        .unwrap();
+        let ns = Namespace::from_connection_string(&cs).unwrap();
+        let e = Explorer::new(ns).unwrap();
+        e.close().await;
+        let q = EntityPath::queue("orders");
+        let opts = PeekOptions::new(10);
+        assert!(matches!(
+            e.peek_tail(&q, PeekView::Active, &opts).await,
+            Err(Error::Cancelled)
+        ));
+        assert!(matches!(
+            e.peek(&q, PeekView::Active, &opts).await,
+            Err(Error::Cancelled)
+        ));
+        assert!(matches!(
+            e.collect_sequences(&q, PeekView::Active, &[1], 10, None)
+                .await,
+            Err(Error::Cancelled)
+        ));
+        assert!(matches!(e.list_sessions(&q).await, Err(Error::Cancelled)));
     }
 
     #[tokio::test]
