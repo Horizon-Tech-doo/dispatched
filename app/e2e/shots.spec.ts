@@ -633,6 +633,45 @@ export const shots: {
     holds: (p) => p.getByRole("menu"),
     viewportOnly: true,
   },
+  {
+    name: "messages-filter",
+    path: seedTab("invoice-generate", "queue", "dead-letter"),
+    ready: (p) => peekStatus(p).getByText(/37 messages/),
+    prepare: async (page) => {
+      await page.getByRole("button", { name: "Filter" }).click();
+      const bar = page.getByRole("search", { name: "Message filter" });
+      await bar.getByLabel("Properties").fill("attempt >= 2");
+      await bar.getByLabel("Body contains").fill("held");
+      await bar.getByLabel("Body contains").press("Enter");
+      await peekStatus(page).getByText(/matching messages? · scanned 37/).waitFor();
+      // The pointer rests on nothing, and focus is in the grid, not on a field.
+      await page.getByRole("grid").focus();
+    },
+  },
+  {
+    name: "messages-filter-error",
+    path: seedTab("invoice-generate", "queue", "dead-letter"),
+    ready: (p) => peekStatus(p).getByText(/37 messages/),
+    prepare: async (page) => {
+      await page.getByRole("button", { name: "Filter" }).click();
+      const bar = page.getByRole("search", { name: "Message filter" });
+      await bar.getByLabel("Properties").fill("sys.Subject == 'x'");
+      await bar.getByText(/unexpected `=` at column/).waitFor();
+    },
+  },
+  {
+    name: "messages-filter-empty",
+    path: seedTab("invoice-generate", "queue", "dead-letter"),
+    ready: (p) => peekStatus(p).getByText(/37 messages/),
+    prepare: async (page) => {
+      await page.getByRole("button", { name: "Filter" }).click();
+      const bar = page.getByRole("search", { name: "Message filter" });
+      await bar.getByLabel("Body contains").fill("no-such-text");
+      await bar.getByLabel("Body contains").press("Enter");
+      await page.getByRole("heading", { name: "No messages match this filter" }).waitFor();
+      await page.getByRole("grid").focus();
+    },
+  },
 ];
 
 for (const colorScheme of ["dark", "light"] as const) {

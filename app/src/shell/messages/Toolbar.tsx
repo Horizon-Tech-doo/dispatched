@@ -1,5 +1,5 @@
 import { CircleAlert, Columns3, Filter, RefreshCw, Square } from "lucide-react";
-import { useId, useState, type ReactNode } from "react";
+import { useId, useState, type ReactNode, type Ref } from "react";
 import { TAIL_MAX, type PeekFrom } from "@/engine";
 import {
   Button, DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger,
@@ -16,8 +16,9 @@ export function Toolbar(p: {
   onTopN(n: number): void;
   filterCount: number;
   filterOpen: boolean;
-  /** Shown once the view has a filter bar to open. */
-  onToggleFilter?(): void;
+  onToggleFilter(): void;
+  /** For returning focus to the toggle when the filter bar closes with Escape. */
+  filterToggleRef?: Ref<HTMLButtonElement>;
   columns: ColumnId[];
   /** The built-in columns this view can fill, in menu order. */
   offered: Exclude<ColumnId, `prop:${string}`>[];
@@ -116,13 +117,11 @@ export function Toolbar(p: {
         </SelectContent>
       </Select>
       <div className="ml-auto flex items-center gap-1">
-        {p.onToggleFilter && (
-          <Button variant="quiet" aria-pressed={p.filterOpen} onClick={p.onToggleFilter} className={cn(p.filterOpen && "bg-selection")}>
-            <Filter aria-hidden="true" className="text-icon" />
-            Filter
-            {p.filterCount > 0 && <span className="tabular-nums text-muted">{p.filterCount}</span>}
-          </Button>
-        )}
+        <Button ref={p.filterToggleRef} variant="quiet" aria-pressed={p.filterOpen} onClick={p.onToggleFilter} className={cn(p.filterOpen && "bg-selection")}>
+          <Filter aria-hidden="true" className="text-icon" />
+          Filter
+          {p.filterCount > 0 && <span className="tabular-nums text-muted">{p.filterCount}</span>}
+        </Button>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="quiet">

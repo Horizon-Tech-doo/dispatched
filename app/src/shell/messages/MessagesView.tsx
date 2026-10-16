@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
 import { TAIL_MAX, usePeekStream, type EntityCounts, type FilterSpec, type MessageSummary, type PeekView } from "@/engine";
 import { Button, DataGrid, EmptyState, Problem, formatNumber, rowHeight } from "@/ui";
 import { yearOf } from "../time";
@@ -7,6 +7,7 @@ import { useShell } from "../context";
 import type { EntityTab } from "../state";
 import { VIEW_LABEL } from "../tabs/subtabs";
 import { buildColumns, optionalColumns, useColumnPrefs } from "./columns";
+import { FilterBar } from "./FilterBar";
 import { describePeekError } from "./peekError";
 import { Toolbar } from "./Toolbar";
 import { useViewState, viewKey, type ViewState } from "./viewStore";
@@ -41,7 +42,6 @@ export function MessagesView({
   view,
   counts,
   requiresSession,
-  filterBar,
   exportMenu,
   detail,
 }: {
@@ -49,8 +49,7 @@ export function MessagesView({
   view: PeekView;
   counts: EntityCounts | null;
   requiresSession: boolean;
-  /** Slots the later features fill: the filter bar under the toolbar, the export menu, the detail pane. */
-  filterBar?: ReactNode;
+  /** Slots the later features fill: the export menu, the detail pane. */
   exportMenu?: ReactNode;
   detail?: ReactNode;
 }) {
@@ -62,6 +61,9 @@ export function MessagesView({
   );
   const [vs, setVs] = useViewState(viewKey(profileId, tab.id, view), defaults);
   const stream = usePeekStream({ profileId, entity: tab.id, view, from: vs.from, topN: vs.topN, filter: vs.filter });
+  // The filter bar takes focus only when the user opens it, not when a view with the bar already open is shown again.
+  const [focusBar, setFocusBar] = useState(false);
+  const filterToggle = useRef<HTMLButtonElement>(null);
   const [columnIds, setColumnIds, resetColumns] = useColumnPrefs(view, requiresSession);
   const n = stream.messages.length;
   // Data-sized columns: Seq as wide as the longest sequence number, timestamps with their year only when a row is
@@ -154,7 +156,11 @@ export function MessagesView({
         onTopN={(topN) => setVs({ topN })}
         filterCount={filterCount(vs.filter)}
         filterOpen={vs.filterOpen}
-        onToggleFilter={filterBar !== undefined ? () => setVs({ filterOpen: !vs.filterOpen }) : undefined}
+        onToggleFilter={() => {
+          setFocusBar(!vs.filterOpen);
+          setVs({ filterOpen: !vs.filterOpen });
+        }}
+        filterToggleRef={filterToggle}
         columns={columnIds}
         offered={offered}
         onColumns={setColumnIds}
@@ -165,7 +171,17 @@ export function MessagesView({
         onRefresh={restart}
         exportMenu={exportMenu}
       />
-      {vs.filterOpen && filterBar}
+      {vs.filterOpen && (
+        <FilterBar
+          applied={vs.filter}
+          autoFocus={focusBar}
+          onApply={(filter) => setVs({ filter })}
+          onClose={() => {
+            setVs({ filterOpen: false });
+            filterToggle.current?.focus();
+          }}
+        />
+      )}
       {failure && n > 0 && (
         <div className="shrink-0 border-b border-line px-3 py-2">
           <Problem role="alert" title={failure.title} body={failure.body} detail={stream.error!.message} action={fixAction} />
