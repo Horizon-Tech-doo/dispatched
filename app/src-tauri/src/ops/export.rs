@@ -1001,7 +1001,12 @@ mod tests {
         let utc = time::macros::datetime!(2026-10-16 07:41 UTC);
         // UTC+2, as the webview reports it (minutes east of UTC).
         assert_eq!(
-            suggested_file_name("orders", PeekView::Active, "json", stamp_time(utc, Some(120))),
+            suggested_file_name(
+                "orders",
+                PeekView::Active,
+                "json",
+                stamp_time(utc, Some(120))
+            ),
             "orders-active-20261016-0941.json"
         );
         // Unknown or impossible offsets: UTC, marked `Z`.
