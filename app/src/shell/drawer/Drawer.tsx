@@ -1,9 +1,10 @@
 import { ChevronDown, CircleAlert } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { commands } from "@/engine";
 import { Button, EmptyState, Hint, IconButton, Tabs, TabsContent, TabsList, TabsTrigger, fileManagerName, formatClock, formatDuration, formatNumber } from "@/ui";
 import { useShell } from "../context";
 import { jobStore, useActivity, useJobs, type Job } from "./activity";
+import { plural } from "./plural";
 
 function ActivityLog() {
   const entries = useActivity();
@@ -60,7 +61,7 @@ function ActivityLog() {
   );
 }
 
-const plural = (n: number, one: string) => `${formatNumber(n)} ${n === 1 ? one : `${one}s`}`;
+
 
 /** Where a job stands, in numbers: "5 of 37", or, with no total, "5 written" and how many were looked at. */
 function counts(j: Job): string {
@@ -169,9 +170,7 @@ function JobRow({ j }: { j: Job }) {
         <span aria-hidden="true" className="hidden @[560px]:block" />
       )}
       <span className="flex items-center justify-between gap-3 @[560px]:justify-end">
-        <span
-          {...(running && j.total == null ? { role: "status" } : {})}
-          className="min-w-[96px] whitespace-nowrap text-left text-11 tabular-nums text-muted @[560px]:text-right"
+        <span className="min-w-[96px] whitespace-nowrap text-left text-11 tabular-nums text-muted @[560px]:text-right"
         >
           {state}
         </span>
@@ -216,39 +215,12 @@ function JobsList() {
   );
 }
 
-/** What a screen reader hears when a job ends. */
-function finishedMessage(j: Job): string {
-  if (j.error?.kind === "cancelled") return `${j.title} was cancelled.`;
-  if (j.error) return `${j.title} failed.`;
-  return j.written != null ? `${j.title} finished: ${plural(j.written, "message")} written.` : `${j.title} finished.`;
-}
-
-/** A polite live region that says each job's ending once; jobs already finished when the drawer opened are not announced. */
-function JobAnnouncer() {
-  const jobs = useJobs();
-  const [said, setSaid] = useState("");
-  const seen = useRef<Set<string> | null>(null);
-  if (seen.current === null) seen.current = new Set(jobs.filter((j) => j.finished).map((j) => j.id));
-  useEffect(() => {
-    const ended = jobs.filter((j) => j.finished && !seen.current!.has(j.id));
-    if (!ended.length) return;
-    for (const j of ended) seen.current!.add(j.id);
-    setSaid(finishedMessage(ended[ended.length - 1]));
-  }, [jobs]);
-  return (
-    <p role="status" aria-label="Job updates" className="sr-only">
-      {said}
-    </p>
-  );
-}
-
 export function Drawer() {
   const { shell, dispatch } = useShell();
   const jobs = useJobs();
   const running = jobs.filter((j) => !j.finished).length;
   return (
     <section aria-label="Jobs and activity" className="flex h-full min-h-0 flex-col">
-      <JobAnnouncer />
       <Tabs value={shell.layout.drawerTab} onValueChange={(v) => dispatch({ type: "layout", patch: { drawerTab: v as "jobs" | "activity" } })} className="flex min-h-0 flex-1 flex-col">
         <div className="flex h-[26px] shrink-0 items-stretch border-b border-line pr-1">
           <TabsList variant="underline" aria-label="Drawer" className="h-full px-1.5">

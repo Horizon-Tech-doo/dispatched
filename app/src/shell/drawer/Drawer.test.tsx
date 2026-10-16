@@ -213,11 +213,12 @@ describe("Drawer", () => {
     expect(within(jobs).queryByRole("button", { name: "Clear finished" })).toBeNull();
   });
 
-  it("announces a job's completion politely", async () => {
-    const jobs = await jobsTab();
-    act(() => jobStore.apply(started("j1", "Export a (active messages)", 2, "a.json")));
-    const live = () => within(jobs).getByRole("status", { name: "Job updates" });
+  it("announces a job's start and end politely, and nothing in between", async () => {
+    await jobsTab();
+    const live = () => screen.getByRole("status", { name: "Job updates" });
     expect(live()).toBeEmptyDOMElement();
+    act(() => jobStore.apply(started("j1", "Export a (active messages)", 2, "a.json")));
+    await waitFor(() => expect(live()).toHaveTextContent("Export a (active messages) started."));
     act(() => jobStore.apply(finished("j1", { summary: "s", output: "/tmp/a.json", written: 2, missing: 0, file_name: "a.json" })));
     await waitFor(() => expect(live()).toHaveTextContent("Export a (active messages) finished: 2 messages written."));
     act(() => jobStore.apply(started("j2", "Export b (active messages)", 2, "b.json")));
@@ -226,6 +227,63 @@ describe("Drawer", () => {
     act(() => jobStore.apply(started("j3", "Export c (active messages)", 2, "c.json")));
     act(() => jobStore.apply(finished("j3", { error: { kind: "io", message: "disk full" } })));
     await waitFor(() => expect(live()).toHaveTextContent("Export c (active messages) failed."));
+  });
+
+  it("does not announce progress, and the numbers are not a live region", async () => {
+    const jobs = await jobsTab();
+    const live = () => screen.getByRole("status", { name: "Job updates" });
+    act(() => jobStore.apply(started("j1", "Export a (active messages)", null, "a.json")));
+    await waitFor(() => expect(live()).toHaveTextContent("started."));
+    const before = live().firstChild;
+    act(() => jobStore.apply(progress("j1", 5, null, 1200)));
+    act(() => jobStore.apply(progress("j1", 9, null, 2400)));
+    expect(live().firstChild).toBe(before);
+    expect(live()).toHaveTextContent(/^Export a \(active messages\) started\.$/);
+    const row = within(jobs).getByRole("listitem");
+    expect(within(row).getByText("9 written · 2,400 scanned").closest("[role=status]")).toBeNull();
+    expect(within(row).queryByRole("status")).toBeNull();
+  });
+
+  it("announces a job that ends while the drawer is hidden", async () => {
+    const jobs = await jobsTab();
+    act(() => jobStore.apply(started("j1", "Export a (active messages)", 2, "a.json")));
+    await userEvent.click(within(jobs).getByRole("button", { name: "Hide drawer" }));
+    expect(screen.queryByRole("region", { name: "Jobs and activity" })).not.toBeInTheDocument();
+    act(() => jobStore.apply(finished("j1", { summary: "s", output: "/tmp/a.json", written: 2, missing: 0, file_name: "a.json" })));
+    await waitFor(() => expect(screen.getByRole("status", { name: "Job updates" })).toHaveTextContent("Export a (active messages) finished: 2 messages written."));
+  });
+
+  it("announces jobs with the same title each time they end", async () => {
+    await jobsTab();
+    const live = () => screen.getByRole("status", { name: "Job updates" });
+    const title = "Export orders (dead-letter queue)";
+    act(() => jobStore.apply(started("j1", title, 2, "orders-1.json")));
+    act(() => jobStore.apply(finished("j1", { summary: "s", output: "/tmp/1.json", written: 2, missing: 0, file_name: "orders-1.json" })));
+    await waitFor(() => expect(live()).toHaveTextContent(`${title} finished: 2 messages written.`));
+    const first = live().querySelector("p");
+    // A second job with the same title and the same result says it again: a new node, so a screen reader speaks it.
+    act(() => jobStore.apply(started("j2", title, 2, "orders-2.json")));
+    act(() => jobStore.apply(finished("j2", { summary: "s", output: "/tmp/2.json", written: 2, missing: 0, file_name: "orders-2.json" })));
+    await waitFor(() => expect(live().querySelector("p")).not.toBe(first));
+    expect(live()).toHaveTextContent(`${title} finished: 2 messages written.`);
+    // Two ending in the same moment are both said.
+    act(() => {
+      jobStore.apply(started("j3", title, 1));
+      jobStore.apply(started("j4", title, 1));
+    });
+    act(() => {
+      jobStore.apply(finished("j3", { written: 1, missing: 0 }));
+      jobStore.apply(finished("j4", { error: { kind: "io", message: "disk full" } }));
+    });
+    await waitFor(() => expect(live().querySelectorAll("p")).toHaveLength(2));
+    expect(live()).toHaveTextContent(`${title} finished: 1 message written.`);
+    expect(live()).toHaveTextContent(`${title} failed.`);
+  });
+
+  it("does not announce jobs that were already running or finished when the page mounted", async () => {
+    renderShell("default", { last_profile: "p-logistics" });
+    await screen.findByRole("region", { name: "Jobs and activity" });
+    expect(screen.getByRole("status", { name: "Job updates" })).toBeEmptyDOMElement();
   });
 
   it("cancelling disables Cancel until the job ends", async () => {
