@@ -14,7 +14,7 @@ import { DetailPane } from "./DetailPane";
 import { FilterBar } from "./FilterBar";
 import { useAuthKind } from "../access";
 import { describePeekError } from "./peekError";
-import { Toolbar } from "./Toolbar";
+import { CompactHint, CompactLabel, Toolbar } from "./Toolbar";
 import { defaultViewState, useViewState, viewKey } from "./viewStore";
 
 const EMPTY: Record<PeekView, string> = {
@@ -168,14 +168,16 @@ export function MessagesView({
   const exportSheet = (selected: number[]) =>
     openSheet({ kind: "export", entity: tab.id, view, filter: vs.filter, selected, total: counts && listedView ? listedView.count(counts) : null });
   const selectedSequences = () => [...sel.ids].map(Number).sort((a, b) => a - b);
-  const exportMenu = (
+  const exportMenu = (compact: boolean) => (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button variant="quiet" disabled={!profileId}>
-          <Download aria-hidden="true" className="text-icon" />
-          Export
-        </Button>
-      </DropdownMenuTrigger>
+      <CompactHint compact={compact} label="Export">
+        <DropdownMenuTrigger asChild>
+          <Button variant="quiet" disabled={!profileId} aria-label={compact ? "Export" : undefined}>
+            <Download aria-hidden="true" className="text-icon" />
+            <CompactLabel compact={compact}>Export</CompactLabel>
+          </Button>
+        </DropdownMenuTrigger>
+      </CompactHint>
       <DropdownMenuContent align="end">
         <DropdownMenuItem onSelect={() => exportSheet([])}>Export all…</DropdownMenuItem>
         {sel.ids.size > 0 && <DropdownMenuItem onSelect={() => exportSheet(selectedSequences())}>Export {formatNumber(sel.ids.size)} selected…</DropdownMenuItem>}

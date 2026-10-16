@@ -368,3 +368,28 @@ test("a narrow window scrolls the sub-tabs, keeps the active one in view and sho
   // More tabs on both sides: both fades are on.
   await expect(page.locator('[role="tablist"][aria-label="Entity views"][data-overflow-start][data-overflow-end]')).toHaveCount(1);
 });
+
+test("a narrow window keeps every control of the message toolbar inside it", async ({ page }) => {
+  await page.setViewportSize({ width: 640, height: 800 });
+  await open(page, "default", INVOICES, "queue", "dead-letter");
+  const toolbar = page.getByRole("toolbar", { name: "Peek options" });
+  await expect(status(page)).toContainText("37 messages");
+  /** Controls that stick out past the toolbar's edges, or a toolbar that scrolls sideways. */
+  const clipped = () =>
+    toolbar.evaluate((bar) => {
+      const b = bar.getBoundingClientRect();
+      const out: string[] = bar.scrollWidth > bar.clientWidth + 1 ? [`toolbar scrolls by ${bar.scrollWidth - bar.clientWidth}px`] : [];
+      for (const el of bar.querySelectorAll<HTMLElement>("button, input, [role=combobox], [role=radio]")) {
+        const r = el.getBoundingClientRect();
+        if (r.width > 0 && (r.left < b.left - 0.5 || r.right > b.right + 0.5)) out.push(`${el.getAttribute("aria-label") ?? el.textContent}: ${Math.round(r.right - b.right)}px past the edge`);
+      }
+      return out;
+    });
+  expect(await clipped()).toEqual([]);
+  // The controls keep their names when their labels give way to icons.
+  for (const name of ["Filter", "Columns", "Export", "Peek again"]) await expect(toolbar.getByRole("button", { name })).toBeVisible();
+  // A sequence number field and an applied filter make the row longer still.
+  await toolbar.getByRole("radio", { name: "Sequence" }).click();
+  await expect(toolbar.getByRole("textbox", { name: "From sequence number" })).toBeVisible();
+  expect(await clipped()).toEqual([]);
+});
