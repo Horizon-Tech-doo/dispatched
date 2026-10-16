@@ -23,9 +23,10 @@ test("browse: counts in the tree, open a subscription, read its views", async ({
   // 3,417 is the subscription's dead-letter count, so it is amber.
   await expect(views.getByText("3,417")).toHaveClass(/text-accent/);
   await views.getByRole("tab", { name: /Dead-letter/ }).click();
-  await expect(page.getByRole("heading", { name: "Dead-letter isn't available yet" })).toBeVisible();
+  await expect(page.getByRole("grid", { name: "Dead-letter queue" })).toBeVisible();
+  await expect(page.getByRole("status", { name: "Peek status" })).toContainText("100 messages");
   await expect(page.getByRole("banner").getByText("PROD", { exact: true })).toBeVisible();
-  await expect(page.getByText("Peek only, nothing locked")).toBeVisible();
+  await expect(page.getByRole("contentinfo").getByText("Peek only, nothing locked")).toBeVisible();
 });
 
 test("palette opens an entity", async ({ page }) => {

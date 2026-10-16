@@ -66,8 +66,9 @@ describe("persisted state", () => {
   });
 
   it("prefs fall back per field", () => {
-    expect(parsePrefs({ theme: "light", density: "huge", autoRefresh: 30 })).toEqual({ theme: "light", density: "compact", autoRefresh: 30 });
-    expect(parsePrefs(undefined)).toEqual({ theme: "system", density: "compact", autoRefresh: 0 });
+    expect(parsePrefs({ theme: "light", density: "huge", autoRefresh: 30, peekSize: 500 })).toEqual({ theme: "light", density: "compact", autoRefresh: 30, peekSize: 500 });
+    expect(parsePrefs(undefined)).toEqual({ theme: "system", density: "compact", autoRefresh: 0, peekSize: 100 });
+    expect(parsePrefs({ peekSize: 5000 }).peekSize).toBe(100);
   });
 });
 

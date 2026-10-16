@@ -30,8 +30,7 @@ describe("entity tabs", () => {
     const dl = within(views).getByRole("tab", { name: /Dead-letter/ });
     expect(within(dl).getByText("37").className).toContain("text-accent");
     await focus(dl); // Radix activates a focused tab; the panels swallow the pointer-down a click starts with
-    expect(await screen.findByRole("heading", { name: "Dead-letter isn't available yet" })).toBeInTheDocument();
-    expect(screen.getByText(/Messages that could not be delivered or processed/)).not.toHaveTextContent("next update");
+    expect(await screen.findByRole("grid", { name: "Dead-letter queue" })).toBeInTheDocument();
   });
 
   it("holds the place of sub-tab counts while they load", async () => {

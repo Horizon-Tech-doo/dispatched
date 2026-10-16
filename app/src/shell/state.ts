@@ -11,8 +11,11 @@ const num = (v: unknown, min: number, max: number, fallback: number) =>
 // ---- prefs (global, key "ui") ----
 
 export type AutoRefresh = 0 | 30 | 60;
-export interface Prefs { theme: ThemePref; density: Density; autoRefresh: AutoRefresh }
-export const defaultPrefs: Prefs = { theme: "system", density: "compact", autoRefresh: 0 };
+/** Messages each view reads at first (its Top N until the user picks another). */
+export type PeekSize = 50 | 100 | 500 | 1000;
+export const PEEK_SIZES = [50, 100, 500, 1000] as const;
+export interface Prefs { theme: ThemePref; density: Density; autoRefresh: AutoRefresh; peekSize: PeekSize }
+export const defaultPrefs: Prefs = { theme: "system", density: "compact", autoRefresh: 0, peekSize: 100 };
 
 export function parsePrefs(v: unknown): Prefs {
   const o = isObj(v) ? v : {};
@@ -20,6 +23,7 @@ export function parsePrefs(v: unknown): Prefs {
     theme: oneOf(o.theme, ["system", "dark", "light"] as const, defaultPrefs.theme),
     density: oneOf(o.density, ["compact", "comfortable"] as const, defaultPrefs.density),
     autoRefresh: oneOf(o.autoRefresh, [0, 30, 60] as const, defaultPrefs.autoRefresh),
+    peekSize: oneOf(o.peekSize, PEEK_SIZES, defaultPrefs.peekSize),
   };
 }
 
@@ -46,6 +50,9 @@ export type SubTabId = (typeof SUB_TABS)[number];
 export type EntityKind = "queue" | "topic" | "subscription";
 
 export interface OpenTab { id: string; kind: EntityKind; subTab: SubTabId }
+/** A tab showing an entity. The same as `OpenTab` until the dashboard tab arrives; entity views take this type so
+ *  they never have to handle the dashboard case. */
+export type EntityTab = OpenTab & { kind: EntityKind };
 export interface Layout { treeSize: number; drawerOpen: boolean; drawerSize: number; drawerTab: "jobs" | "activity" }
 export interface ProfileShell { tabs: OpenTab[]; activeTab: string | null; expanded: string[]; selected: string | null; layout: Layout }
 

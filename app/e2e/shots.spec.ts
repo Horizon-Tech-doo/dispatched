@@ -10,6 +10,18 @@ const onScreen = async (page: Page, el: Locator) => {
   return box != null && vp != null && box.y >= 0 && box.x >= 0 && box.y + box.height <= vp.height && box.x + box.width <= vp.width;
 };
 
+/** A connected logistics workbench with one entity tab open on `subTab` (drawer closed, so the view has the room). */
+const seedTab = (id: string, kind: "queue" | "subscription", subTab: string, scenario = "default") =>
+  `/?scenario=${scenario}&autoconnect=p-logistics&seed=${encodeURIComponent(
+    JSON.stringify({
+      "shell:p-logistics": {
+        tabs: [{ id, kind, subTab }], activeTab: id, expanded: ["group:queues", "group:topics"], selected: null,
+        layout: { treeSize: 18, drawerOpen: false, drawerSize: 18, drawerTab: "activity" },
+      },
+    }),
+  )}`;
+const peekStatus = (p: Page) => p.getByRole("status", { name: "Peek status" });
+
 export const shots: {
   name: string;
   path: string;
@@ -170,7 +182,7 @@ export const shots: {
       await page.keyboard.press("Enter");
       await page.getByRole("tablist", { name: "Open entities" }).getByRole("tab", { name: /tracking-sync/ }).waitFor();
       await page.getByRole("tablist", { name: "Entity views" }).getByRole("tab", { name: /Dead-letter/ }).click();
-      await page.getByRole("heading", { name: "Dead-letter isn't available yet" }).waitFor();
+      await page.getByRole("status", { name: "Peek status" }).getByText(/100 messages/).waitFor();
     },
   },
   {
@@ -543,6 +555,46 @@ export const shots: {
       await page.getByRole("dialog", { name: "Updates" }).getByText(/^Dispatched 0\.0\.1-mock\. Checked/).waitFor();
     },
     holds: (p) => p.getByRole("dialog", { name: "Updates" }),
+    viewportOnly: true,
+  },
+  {
+    name: "messages-dlq",
+    path: seedTab("shipment-events/subscriptions/tracking-sync", "subscription", "dead-letter"),
+    ready: (p) => peekStatus(p).getByText(/100 messages/),
+  },
+  {
+    name: "messages-active-sessions",
+    path: seedTab("returns-intake", "queue", "messages"),
+    ready: (p) => peekStatus(p).getByText(/48 messages/),
+  },
+  {
+    name: "messages-empty",
+    path: seedTab("label-print", "queue", "dead-letter"),
+    ready: (p) => p.getByRole("heading", { name: "No dead letters" }),
+  },
+  {
+    name: "messages-error",
+    path: seedTab("invoice-generate", "queue", "dead-letter", "peek-error"),
+    ready: (p) => p.getByRole("heading", { name: "Can't read the dead-letter queue" }),
+  },
+  {
+    name: "messages-from-end",
+    path: seedTab("shipment-events/subscriptions/tracking-sync", "subscription", "dead-letter"),
+    ready: (p) => peekStatus(p).getByText(/100 messages/),
+    prepare: async (page) => {
+      await page.getByRole("radio", { name: "End" }).click();
+      await peekStatus(page).getByText("Last 100 messages").waitFor();
+    },
+  },
+  {
+    name: "messages-columns-menu",
+    path: seedTab("invoice-generate", "queue", "dead-letter"),
+    ready: (p) => peekStatus(p).getByText(/37 messages/),
+    prepare: async (page) => {
+      await page.getByRole("button", { name: "Columns" }).click();
+      await page.getByRole("menuitemcheckbox", { name: "Description" }).waitFor();
+    },
+    holds: (p) => p.getByRole("menu"),
     viewportOnly: true,
   },
 ];

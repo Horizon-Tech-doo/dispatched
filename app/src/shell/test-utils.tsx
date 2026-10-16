@@ -6,6 +6,7 @@ import { createMockTransport, type Scenario } from "@/engine/mock/transport";
 import { TooltipProvider } from "@/ui";
 import { ShellProvider } from "./context";
 import { activityStore, jobStore } from "./drawer/activity";
+import { resetViewStates } from "./messages/viewStore";
 import { installStore } from "./sheets/installState";
 import { Workbench } from "./Workbench";
 
@@ -14,6 +15,7 @@ export function renderShell(scenario: Scenario = "default", seed: Record<string,
   activityStore.clear();
   jobStore.clear();
   installStore.reset();
+  resetViewStates();
   const mock = createMockTransport(scenario, 0, seed);
   setTransport(mock);
   const client = createQueryClient();

@@ -16,7 +16,9 @@ export type Scenario =
   // needs "Sign in to Northwind Traders".
   | "tenant-sign-in"
   // customs-docs holds 12,000 active messages (scan budgets); exports keep running until cancelled.
-  | "many-messages" | "export-slow";
+  | "many-messages" | "export-slow"
+  // Every peek page is refused: the identity lacks Listen.
+  | "peek-error";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -503,6 +505,8 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
         const hit = (m: MockMessage) => accepts(r.view, m) && matches(m, filter);
         // A load is up to 20 pages: as Rust, a page is logged only when it fails.
         return quietly(`Peeking ${entity} failed`, started, () => {
+          if (scenario === "peek-error")
+            throw new EngineError("forbidden", "access denied (needs Listen): Unauthorized access. 'Listen' claim(s) are required to perform this operation.");
           const all = fx.messagesOf(entity, scenario).filter((m) => m.sub === subOf(r.view));
           if (tail) {
             // The newest first, back towards the oldest; the budget may run out inside the newest window.

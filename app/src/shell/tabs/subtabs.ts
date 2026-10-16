@@ -1,8 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
-import { commands, keys, useEntities, type EntityCounts } from "@/engine";
+import { commands, keys, useEntities, type EntityCounts, type PeekView } from "@/engine";
 import { useShell } from "../context";
 import { splitSubscriptionId } from "../entityId";
-import type { EntityKind, OpenTab, SubTabId } from "../state";
+import type { EntityKind, EntityTab, SubTabId } from "../state";
 
 export interface SubTabDef {
   id: SubTabId;
@@ -31,6 +31,25 @@ export function subTabsFor(kind: EntityKind): SubTabDef[] {
   return ids.map((id) => DEFS[id]);
 }
 
+/** The peek view a sub-tab shows; null for sub-tabs that are not message lists. */
+export const VIEW_OF: Partial<Record<SubTabId, PeekView>> = {
+  messages: "active",
+  "dead-letter": "dead-letter",
+  "transfer-dlq": "transfer-dead-letter",
+  scheduled: "scheduled",
+  deferred: "deferred",
+};
+export const viewOf = (sub: SubTabId): PeekView | null => VIEW_OF[sub] ?? null;
+
+/** A view's name inside a sentence ("End of the dead-letter queue", "Can't read the scheduled messages"). */
+export const VIEW_LABEL: Record<PeekView, string> = {
+  active: "active messages",
+  "dead-letter": "dead-letter queue",
+  "transfer-dead-letter": "transfer dead-letter queue",
+  scheduled: "scheduled messages",
+  deferred: "deferred messages",
+};
+
 /** A subscription's tab id is `${topic}/subscriptions/${name}`. */
 export const splitSubscription = splitSubscriptionId;
 
@@ -53,7 +72,7 @@ export interface EntityInfo {
   parent?: string;
 }
 
-export function useEntityInfo(tab: OpenTab): EntityInfo {
+export function useEntityInfo(tab: EntityTab): EntityInfo {
   const { conn } = useShell();
   const entities = useEntities(conn.profileId);
   const sub = tab.kind === "subscription" ? splitSubscription(tab.id) : null;

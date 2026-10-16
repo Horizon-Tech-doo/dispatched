@@ -63,6 +63,10 @@ export function ShellProvider({ children }: { children: ReactNode }) {
   const refresh = useCallback(() => {
     void qc.invalidateQueries({ queryKey: ["entities"] });
     void qc.invalidateQueries({ queryKey: ["subscriptions"] });
+    // Peeks are reset, never invalidated: an invalidated peek would refetch every page it had, and the stream
+    // starts a fresh round at Top N itself once its pages are gone.
+    void qc.resetQueries({ queryKey: ["peek"] });
+    for (const queryKey of [["entity-details"], ["rules"], ["sessions"], ["dashboard"], ["message"]]) void qc.invalidateQueries({ queryKey });
   }, [qc]);
 
   return (

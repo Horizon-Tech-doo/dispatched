@@ -1,7 +1,8 @@
 import { Button, CountBadge, EmptyState, SkeletonRows, Tabs, TabsContent, TabsList, TabsTrigger } from "@/ui";
 import { useShell } from "../context";
-import type { OpenTab, SubTabId } from "../state";
-import { splitSubscription, subTabsFor, useEntityInfo, validSubTab } from "./subtabs";
+import { MessagesView } from "../messages/MessagesView";
+import type { EntityTab, SubTabId } from "../state";
+import { splitSubscription, subTabsFor, useEntityInfo, validSubTab, viewOf, type EntityInfo, type SubTabDef } from "./subtabs";
 
 const KIND_LINE = { queue: "Queue", topic: "Topic", subscription: "Subscription" } as const;
 
@@ -9,7 +10,16 @@ const KIND_LINE = { queue: "Queue", topic: "Topic", subscription: "Subscription"
  *  narrower comma), so counts up to that size, and the placeholder before them, never move the row. */
 const COUNT_SLOT = "min-w-[6ch] tabular-nums";
 
-export function EntityView({ tab }: { tab: OpenTab }) {
+/** One sub-tab's content. Message views load on their own; only the entity's own facts wait for its info. */
+function SubTabBody({ tab, def, info }: { tab: EntityTab; def: SubTabDef; info: EntityInfo }) {
+  const view = viewOf(def.id);
+  if (view) return <MessagesView tab={tab} view={view} counts={info.counts} requiresSession={info.facts.includes("sessions")} />;
+  if (def.id === "listener")
+    return <EmptyState title="Listener isn't available yet" body="Live receive, with auto-complete and message rates, comes with the operate features." />;
+  return info.status === "loading" ? <SkeletonRows rows={6} /> : <EmptyState title={`${def.label} isn't available yet`} body={def.description} />;
+}
+
+export function EntityView({ tab }: { tab: EntityTab }) {
   const { dispatch } = useShell();
   const info = useEntityInfo(tab);
   const sub = tab.kind === "subscription" ? splitSubscription(tab.id) : null;
@@ -55,8 +65,8 @@ export function EntityView({ tab }: { tab: OpenTab }) {
           })}
         </TabsList>
         {defs.map((d) => (
-          <TabsContent key={d.id} value={d.id} className="overflow-y-auto">
-            {info.status === "loading" ? <SkeletonRows rows={6} /> : <EmptyState title={`${d.label} isn't available yet`} body={d.description} />}
+          <TabsContent key={d.id} value={d.id} className={viewOf(d.id) ? "overflow-hidden" : "overflow-y-auto"}>
+            <SubTabBody tab={tab} def={d} info={info} />
           </TabsContent>
         ))}
       </Tabs>
