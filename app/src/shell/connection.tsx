@@ -13,10 +13,20 @@ interface ConnState {
 
 const idle: ConnState = { status: "idle", view: null, error: null, profileId: null };
 
-/** Queries that belong to one connection: dropped whenever the connection changes, so another connection (or the
- *  same one, connected again) never shows them. Peeks and message details are keyed by profile, but a reconnect of
- *  the same profile must read again too. */
-const PER_CONNECTION = [["entities"], ["subscriptions"], ["peek"], ["message"]];
+/** Every query family that belongs to one connection: dropped whenever the connection changes, so another connection
+ *  (or the same one, connected again) never shows them. They are keyed by profile, but a reconnect of the same profile
+ *  ("Edit connection", then save) must read again too: a new key may now be allowed what the old one was refused, or
+ *  point at another namespace. The one list for the whole shell: a new profile-keyed query family belongs here. */
+const PER_CONNECTION = [
+  ["entities"],
+  ["subscriptions"],
+  ["peek"],
+  ["message"],
+  ["entity-details"],
+  ["rules"],
+  ["sessions"],
+  ["dashboard"],
+];
 
 export function useConnectionController() {
   const qc = useQueryClient();

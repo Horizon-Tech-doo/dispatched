@@ -90,4 +90,18 @@ describe("connection controller", () => {
     act(() => result.current.closedByEngine("p-logistics"));
     expect(cached()).toBe(0);
   });
+
+  it("a reconnect of the same profile drops every per-entity read: details, rules, sessions and the dashboard too", async () => {
+    setTransport(createMockTransport("default"));
+    const client = createQueryClient();
+    const { result } = renderHook(() => useConnectionController(), {
+      wrapper: ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>,
+    });
+    await act(() => result.current.connect("p-logistics"));
+    const families = ["entity-details", "rules", "sessions", "dashboard", "peek", "message"];
+    for (const f of families) client.setQueryData([f, "p-logistics", "x"], { stale: true });
+    await act(() => result.current.connect("p-logistics"));
+    const left = client.getQueryCache().findAll().map((q) => q.queryKey[0]).filter((k) => families.includes(k as string));
+    expect(left).toEqual([]);
+  });
 });

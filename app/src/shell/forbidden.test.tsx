@@ -182,3 +182,59 @@ describe("forbidden errors give advice for how the connection signs in", () => {
     expect(await screen.findByText(advice, { exact: false }, { timeout: 4000 })).toBeInTheDocument();
   });
 });
+
+/** A button that reconnects a profile, as saving it in the profile sheet does ("Edit connection", then Connect). */
+function ReconnectProbe({ profileId }: { profileId: string }) {
+  const { conn } = useShell();
+  return (
+    <button type="button" onClick={() => void conn.connect(profileId)}>
+      Reconnect probe
+    </button>
+  );
+}
+
+describe("a reconnect after Edit connection reads every view again, without F5", () => {
+  it("Rules recover once the key has Manage", async () => {
+    const { mock } = renderShell(
+      "default",
+      seed(CS, "shipment-events/subscriptions/tracking-sync", "subscription", "rules"),
+      <ReconnectProbe profileId={CS} />,
+    );
+    deny(mock, ["list_rules"], "Manage");
+    await userEvent.keyboard("{F5}");
+    await waitFor(() => expect(screen.getByText(MANAGE_CS, { exact: false })).toBeInTheDocument(), { timeout: 4000 });
+    // The user pastes a key with Manage and saves: the engine now answers, and the profile reconnects.
+    setTransport(mock);
+    await userEvent.click(screen.getByRole("button", { name: "Reconnect probe" }));
+    expect(await screen.findByText("eu-only", {}, { timeout: 4000 })).toBeInTheDocument();
+    expect(screen.queryByText(MANAGE_CS, { exact: false })).toBeNull();
+  });
+
+  it("the Dashboard recovers", async () => {
+    const { mock } = renderShell("default", seed(CS, "::dashboard", "dashboard", "overview"), <ReconnectProbe profileId={CS} />);
+    await screen.findByRole("grid", { name: "Dashboard" });
+    setTransport({
+      listen: mock.listen,
+      invoke: (async (cmd: string, args?: Record<string, unknown>) =>
+        cmd === "dashboard"
+          ? { rows: [], failures: [{ topic: "orders", kind: "forbidden", message: "access denied (needs Manage): x" }], limited: null }
+          : mock.invoke(cmd, args)) as IpcTransport["invoke"],
+    });
+    await userEvent.keyboard("{F5}");
+    await screen.findByText(/Couldn't list the subscriptions of 1 topic/);
+    setTransport(mock);
+    await userEvent.click(screen.getByRole("button", { name: "Reconnect probe" }));
+    await waitFor(() => expect(screen.queryByText(/Couldn't list the subscriptions of/)).toBeNull(), { timeout: 4000 });
+  });
+
+  it("Overview recovers at once, not at its next 10 s poll", async () => {
+    const { mock } = renderShell("default", seed(CS, "invoice-generate", "queue", "overview"), <ReconnectProbe profileId={CS} />);
+    deny(mock, ["entity_details"], "Manage");
+    await userEvent.keyboard("{F5}");
+    await screen.findByText(MANAGE_CS, { exact: false }, { timeout: 4000 });
+    setTransport(mock);
+    await userEvent.click(screen.getByRole("button", { name: "Reconnect probe" }));
+    const counts = await screen.findByRole("region", { name: "Counts" }, { timeout: 2000 });
+    expect(within(counts).getByText("1,284")).toBeInTheDocument();
+  });
+});
