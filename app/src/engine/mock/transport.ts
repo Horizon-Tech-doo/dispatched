@@ -26,7 +26,10 @@ export type Scenario =
   // A peek's first page arrives; the next one never does (screenshots of a view still reading).
   | "peek-slow"
   // Every message read for the detail pane has gone since the grid read it (received, expired or moved).
-  | "message-gone";
+  | "message-gone"
+  // The queues' counts as the service can give them: counted by peeking (`~N`), counted by peeking up to the cap
+  // (`~N+`), or not reported at all (`?`); and a stored connection string that is scoped to another entity.
+  | "counts-approx" | "counts-capped" | "counts-unknown" | "copy-scoped";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -253,7 +256,11 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
       ? fx.manyQueues
       : scenario === "many-messages"
         ? fx.queues.map((q) => (q.name === "customs-docs" ? { ...q, counts: fx.counts(12_000, 0) } : q))
-        : fx.queues;
+        : scenario === "counts-approx" || scenario === "counts-capped"
+          ? fx.queues.map((q) => ({ ...q, counts: q.counts && { ...q.counts, approximate: true, truncated: scenario === "counts-capped" } }))
+          : scenario === "counts-unknown"
+            ? fx.queues.map((q) => ({ ...q, counts: null }))
+            : fx.queues;
   const listedTopics = (): TopicInfo[] => (scenario === "many-topics" ? fx.manyTopics : fx.topics);
 
   /** Export jobs: running ones (with their cancel), the files finished ones wrote, and the save dialog's picks. */
@@ -575,7 +582,7 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
             status: info.status,
             counts: c,
             size_in_bytes: "size_in_bytes" in info ? info.size_in_bytes : null,
-            properties: fx.details(kind, c, "requires_session" in info && info.requires_session),
+            properties: fx.details(kind, c, "requires_session" in info && info.requires_session, ("forward_to" in info && info.forward_to) || ""),
           } satisfies EntityDetails;
         });
       }
@@ -798,6 +805,7 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
           started,
           () => {
             if (p.auth.kind === "entra") throw new EngineError("invalid", "Entra ID connections have no connection string. Copy the URL instead.");
+            if (scenario === "copy-scoped") throw new EngineError("invalid", "this connection string only works for `orders`");
             if (scenario === "missing-secret") throw new EngineError("invalid", `${p.name} has no stored connection string. Edit the connection and paste it again.`);
             if (!/^[A-Za-z0-9._/~-]+$/.test(entity))
               throw new EngineError("invalid", `\`${entity}\` is not a valid entity name (letters, digits, \`.\`, \`_\`, \`-\`, \`~\` and \`/\` only)`);

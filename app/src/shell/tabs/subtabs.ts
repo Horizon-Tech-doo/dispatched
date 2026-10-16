@@ -3,7 +3,7 @@ import { commands, keys, useEntities, type EntityCounts, type PeekView } from "@
 import { formatNumber } from "@/ui";
 import { useShell } from "../context";
 import { splitSubscriptionId } from "../entityId";
-import { formatIsoDuration } from "../overview/labels";
+import { formatIsoDuration } from "../duration";
 import type { EntityKind, EntityTab, SubTabId } from "../state";
 
 export interface SubTabDef {

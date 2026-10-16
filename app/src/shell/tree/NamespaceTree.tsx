@@ -21,7 +21,7 @@ const FLOOR = { width: 280, height: 640 };
 function Counts({ n }: { n: NsNode }) {
   const c = n.counts;
   return (
-    <span className="ml-auto flex shrink-0 items-baseline gap-1.5">
+    <span className="ml-auto flex min-w-[3ch] shrink-0 items-baseline justify-end gap-1.5 pl-1">
       <CountBadge value={c?.active} quality={c ?? undefined} className="text-12" />
       {c && c.dead_letter > 0 && <CountBadge value={c.dead_letter} quality={c} attention className="text-12" />}
     </span>
@@ -70,7 +70,7 @@ function Row({ n, production, onRetry }: { n: NsNode; production: boolean; onRet
               <span className="min-w-0 truncate text-muted">{n.topic}</span>
             </>
           ) : (
-            <span className="truncate" title={n.label}>{n.label}</span>
+            <span className="min-w-0 truncate" title={n.label}>{n.label}</span>
           )}
           {n.kind !== "topic" && <Counts n={n} />}
         </>
@@ -139,10 +139,11 @@ export function NamespaceTree() {
     );
   const banner = (children: ReactNode) => <div className="shrink-0 border-y border-line px-3 py-2.5">{children}</div>;
   return (
-    <nav aria-label="Namespace" className="flex h-full min-h-0 flex-col">
+    <nav aria-label="Namespace" className="@container flex h-full min-h-0 flex-col">
       <div className="flex h-[30px] shrink-0 items-center justify-between border-b border-line px-3">
         <span className="font-semibold text-muted">Explorer</span>
-        <span className="text-11 tabular-nums text-faint">{summary}</span>
+        {/* Left out when the pane is too narrow to hold it beside the title. */}
+        <span className="hidden whitespace-nowrap text-11 tabular-nums text-faint @[230px]:inline">{summary}</span>
       </div>
       <div className="shrink-0 px-2 py-1.5">
         <Input

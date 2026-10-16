@@ -3,6 +3,7 @@ import type { ColumnDef } from "@tanstack/react-table";
 import { useCallback, useMemo } from "react";
 import { commands, keys, useSetting, type MessageSummary, type PeekView, type PropValue } from "@/engine";
 import { formatBytes } from "@/ui";
+import { formatTtl } from "../duration";
 import { formatShortTimestamp } from "../time";
 
 export type ColumnId =
@@ -111,21 +112,6 @@ export function mergeColumns(saved: unknown, next: ColumnId[], view: PeekView, s
 export function propText(v: PropValue | undefined, nullText = ""): string {
   if (!v) return "";
   return v.type === "null" ? nullText : String(v.value);
-}
-
-/** Time to live: the largest whole units, `14 d`, `1 h 30 min`, `45 s`; the service's "never" (TimeSpan.MaxValue) as such. */
-export function formatTtl(ms: number | null): string {
-  if (ms == null) return "";
-  if (ms >= 1e14) return "never";
-  const units: [number, string][] = [[86_400_000, "d"], [3_600_000, "h"], [60_000, "min"], [1000, "s"]];
-  const parts: string[] = [];
-  let rest = ms;
-  for (const [size, unit] of units) {
-    const n = Math.floor(rest / size);
-    if (n > 0 && parts.length < 2) parts.push(`${n} ${unit}`);
-    if (parts.length > 0) rest -= n * size;
-  }
-  return parts.length ? parts.join(" ") : `${ms} ms`;
 }
 
 type Meta = ColumnDef<MessageSummary, unknown>["meta"];

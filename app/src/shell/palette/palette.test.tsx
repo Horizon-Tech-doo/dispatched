@@ -52,6 +52,13 @@ describe("buildCommands", () => {
 });
 
 describe("palette", () => {
+  it("opens from the small search button that stands in for the field in a narrow window", async () => {
+    renderShell("default", { last_profile: "p-logistics" });
+    await screen.findByRole("tree", { name: "Namespace" });
+    await userEvent.click(screen.getByRole("button", { name: "Open the command palette" }));
+    expect(await screen.findByPlaceholderText("Go to entity or command")).toBeInTheDocument();
+  });
+
   it("opens with mod+k and opens an entity", async () => {
     renderShell("default", { last_profile: "p-logistics" });
     await screen.findByRole("tree", { name: "Namespace" });

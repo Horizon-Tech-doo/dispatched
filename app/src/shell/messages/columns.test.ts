@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { defaultColumns, formatTtl, mergeColumns, optionalColumns, parseColumns, propText, seqWidth } from "./columns";
+import { formatTtl } from "../duration";
+import { defaultColumns, mergeColumns, optionalColumns, parseColumns, propText, seqWidth } from "./columns";
 
 describe("message columns", () => {
   it("default per view, with Session only for session entities", () => {
@@ -21,7 +22,7 @@ describe("message columns", () => {
     expect(formatTtl(90 * 60_000)).toBe("1 h 30 min");
     expect(formatTtl(45_000)).toBe("45 s");
     expect(formatTtl(250)).toBe("250 ms");
-    expect(formatTtl(922337203685477)).toBe("never");
+    expect(formatTtl(922337203685477)).toBe("Never");
   });
   it("size Seq to the longest sequence number", () => {
     expect(seqWidth(5)).toBe("56px");

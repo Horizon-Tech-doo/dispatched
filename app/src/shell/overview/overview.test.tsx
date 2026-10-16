@@ -1,7 +1,7 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
-import { setTransport } from "@/engine";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { keys, setTransport } from "@/engine";
 import { activityStore } from "../drawer/activity";
 import { renderShell } from "../test-utils";
 
@@ -55,15 +55,25 @@ describe("overview", () => {
     expect(within(addresses).getByText(/Entra ID connections have no connection string/)).toBeInTheDocument();
   });
 
-  it("a topic has no counts, but shows its size, and only its own address", async () => {
-    renderShell("default", seed("shipment-events", "topic"));
-    const addresses = await screen.findByRole("region", { name: "Addresses" });
-    expect(screen.queryByRole("region", { name: "Counts" })).toBeNull();
+  it("a topic shows its size first, its subscriptions, and only its own address", async () => {
+    const user = userEvent.setup();
+    const { mock } = renderShell("default", seed("shipment-events", "topic"));
+    const counts = await screen.findByRole("region", { name: "Counts" });
+    expect(within(counts).getByText(/4\.0 MiB/)).toHaveTextContent("4.0 MiB of 1.0 GiB");
+    expect(within(counts).queryByText("Active")).toBeNull();
+    const addresses = screen.getByRole("region", { name: "Addresses" });
     expect(within(addresses).queryByRole("button", { name: "Copy dead-letter URL" })).toBeNull();
-    expect(within(addresses).queryByRole("button", { name: "Copy connection string" })).toBeNull();
-    const props = screen.getByRole("region", { name: "Properties" });
-    expect(within(props).getByText("Size")).toBeInTheDocument();
-    expect(within(props).getByText("4.0 MiB")).toBeInTheDocument();
+    // A topic can be copied as a connection string too.
+    await waitFor(() => expect(within(addresses).getByRole("button", { name: "Copy connection string" })).toBeEnabled());
+    const table = await screen.findByRole("table", { name: "Subscriptions" });
+    const row = within(table).getByRole("row", { name: /tracking-sync/ });
+    expect(within(row).getByText("2,906").className).toContain("text-fg");
+    expect(within(row).getByText("3,417").className).toContain("text-accent");
+    expect(within(within(table).getByRole("row", { name: /billing/ })).getAllByText("0").every((e) => e.className.includes("text-muted"))).toBe(true);
+    // The topic's own size is not repeated in the properties.
+    expect(within(screen.getByRole("region", { name: "Properties" })).queryByText("Size")).toBeNull();
+    await user.click(within(table).getByRole("button", { name: "tracking-sync" }));
+    await waitFor(() => expect(mock.calls.some((c) => c.cmd === "entity_details" && (c.args as { entity?: string })?.entity === "shipment-events/subscriptions/tracking-sync")).toBe(true));
   });
 
   it("a subscription uses the Subscriptions path in its URLs", async () => {
@@ -102,5 +112,134 @@ describe("overview", () => {
     const addresses = await screen.findByRole("region", { name: "Addresses" });
     await userEvent.click(within(addresses).getByRole("button", { name: "Copy connection string" }));
     expect(await within(addresses).findByRole("alert")).toHaveTextContent("Logistics has no stored connection string.");
+  });
+
+  it("draws counts as data: zero is quiet, a number is primary, only dead letters turn amber", async () => {
+    renderShell("default", seed("invoice-generate", "queue"));
+    const counts = await screen.findByRole("region", { name: "Counts" });
+    expect(within(counts).getByText("1,284").className).toContain("text-fg");
+    expect(within(counts).getByText("37").className).toContain("text-accent");
+    for (const zero of within(counts).getAllByText("0")) expect(zero.className).toContain("text-muted");
+  });
+
+  it("shows one Size row with the limit, and leaves the size, the limit and the message count out of the properties", async () => {
+    renderShell("default", seed("invoice-generate", "queue"));
+    const counts = await screen.findByRole("region", { name: "Counts" });
+    expect(within(counts).getByText(/80\.0 KiB/)).toHaveTextContent("80.0 KiB of 1.0 GiB");
+    const props = screen.getByRole("region", { name: "Properties" });
+    for (const gone of ["Max size", "Messages", "Size"]) expect(within(props).queryByText(gone)).toBeNull();
+  });
+
+  it("groups the properties, with the raw value on hover and machine text for times", async () => {
+    const user = userEvent.setup();
+    renderShell("default", seed("shipment-events/subscriptions/tracking-sync", "subscription"));
+    const props = await screen.findByRole("region", { name: "Properties" });
+    expect(within(props).getAllByRole("heading", { level: 3 }).map((h) => h.textContent)).toEqual(["Delivery", "Lifecycle"]);
+    expect(within(props).getByText("30 s")).toHaveAttribute("title", "PT30S");
+    expect(within(props).getByText("14 d")).toBeInTheDocument();
+    const created = within(props).getByText("Created").nextElementSibling!;
+    expect(created.className).toContain("font-mono");
+    expect(created.className).toContain("tabular-nums");
+    // Copy JSON puts the raw names and values on the clipboard.
+    await user.click(within(props).getByRole("button", { name: "Copy JSON" }));
+    const json = JSON.parse(await navigator.clipboard.readText());
+    expect(json).toMatchObject({ LockDuration: "PT30S", RequiresSession: "false", CreatedAt: "2026-09-01T08:00:00Z" });
+  });
+
+  it("a failed connection string copy explains itself, and clears on the next attempt", async () => {
+    const { mock } = renderShell("default", seed("invoice-generate", "queue"));
+    let fail = true;
+    setTransport({
+      listen: (e, cb) => mock.listen(e, cb),
+      async invoke<T>(cmd: string, args?: Record<string, unknown>) {
+        if (cmd === "copy_entity_connection_string" && fail) throw Object.assign(new Error("this connection string only works for `orders`"), { kind: "invalid" });
+        return mock.invoke<T>(cmd, args);
+      },
+    });
+    const addresses = await screen.findByRole("region", { name: "Addresses" });
+    await waitFor(() => expect(within(addresses).getByRole("button", { name: "Copy connection string" })).toBeEnabled());
+    await userEvent.click(within(addresses).getByRole("button", { name: "Copy connection string" }));
+    const alert = await within(addresses).findByRole("alert");
+    expect(within(alert).getByText("Couldn't copy the connection string")).toBeInTheDocument();
+    expect(alert).toHaveTextContent(/scoped to another entity/);
+    expect(alert).toHaveTextContent("only works for `orders`");
+    fail = false;
+    await userEvent.click(within(addresses).getByRole("button", { name: "Copy connection string" }));
+    await waitFor(() => expect(within(addresses).queryByRole("alert")).toBeNull());
+  });
+
+  it("keeps the connection string button off until the connection list has loaded", async () => {
+    const { mock, client } = renderShell("default", seed("invoice-generate", "queue"));
+    const addresses = await screen.findByRole("region", { name: "Addresses" });
+    await waitFor(() => expect(within(addresses).getByRole("button", { name: "Copy connection string" })).toBeEnabled());
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    setTransport({
+      listen: (e, cb) => mock.listen(e, cb),
+      async invoke<T>(cmd: string, args?: Record<string, unknown>) {
+        if (cmd === "profiles_list") await gate;
+        return mock.invoke<T>(cmd, args);
+      },
+    });
+    // Not awaited: the reset waits for the list that is held back.
+    act(() => void client.resetQueries({ queryKey: keys.profiles, exact: true }));
+    await waitFor(() => expect(within(addresses).getByRole("button", { name: "Copy connection string" })).toBeDisabled());
+    release();
+    await waitFor(() => expect(within(addresses).getByRole("button", { name: "Copy connection string" })).toBeEnabled());
+  });
+});
+
+describe("overview polling", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("reads the details again every 10 s while shown, and stops when it is gone", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const { mock, unmount } = renderShell("default", seed("invoice-generate", "queue"));
+    const reads = () => mock.calls.filter((c) => c.cmd === "entity_details").length;
+    await screen.findByRole("region", { name: "Counts" });
+    const first = reads();
+    expect(first).toBeGreaterThan(0);
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    await waitFor(() => expect(reads()).toBe(first + 1));
+    unmount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(40_000); });
+    expect(reads()).toBe(first + 1);
+  });
+
+  it("logs a poll that fails, and keeps the counts it had", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const { mock } = renderShell("default", seed("invoice-generate", "queue"));
+    await screen.findByRole("region", { name: "Counts" });
+    // The next read finds nothing there: the engine fails it and logs the failure.
+    setTransport({
+      listen: (e, cb) => mock.listen(e, cb),
+      invoke: <T,>(cmd: string, args?: Record<string, unknown>) => mock.invoke<T>(cmd, cmd === "entity_details" ? { ...args, entity: "deleted-queue" } : args),
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    await waitFor(() => expect(activityStore.all().some((e) => /Reading the details of deleted-queue failed/.test(e.action))).toBe(true));
+    const counts = screen.getByRole("region", { name: "Counts" });
+    expect(within(counts).getByText("1,284")).toBeInTheDocument();
+    expect(within(counts).getByText("Couldn't refresh the counts")).toBeInTheDocument();
+  });
+});
+
+describe("overview counts the service could not give exactly", () => {
+  it("marks counts taken by peeking with ~, and capped ones with ~ and +", async () => {
+    renderShell("counts-approx", seed("invoice-generate", "queue"));
+    const counts = await screen.findByRole("region", { name: "Counts" });
+    expect(within(counts).getByText("~1,284")).toBeInTheDocument();
+    expect(within(counts).getByText("~37").className).toContain("text-accent");
+    expect(within(counts).getByText(/Counted by peeking\./)).toBeInTheDocument();
+  });
+  it("says when peeking stopped at its limit", async () => {
+    renderShell("counts-capped", seed("invoice-generate", "queue"));
+    const counts = await screen.findByRole("region", { name: "Counts" });
+    expect(within(counts).getByText("~1,284+")).toBeInTheDocument();
+    expect(within(counts).getByText(/stopped at the limit/)).toBeInTheDocument();
+  });
+  it("shows ? for every count the service did not report", async () => {
+    renderShell("counts-unknown", seed("invoice-generate", "queue"));
+    const counts = await screen.findByRole("region", { name: "Counts" });
+    expect(within(counts).getAllByText("?")).toHaveLength(5);
   });
 });

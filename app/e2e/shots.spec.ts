@@ -268,7 +268,6 @@ function exportShots(): Shot[] {
 /** The Overview sub-tab: counts, addresses and every property the service reports. */
 function overviewShots(): Shot[] {
   const counts = (p: Page) => p.getByRole("region", { name: "Counts" });
-  const props = (p: Page) => p.getByRole("region", { name: "Properties" });
   return [
     { name: "overview-queue", path: seedTab("invoice-generate", "queue", "overview"), ready: (p) => counts(p).getByText("1,284") },
     {
@@ -276,12 +275,42 @@ function overviewShots(): Shot[] {
       path: seedTab("shipment-events/subscriptions/tracking-sync", "subscription", "overview"),
       ready: (p) => counts(p).getByText("3,417"),
     },
-    { name: "overview-topic", path: seedTab("shipment-events", "topic", "overview"), ready: (p) => props(p).getByText("4.0 MiB") },
+    { name: "overview-topic", path: seedTab("shipment-events", "topic", "overview"), ready: (p) => p.getByRole("table", { name: "Subscriptions" }).getByText("tracking-sync") },
     {
       // Entra: no connection string, and the button says why.
       name: "overview-entra",
       path: seedTab("invoice-generate", "queue", "overview", "default", {}, "p-logistics-dev"),
       ready: (p) => p.getByText(/Entra ID connections have no connection string/),
+    },
+    {
+      // Counts the service could only give by peeking: `~N`.
+      name: "overview-counts-approx",
+      path: seedTab("invoice-generate", "queue", "overview", "counts-approx"),
+      ready: (p) => counts(p).getByText("~1,284"),
+    },
+    {
+      // Peeking stopped at its cap: `~N+`.
+      name: "overview-counts-capped",
+      path: seedTab("invoice-generate", "queue", "overview", "counts-capped"),
+      ready: (p) => counts(p).getByText("~1,284+"),
+    },
+    {
+      // The service reported no counts: `?`, and the note says so.
+      name: "overview-unknown-counts",
+      path: seedTab("invoice-generate", "queue", "overview", "counts-unknown"),
+      ready: (p) => p.getByText(/The service didn't report counts/),
+    },
+    {
+      // The stored connection string belongs to another entity: the failure is explained next to the button.
+      name: "overview-copy-failed",
+      path: seedTab("invoice-generate", "queue", "overview", "copy-scoped"),
+      ready: (p) => counts(p).getByText("1,284"),
+      prepare: async (page) => {
+        const button = page.getByRole("button", { name: "Copy connection string" });
+        await expect(button).toBeEnabled();
+        await button.click();
+        await page.getByRole("alert").filter({ hasText: "Couldn't copy the connection string" }).waitFor();
+      },
     },
     {
       // A narrow window: the addresses and the properties stack.

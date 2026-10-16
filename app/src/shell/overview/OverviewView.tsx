@@ -1,16 +1,16 @@
 import { Check, Copy, KeyRound } from "lucide-react";
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
-import { commands, useEntityDetails, useProfiles, type EntityCounts } from "@/engine";
-import { Button, CountBadge, EmptyState, Hint, IconButton, Problem, SkeletonRows, formatBytes, formatClock } from "@/ui";
+import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { commands, useEntityDetails, useProfiles, useSubscriptionsFor, type EntityCounts, type EntityDetails, type SubscriptionInfo } from "@/engine";
+import { Button, CountBadge, EmptyState, Hint, IconButton, Problem, Skeleton, SkeletonRows, cn, formatBytes, formatClock, formatNumber } from "@/ui";
 import { useShell } from "../context";
+import { entityIdOf } from "../entityId";
 import { deadLetterUrl, entityUrl } from "../entityUrls";
 import type { EntityTab } from "../state";
-import { formatProperty, labelOf } from "./labels";
+import { formatProperty, groupProperties, isTimestamp, labelOf, propertiesJson } from "./labels";
 
 const REFRESH_MS = 10_000;
 const FLASH_MS = 1800;
-/** Shown with the counts (the footer line), so the properties list leaves it out. */
-const WITH_COUNTS = new Set(["SizeInBytes"]);
+const MAX_SUBSCRIPTIONS = 100;
 
 /** A short-lived message (copied, couldn't copy) that clears itself. */
 function useFlash(): [string, (msg: string) => void] {
@@ -25,23 +25,40 @@ function useFlash(): [string, (msg: string) => void] {
   return [msg, flash];
 }
 
-const H2 = "m-0 mb-1.5 text-12 font-semibold text-muted";
+const H2 = "m-0 mb-1.5 flex h-5 items-center text-12 font-semibold text-muted";
+
+/** A count as data: zero is quiet, a number above zero is the primary colour, and only dead letters turn amber. */
+const countTone = (value: number | undefined, attention?: boolean) => (value != null && value > 0 && !attention ? "text-fg" : undefined);
 
 function CountRow({ label, value, c, attention }: { label: string; value: number | undefined; c: EntityCounts | null; attention?: boolean }) {
   return (
     <div className="flex items-baseline justify-between gap-4 py-0.5">
       <dt className="text-12 text-muted">{label}</dt>
       <dd className="m-0">
-        <CountBadge value={value} quality={c ?? undefined} attention={attention} className="text-13" />
+        <CountBadge value={value} quality={c ?? undefined} attention={attention} className={cn("text-13", countTone(value, attention))} />
+      </dd>
+    </div>
+  );
+}
+
+/** One Size row: what the entity holds, then its limit when the service reports one. */
+function SizeRow({ bytes, maxMb }: { bytes: number; maxMb: number | null }) {
+  return (
+    <div className="flex items-baseline justify-between gap-4 py-0.5">
+      <dt className="text-12 text-muted">Size</dt>
+      <dd className="m-0 text-13 tabular-nums text-fg">
+        {formatBytes(bytes)}
+        {maxMb != null && <span className="text-muted"> of {formatBytes(maxMb * 1024 * 1024)}</span>}
       </dd>
     </div>
   );
 }
 
 /** One address: its name and copy button on a line, the address below it where a long one can wrap. */
-function Address({ label, copyLabel, value }: { label: string; copyLabel: string; value: string }) {
+function Address({ label, copyLabel, value }: { label: string; copyLabel: string; value: string | null }) {
   const [state, flash] = useFlash();
   const copy = () => {
+    if (value === null) return;
     if (!navigator.clipboard) return flash("failed");
     navigator.clipboard.writeText(value).then(() => flash("copied"), () => flash("failed"));
   };
@@ -50,7 +67,7 @@ function Address({ label, copyLabel, value }: { label: string; copyLabel: string
       <div className="flex items-center gap-1.5">
         <span className="text-12 text-muted">{label}</span>
         <Hint label={copyLabel}>
-          <IconButton label={copyLabel} className="size-5" onClick={copy}>
+          <IconButton label={copyLabel} className="size-5" disabled={value === null} onClick={copy}>
             {state === "copied" ? <Check /> : <Copy />}
           </IconButton>
         </Hint>
@@ -58,20 +75,32 @@ function Address({ label, copyLabel, value }: { label: string; copyLabel: string
           {state === "copied" ? "Copied" : state === "failed" ? "Couldn't copy" : ""}
         </span>
       </div>
-      {/* Wraps after a slash where it can, and anywhere only when one piece is wider than the column. */}
-      <div className="font-mono text-11 leading-4 [overflow-wrap:anywhere]" data-selectable>
-        {value.split(/(?<=\/)/).map((part, i) => (
-          <Fragment key={i}>
-            {i > 0 && <wbr />}
-            {part}
-          </Fragment>
-        ))}
-      </div>
+      {value === null ? (
+        <Skeleton className="mt-1 h-3 w-56" />
+      ) : (
+        // Wraps after a slash where it can, and anywhere only when one piece is wider than the column.
+        <div className="font-mono text-11 leading-4 [overflow-wrap:anywhere]" data-selectable>
+          {value.split(/(?<=\/)/).map((part, i) => (
+            <Fragment key={i}>
+              {i > 0 && <wbr />}
+              {part}
+            </Fragment>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
-function ConnectionStringCopy({ profileId, entity, entra }: { profileId: string | null; entity: string; entra: boolean }) {
+/** What went wrong with the copy, in plain words; the engine's own sentence stays as the detail. */
+function copyFailureBody(message: string): string {
+  if (/only works for/.test(message)) return "This connection's string is scoped to another entity, so its key can't open this one. Use a connection string for the whole namespace.";
+  if (/no stored connection string/.test(message)) return "Edit the connection and paste the connection string again.";
+  if (/not a valid entity name/.test(message)) return "This entity's name can't go into a connection string. Copy the URL instead.";
+  return "Try again. If it keeps failing, the detail below says why.";
+}
+
+function ConnectionStringCopy({ profileId, entity, eligible, entra }: { profileId: string | null; entity: string; eligible: boolean; entra: boolean }) {
   const [state, setState] = useState<{ kind: "idle" | "copied" } | { kind: "failed"; message: string }>({ kind: "idle" });
   useEffect(() => {
     if (state.kind !== "copied") return;
@@ -80,21 +109,22 @@ function ConnectionStringCopy({ profileId, entity, entra }: { profileId: string 
   }, [state]);
   const copy = async () => {
     if (!profileId) return;
+    setState({ kind: "idle" });
     try {
       await commands.copyEntityConnectionString(profileId, entity);
       setState({ kind: "copied" });
     } catch (e) {
-      setState({ kind: "failed", message: e instanceof Error ? e.message : String((e as { message?: string })?.message ?? e) });
+      setState({ kind: "failed", message: String((e as { message?: string } | null)?.message ?? e) });
     }
   };
   return (
-    <div className="mt-2 flex flex-col gap-1">
-      <Button className="self-start" disabled={entra || !profileId} onClick={() => void copy()}>
+    <div className="mt-2 flex flex-col gap-1.5">
+      <Button className="self-start" disabled={!eligible} onClick={() => void copy()}>
         {state.kind === "copied" ? <Check aria-hidden="true" className="size-3.5 text-icon" /> : <KeyRound aria-hidden="true" className="size-3.5 text-icon" />}
         Copy connection string
       </Button>
       {state.kind === "failed" ? (
-        <span role="alert" className="text-11 text-fg">{state.message}</span>
+        <Problem role="alert" title="Couldn't copy the connection string" body={copyFailureBody(state.message)} detail={state.message} />
       ) : (
         <span role="status" className="text-11 text-muted">
           {entra
@@ -108,13 +138,121 @@ function ConnectionStringCopy({ profileId, entity, entra }: { profileId: string 
   );
 }
 
+/** A topic's subscriptions with their counts; a name opens that subscription. */
+function SubscriptionsTable({ topic, profileId }: { topic: string; profileId: string | null }) {
+  const { dispatch } = useShell();
+  const [q] = useSubscriptionsFor(profileId, [topic]);
+  const subs: SubscriptionInfo[] | undefined = q?.data;
+  const body = ((): ReactNode => {
+    if (!q || q.isPending) return <SkeletonRows rows={3} columns={3} />;
+    if (!subs)
+      return <Problem title="Couldn't list the subscriptions" body="Try refreshing. If it keeps failing, the detail below says why." detail={q.error?.message} />;
+    if (subs.length === 0) return <p className="m-0 text-12 text-muted">This topic has no subscriptions.</p>;
+    const shown = subs.slice(0, MAX_SUBSCRIPTIONS);
+    return (
+      <>
+        <table aria-label="Subscriptions" className="w-full border-collapse text-12">
+          <thead>
+            <tr className="border-b border-line text-11 text-muted">
+              <th scope="col" className="py-1 pr-3 text-left font-normal">Name</th>
+              <th scope="col" className="px-3 py-1 text-right font-normal">Active</th>
+              <th scope="col" className="py-1 pl-3 text-right font-normal">Dead-letter</th>
+            </tr>
+          </thead>
+          <tbody>
+            {shown.map((s) => (
+              <tr key={s.name}>
+                <td className="max-w-0 py-0.5 pr-3">
+                  <button
+                    type="button"
+                    className="block max-w-full truncate rounded-ctl text-left hover:underline focus-visible:outline focus-visible:outline-1 focus-visible:outline-fg"
+                    title={s.name}
+                    onClick={() => dispatch({ type: "open", tab: { id: entityIdOf("subscription", s.name, topic), kind: "subscription" } })}
+                  >
+                    {s.name}
+                  </button>
+                </td>
+                <td className="px-3 py-0.5 text-right tabular-nums">
+                  <CountBadge value={s.counts?.active} quality={s.counts ?? undefined} className={cn("text-12", countTone(s.counts?.active))} />
+                </td>
+                <td className="py-0.5 pl-3 text-right tabular-nums">
+                  <CountBadge value={s.counts?.dead_letter} quality={s.counts ?? undefined} attention className={cn("text-12", countTone(s.counts?.dead_letter, true))} />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {subs.length > shown.length && (
+          <p className="m-0 mt-1 text-11 text-muted">Showing the first {formatNumber(shown.length)} of {formatNumber(subs.length)}. The tree lists them all.</p>
+        )}
+      </>
+    );
+  })();
+  return (
+    <section aria-label="Subscriptions" className="mb-6">
+      <h2 className={H2}>
+        Subscriptions{subs && <span className="ml-1.5 font-normal tabular-nums">{formatNumber(subs.length)}</span>}
+      </h2>
+      {body}
+    </section>
+  );
+}
+
+function PropertiesSection({ d, hasCounts, fresh }: { d: EntityDetails; hasCounts: boolean; fresh: boolean }) {
+  const [state, flash] = useFlash();
+  const copyJson = () => {
+    if (!navigator.clipboard) return flash("failed");
+    navigator.clipboard.writeText(propertiesJson(d.properties)).then(() => flash("copied"), () => flash("failed"));
+  };
+  const groups = groupProperties(d.properties, { size: d.size_in_bytes != null, messageCount: hasCounts, subscriptionCount: d.kind === "topic" });
+  return (
+    <section aria-label="Properties" className="min-w-0 flex-1">
+      <div className="mb-1.5 flex h-5 items-center gap-2">
+        <h2 className="m-0 text-12 font-semibold text-muted">Properties</h2>
+        <span role="status" className="text-11 text-muted">
+          {state === "copied" ? "Copied" : state === "failed" ? "Couldn't copy" : ""}
+        </span>
+        <Button variant="quiet" size="sm" className="ml-auto h-5 text-muted" onClick={copyJson} disabled={d.properties.length === 0}>
+          <Copy aria-hidden="true" className="text-icon" />
+          Copy JSON
+        </Button>
+      </div>
+      {!fresh && <Problem className="mb-2" title="Couldn't refresh the details" body="Showing the last details read." />}
+      {d.status && (
+        <dl className="m-0 grid grid-cols-[12.5rem_minmax(0,1fr)] gap-x-4 gap-y-1 pb-2">
+          <dt className="text-12 text-muted">Status</dt>
+          <dd className="m-0 text-12">{d.status}</dd>
+        </dl>
+      )}
+      {groups.map((g, i) => (
+        <div key={g.title} className={cn("border-line pt-2", (i > 0 || d.status) && "mt-2 border-t")}>
+          <h3 className="m-0 mb-1 text-12 font-semibold text-muted">{g.title}</h3>
+          <dl className="m-0 grid grid-cols-[12.5rem_minmax(0,1fr)] gap-x-4 gap-y-1">
+            {g.items.map((p) => (
+              <div key={p.name} className="contents">
+                <dt className="text-12 text-muted" title={p.name}>{labelOf(p.name)}</dt>
+                <dd className={cn("m-0 break-words tabular-nums", isTimestamp(p.name) ? "font-mono text-11" : "text-12")} title={p.value} data-selectable>
+                  {p.value === "" ? <span className="text-muted">None</span> : formatProperty(p.name, p.value)}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+      ))}
+    </section>
+  );
+}
+
 export function OverviewView({ tab }: { tab: EntityTab }) {
   const { conn, dispatch } = useShell();
   const kind = tab.kind;
   const q = useEntityDetails(conn.profileId, kind, tab.id, REFRESH_MS);
-  const profile = useProfiles().data?.find((p) => p.id === conn.profileId);
+  const profiles = useProfiles();
+  const profile = profiles.data?.find((p) => p.id === conn.profileId);
   const host = profile?.host ?? conn.view?.host ?? "";
   const entra = profile?.auth.kind === "entra";
+  // The button waits for the profile list: until it is known, an Entra profile can't be told from the others.
+  const eligible = profiles.data !== undefined && profile !== undefined && !entra;
 
   if (q.isPending) return <SkeletonRows rows={10} columns={2} />;
   if (!q.data)
@@ -137,69 +275,55 @@ export function OverviewView({ tab }: { tab: EntityTab }) {
 
   const d = q.data;
   const c = d.counts;
-  const hasCounts = kind !== "topic";
-  const dlqUrl = deadLetterUrl(host, tab.id, kind);
-  const properties = d.properties.filter((p) => !(hasCounts && WITH_COUNTS.has(p.name)) && !(d.status && p.name === "Status"));
-  // A topic has no counts block to carry its size, so the size joins its properties.
-  const topicSize = !hasCounts && d.size_in_bytes != null && !properties.some((p) => p.name === "SizeInBytes") ? formatBytes(d.size_in_bytes) : null;
+  const isTopic = kind === "topic";
+  const maxMbText = d.properties.find((p) => p.name === "MaxSizeInMegabytes")?.value;
+  const maxMb = maxMbText && /^\d+$/.test(maxMbText) ? Number(maxMbText) : null;
+  // A topic holds no messages of its own: its counts block is its size and, when the service reports it, its scheduled messages.
+  const showCounts = !isTopic || d.size_in_bytes != null || c !== null;
+  const url = host ? entityUrl(host, tab.id, kind) : null;
+  const dlq = host ? deadLetterUrl(host, tab.id, kind) : null;
 
   return (
     <div className="flex h-full min-h-0 flex-wrap content-start gap-x-10 gap-y-6 overflow-y-auto px-3.5 py-3" data-shot-scroller>
       <div className="flex w-[340px] max-w-full flex-col gap-6">
-        {hasCounts && (
+        {showCounts && (
           <section aria-label="Counts">
             <h2 className={H2}>Counts</h2>
             <dl className="m-0">
-              <CountRow label="Active" value={c?.active} c={c} />
-              <CountRow label="Dead-letter" value={c?.dead_letter} c={c} attention />
-              <CountRow label="Scheduled" value={c?.scheduled} c={c} />
-              <CountRow label="Transfer" value={c?.transfer} c={c} />
-              <CountRow label="Transfer DLQ" value={c?.transfer_dead_letter} c={c} attention />
+              {d.size_in_bytes != null && <SizeRow bytes={d.size_in_bytes} maxMb={maxMb} />}
+              {!isTopic && (
+                <>
+                  <CountRow label="Active" value={c?.active} c={c} />
+                  <CountRow label="Dead-letter" value={c?.dead_letter} c={c} attention />
+                </>
+              )}
+              {(!isTopic || c !== null) && <CountRow label="Scheduled" value={c?.scheduled} c={c} />}
+              {!isTopic && (
+                <>
+                  <CountRow label="Transfer" value={c?.transfer} c={c} />
+                  <CountRow label="Transfer DLQ" value={c?.transfer_dead_letter} c={c} attention />
+                </>
+              )}
             </dl>
             <p className="m-0 mt-2 text-11 text-muted">
-              {d.size_in_bytes != null && `${formatBytes(d.size_in_bytes)} stored. `}
-              {c === null && "The service didn't report counts. "}
+              {c === null && !isTopic && "The service didn't report counts. "}
               {c?.truncated ? "Counted by peeking, stopped at the limit. " : c?.approximate ? "Counted by peeking. " : ""}
               Updated {formatClock(new Date(q.dataUpdatedAt).toISOString())}, every 10 s.
             </p>
-            {q.isError && (
-              <Problem className="mt-2" title="Couldn't refresh the counts" body="Showing the last counts read." detail={q.error?.message} />
-            )}
+            {q.isError && <Problem className="mt-2" title="Couldn't refresh the counts" body="Showing the last counts read." detail={q.error?.message} />}
           </section>
         )}
         <section aria-label="Addresses">
           <h2 className={H2}>Addresses</h2>
-          <Address label="URL" copyLabel="Copy URL" value={entityUrl(host, tab.id, kind)} />
-          {dlqUrl && <Address label="Dead-letter URL" copyLabel="Copy dead-letter URL" value={dlqUrl} />}
-          {hasCounts && <ConnectionStringCopy profileId={conn.profileId} entity={tab.id} entra={entra} />}
+          <Address label="URL" copyLabel="Copy URL" value={url} />
+          {kind !== "topic" && <Address label="Dead-letter URL" copyLabel="Copy dead-letter URL" value={dlq} />}
+          <ConnectionStringCopy profileId={conn.profileId} entity={tab.id} eligible={eligible} entra={entra} />
         </section>
       </div>
-      <section aria-label="Properties" className="min-w-[320px] flex-1">
-        <h2 className={H2}>Properties</h2>
-        {!hasCounts && q.isError && <Problem className="mb-2" title="Couldn't refresh the details" body="Showing the last details read." detail={q.error?.message} />}
-        <dl className="m-0 grid grid-cols-[max-content_minmax(0,1fr)] gap-x-6 gap-y-1">
-          {d.status && (
-            <>
-              <dt className="text-12 text-muted">Status</dt>
-              <dd className="m-0 text-12">{d.status}</dd>
-            </>
-          )}
-          {topicSize && (
-            <>
-              <dt className="text-12 text-muted">Size</dt>
-              <dd className="m-0 text-12">{topicSize}</dd>
-            </>
-          )}
-          {properties.map((p) => (
-            <div key={p.name} className="contents">
-              <dt className="text-12 text-muted" title={p.name}>{labelOf(p.name)}</dt>
-              <dd className="m-0 break-words text-12" data-selectable>
-                {p.value === "" ? <span className="text-muted">None</span> : formatProperty(p.name, p.value)}
-              </dd>
-            </div>
-          ))}
-        </dl>
-      </section>
+      <div className="flex min-w-[320px] max-w-[680px] flex-1 flex-col">
+        {isTopic && <SubscriptionsTable topic={tab.id} profileId={conn.profileId} />}
+        <PropertiesSection d={d} hasCounts={c !== null} fresh={!q.isError || showCounts} />
+      </div>
     </div>
   );
 }

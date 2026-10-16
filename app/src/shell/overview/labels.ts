@@ -1,4 +1,6 @@
 import { formatBytes, formatNumber } from "@/ui";
+import type { EntityProperty } from "@/engine";
+import { formatIsoDuration } from "../duration";
 import { formatTimestamp } from "../time";
 
 const LABEL: Record<string, string> = {
@@ -19,30 +21,51 @@ export function labelOf(name: string): string {
   return words ? words[0].toUpperCase() + words.slice(1) : name;
 }
 
-const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
-
-/** `PT1M` becomes `1 min`, `P14D` becomes `14 days`; .NET's TimeSpan.MaxValue (`P10675199D...`) is "Never".
- *  Null for text that is not a day-and-time ISO 8601 duration. */
-export function formatIsoDuration(v: string): string | null {
-  const m = /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?)?$/.exec(v);
-  if (!m || v === "P" || v.endsWith("T")) return null;
-  const [d, h, min, s] = [m[1], m[2], m[3], m[4]].map((x) => (x ? Number(x) : 0));
-  if (d >= 10_675_199) return "Never";
-  const parts = [d && plural(d, "day", "days"), h && `${h} h`, min && `${min} min`, s && `${Number(s.toFixed(3))} s`].filter(Boolean);
-  return parts.length ? parts.join(" ") : "0 s";
-}
-
 const isCount = (v: string) => /^\d+$/.test(v);
 
-/** A service property's raw value as the person reads it: flags, local times, sizes and durations. Anything else as is. */
+/** Only these are rewritten: a name this list does not know keeps the value the service wrote, whatever it looks like. */
+const FLAGS = new Set([
+  "RequiresDuplicateDetection", "RequiresSession", "DeadLetteringOnMessageExpiration", "DeadLetteringOnFilterEvaluationExceptions",
+  "EnableBatchedOperations", "EnablePartitioning", "EnableExpress", "SupportOrdering",
+]);
+const DURATIONS = new Set(["LockDuration", "DefaultMessageTimeToLive", "DuplicateDetectionHistoryTimeWindow", "AutoDeleteOnIdle"]);
+
+/** `CreatedAt`, `UpdatedAt`, `AccessedAt`: shown as machine text. */
+export const isTimestamp = (name: string) => /^[A-Z]\w*At$/.test(name);
+
+/** A service property's raw value as the person reads it: flags, local times, sizes and durations of the properties
+ *  that are known to hold them. Anything else as is. */
 export function formatProperty(name: string, value: string): string {
-  if (value === "true") return "Yes";
-  if (value === "false") return "No";
-  if (/At$/.test(name)) return formatTimestamp(value) || value;
-  if (name === "MaxSizeInMegabytes" && isCount(value)) return `${formatNumber(Number(value))} MB`;
-  if (name === "MaxMessageSizeInKilobytes" && isCount(value)) return `${formatNumber(Number(value))} KB`;
-  if ((name === "MessageCount" || name === "SubscriptionCount") && isCount(value)) return formatNumber(Number(value));
-  if (name === "SizeInBytes" && isCount(value)) return formatBytes(Number(value));
-  if (/^P/.test(value)) return formatIsoDuration(value) ?? value;
-  return value;
+  if (FLAGS.has(name) && (value === "true" || value === "false")) return value === "true" ? "Yes" : "No";
+  if (isTimestamp(name)) return formatTimestamp(value) || value;
+  if (DURATIONS.has(name)) return formatIsoDuration(value) ?? value;
+  if (!isCount(value)) return value;
+  const n = Number(value);
+  switch (name) {
+    case "MaxSizeInMegabytes": return `${formatNumber(n)} MB`;
+    case "MaxMessageSizeInKilobytes": return `${formatNumber(n)} KB`;
+    case "SizeInBytes": return formatBytes(n);
+    case "MessageCount": case "SubscriptionCount": return formatNumber(n);
+    default: return value;
+  }
 }
+
+const GROUP_OF: Record<string, "Delivery" | "Features" | "Lifecycle"> = {
+  LockDuration: "Delivery", MaxDeliveryCount: "Delivery", RequiresSession: "Delivery", ForwardTo: "Delivery", ForwardDeadLetteredMessagesTo: "Delivery",
+  DeadLetteringOnMessageExpiration: "Delivery", DeadLetteringOnFilterEvaluationExceptions: "Delivery",
+  RequiresDuplicateDetection: "Features", DuplicateDetectionHistoryTimeWindow: "Features", EnablePartitioning: "Features", EnableBatchedOperations: "Features",
+  EnableExpress: "Features", SupportOrdering: "Features", MaxSizeInMegabytes: "Features", MaxMessageSizeInKilobytes: "Features", UserMetadata: "Features",
+  DefaultMessageTimeToLive: "Lifecycle", AutoDeleteOnIdle: "Lifecycle", CreatedAt: "Lifecycle", UpdatedAt: "Lifecycle", AccessedAt: "Lifecycle",
+};
+export const GROUPS = ["Delivery", "Features", "Lifecycle", "Other"] as const;
+export interface PropertyGroup { title: (typeof GROUPS)[number]; items: EntityProperty[] }
+
+/** The properties in groups (each keeps the service's order; empty groups are left out). `size` leaves out the size and
+ *  its maximum and `messageCount` the message count: the counts block shows them already; `subscriptionCount` the number of subscriptions (the Subscriptions table has it). */
+export function groupProperties(props: EntityProperty[], drop: { size?: boolean; messageCount?: boolean; subscriptionCount?: boolean }): PropertyGroup[] {
+  const shown = props.filter((p) => !(drop.size && (p.name === "SizeInBytes" || p.name === "MaxSizeInMegabytes")) && !(drop.messageCount && p.name === "MessageCount") && !(drop.subscriptionCount && p.name === "SubscriptionCount"));
+  return GROUPS.map((title) => ({ title, items: shown.filter((p) => (GROUP_OF[p.name] ?? "Other") === title) })).filter((g) => g.items.length > 0);
+}
+
+/** The raw names and values as the service reported them, as JSON text. */
+export const propertiesJson = (props: EntityProperty[]) => JSON.stringify(Object.fromEntries(props.map((p) => [p.name, p.value])), null, 2);

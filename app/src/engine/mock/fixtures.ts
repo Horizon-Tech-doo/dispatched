@@ -184,22 +184,51 @@ export function messagesOf(entity: string, scenario: string): MockMessage[] {
   return all;
 }
 
-/** The properties an entity's description lists, in the service's order. */
-export const details = (kind: EntityKindName, c: EntityCounts | null, session: boolean): EntityProperty[] => [
-  { name: "LockDuration", value: "PT30S" },
-  { name: "MaxSizeInMegabytes", value: "1024" },
-  { name: "RequiresDuplicateDetection", value: "false" },
-  { name: "RequiresSession", value: String(session) },
-  { name: "DefaultMessageTimeToLive", value: "P14D" },
-  { name: "DeadLetteringOnMessageExpiration", value: "true" },
-  { name: "MaxDeliveryCount", value: "10" },
-  { name: "EnableBatchedOperations", value: "true" },
-  ...(kind === "queue" ? [{ name: "EnablePartitioning", value: "false" }] : []),
-  { name: "AutoDeleteOnIdle", value: "P10675199DT2H48M5.4775807S" },
-  { name: "CreatedAt", value: "2026-09-01T08:00:00Z" },
-  { name: "UpdatedAt", value: "2026-10-01T08:00:00Z" },
-  ...(c ? [{ name: "MessageCount", value: String(c.active + c.dead_letter) }] : []),
-];
+/** The properties an entity's description lists, in the service's order. Each kind reports its own set. */
+export const details = (kind: EntityKindName, c: EntityCounts | null, session: boolean, forwardTo = ""): EntityProperty[] => {
+  const created = [{ name: "CreatedAt", value: "2026-09-01T08:00:00Z" }, { name: "UpdatedAt", value: "2026-10-01T08:00:00Z" }];
+  if (kind === "topic")
+    return [
+      { name: "MaxSizeInMegabytes", value: "1024" },
+      { name: "RequiresDuplicateDetection", value: "true" },
+      { name: "DuplicateDetectionHistoryTimeWindow", value: "PT10M" },
+      { name: "DefaultMessageTimeToLive", value: "P14D" },
+      { name: "EnableBatchedOperations", value: "true" },
+      { name: "EnablePartitioning", value: "false" },
+      { name: "SupportOrdering", value: "true" },
+      { name: "SubscriptionCount", value: "3" },
+      { name: "AutoDeleteOnIdle", value: "P10675199DT2H48M5.4775807S" },
+      ...created,
+    ];
+  if (kind === "subscription")
+    return [
+      { name: "LockDuration", value: "PT30S" },
+      { name: "RequiresSession", value: String(session) },
+      { name: "DefaultMessageTimeToLive", value: "P14D" },
+      { name: "DeadLetteringOnMessageExpiration", value: "true" },
+      { name: "DeadLetteringOnFilterEvaluationExceptions", value: "true" },
+      { name: "MaxDeliveryCount", value: "10" },
+      { name: "ForwardTo", value: forwardTo },
+      { name: "ForwardDeadLetteredMessagesTo", value: "" },
+      { name: "AutoDeleteOnIdle", value: "P10675199DT2H48M5.4775807S" },
+      ...created,
+      ...(c ? [{ name: "MessageCount", value: String(c.active + c.dead_letter) }] : []),
+    ];
+  return [
+    { name: "LockDuration", value: "PT30S" },
+    { name: "MaxSizeInMegabytes", value: "1024" },
+    { name: "RequiresDuplicateDetection", value: "false" },
+    { name: "RequiresSession", value: String(session) },
+    { name: "DefaultMessageTimeToLive", value: "P14D" },
+    { name: "DeadLetteringOnMessageExpiration", value: "true" },
+    { name: "MaxDeliveryCount", value: "10" },
+    { name: "EnableBatchedOperations", value: "true" },
+    { name: "EnablePartitioning", value: "false" },
+    { name: "AutoDeleteOnIdle", value: "P10675199DT2H48M5.4775807S" },
+    ...created,
+    ...(c ? [{ name: "MessageCount", value: String(c.active + c.dead_letter) }] : []),
+  ];
+};
 
 const defaultRule: RuleInfo = { name: "$Default", filter: { kind: "sql", expression: "1=1" }, action: null, created_at: "2026-09-01T08:00:00Z" };
 

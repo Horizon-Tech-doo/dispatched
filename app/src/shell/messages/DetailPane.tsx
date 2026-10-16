@@ -7,7 +7,8 @@ import {
 } from "@/ui";
 import { VIEW_LABEL } from "../tabs/subtabs";
 import { formatTimestamp } from "../time";
-import { formatTtl, propText } from "./columns";
+import { formatTtl } from "../duration";
+import { propText } from "./columns";
 import { decodeBody, toExportJson } from "./exportJson";
 
 const DEBOUNCE_MS = 120;
