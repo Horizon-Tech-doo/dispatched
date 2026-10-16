@@ -11,11 +11,11 @@ const onScreen = async (page: Page, el: Locator) => {
 };
 
 /** A connected logistics workbench with one entity tab open on `subTab` (drawer closed, so the view has the room). */
-const seedTab = (id: string, kind: "queue" | "subscription", subTab: string, scenario = "default", extra: Record<string, unknown> = {}) =>
-  `/?scenario=${scenario}&autoconnect=p-logistics&seed=${encodeURIComponent(
+const seedTab = (id: string, kind: "queue" | "topic" | "subscription", subTab: string, scenario = "default", extra: Record<string, unknown> = {}, profile = "p-logistics") =>
+  `/?scenario=${scenario}&autoconnect=${profile}&seed=${encodeURIComponent(
     JSON.stringify({
       ...extra,
-      "shell:p-logistics": {
+      [`shell:${profile}`]: {
         tabs: [{ id, kind, subTab }], activeTab: id, expanded: ["group:queues", "group:topics"], selected: null,
         layout: { treeSize: 18, drawerOpen: false, drawerSize: 18, drawerTab: "activity" },
       },
@@ -260,6 +260,37 @@ function exportShots(): Shot[] {
         await page.setViewportSize({ width: 640, height: 800 });
         await exportAll(page);
         await jobs(page).getByText(/^([3-9]|\d\d) of 37$/).waitFor();
+      },
+    },
+  ];
+}
+
+/** The Overview sub-tab: counts, addresses and every property the service reports. */
+function overviewShots(): Shot[] {
+  const counts = (p: Page) => p.getByRole("region", { name: "Counts" });
+  const props = (p: Page) => p.getByRole("region", { name: "Properties" });
+  return [
+    { name: "overview-queue", path: seedTab("invoice-generate", "queue", "overview"), ready: (p) => counts(p).getByText("1,284") },
+    {
+      name: "overview-subscription",
+      path: seedTab("shipment-events/subscriptions/tracking-sync", "subscription", "overview"),
+      ready: (p) => counts(p).getByText("3,417"),
+    },
+    { name: "overview-topic", path: seedTab("shipment-events", "topic", "overview"), ready: (p) => props(p).getByText("4.0 MiB") },
+    {
+      // Entra: no connection string, and the button says why.
+      name: "overview-entra",
+      path: seedTab("invoice-generate", "queue", "overview", "default", {}, "p-logistics-dev"),
+      ready: (p) => p.getByText(/Entra ID connections have no connection string/),
+    },
+    {
+      // A narrow window: the addresses and the properties stack.
+      name: "overview-narrow",
+      path: seedTab("invoice-generate", "queue", "overview"),
+      ready: (p) => counts(p).getByText("1,284"),
+      prepare: async (page) => {
+        await page.setViewportSize({ width: 640, height: 800 });
+        await counts(page).waitFor();
       },
     },
   ];
@@ -942,6 +973,7 @@ export const shots: Shot[] = [
   },
   ...detailShots(),
   ...exportShots(),
+  ...overviewShots(),
 ];
 
 for (const colorScheme of ["dark", "light"] as const) {

@@ -162,7 +162,7 @@ describe("entity tabs", () => {
     renderShell("default", { last_profile: "p-logistics", "shell:p-logistics": { tabs: [{ id: "shipment-events", kind: "topic", subTab: "dead-letter" }], activeTab: "shipment-events" } });
     const views = await screen.findByRole("tablist", { name: "Entity views" });
     expect(within(views).getByRole("tab", { name: "Overview" })).toHaveAttribute("aria-selected", "true");
-    expect(await screen.findByRole("heading", { name: "Overview isn't available yet" })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: "Properties" })).toBeInTheDocument();
   });
 
   it("shows_the_header_and_a_note_when_the_namespace_cannot_be_listed", async () => {

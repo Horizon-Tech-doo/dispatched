@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { Button, CountBadge, EmptyState, SkeletonRows, Tabs, TabsContent, TabsList, TabsTrigger } from "@/ui";
 import { useShell } from "../context";
 import { MessagesView } from "../messages/MessagesView";
+import { OverviewView } from "../overview/OverviewView";
 import type { EntityTab, SubTabId } from "../state";
 import { countPlaceholderCh, countsKey, recallCounts, rememberCounts, splitSubscription, subTabsFor, useEntityInfo, validSubTab, viewOf, type EntityInfo, type SubTabDef } from "./subtabs";
 
@@ -11,6 +12,7 @@ const KIND_LINE = { queue: "Queue", topic: "Topic", subscription: "Subscription"
 function SubTabBody({ tab, def, info }: { tab: EntityTab; def: SubTabDef; info: EntityInfo }) {
   const view = viewOf(def.id);
   if (view) return <MessagesView tab={tab} view={view} counts={info.counts} requiresSession={info.facts.includes("sessions")} />;
+  if (def.id === "overview") return <OverviewView tab={tab} />;
   if (def.id === "listener")
     return <EmptyState title="Listener isn't available yet" body="Live receive, with auto-complete and message rates, comes with the operate features." />;
   return info.status === "loading" ? <SkeletonRows rows={6} /> : <EmptyState title={`${def.label} isn't available yet`} body={def.description} />;
@@ -70,7 +72,7 @@ export function EntityView({ tab }: { tab: EntityTab }) {
           })}
         </TabsList>
         {defs.map((d) => (
-          <TabsContent key={d.id} value={d.id} className={viewOf(d.id) ? "overflow-hidden" : "overflow-y-auto"}>
+          <TabsContent key={d.id} value={d.id} className={viewOf(d.id) || d.id === "overview" ? "overflow-hidden" : "overflow-y-auto"}>
             <SubTabBody tab={tab} def={d} info={info} />
           </TabsContent>
         ))}

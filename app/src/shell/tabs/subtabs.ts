@@ -3,6 +3,7 @@ import { commands, keys, useEntities, type EntityCounts, type PeekView } from "@
 import { formatNumber } from "@/ui";
 import { useShell } from "../context";
 import { splitSubscriptionId } from "../entityId";
+import { formatIsoDuration } from "../overview/labels";
 import type { EntityKind, EntityTab, SubTabId } from "../state";
 
 export interface SubTabDef {
@@ -54,12 +55,7 @@ export const VIEW_LABEL: Record<PeekView, string> = {
 /** A subscription's tab id is `${topic}/subscriptions/${name}`. */
 export const splitSubscription = splitSubscriptionId;
 
-const iso = (d: string | null) => {
-  const m = d?.match(/^PT(?:(\d+)M)?(?:(\d+)S)?$/);
-  if (!m) return d;
-  const min = Number(m[1] ?? 0), sec = Number(m[2] ?? 0);
-  return min && !sec ? `${min} min` : min ? `${min} min ${sec} s` : `${sec} s`;
-};
+const iso = (d: string | null) => (d ? (formatIsoDuration(d) ?? d) : d);
 
 /** The sub-tab to show: a persisted one that does not apply to this kind of entity falls back to Overview. */
 export function validSubTab(kind: EntityKind, subTab: SubTabId): SubTabId {
