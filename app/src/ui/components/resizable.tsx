@@ -3,6 +3,7 @@ import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { cn } from "../lib/cn";
 
 export { Panel, PanelGroup };
+export type { ImperativePanelHandle } from "react-resizable-panels";
 
 /** 1px line with a 5px invisible hit area; highlights on hover and drag. */
 export function ResizeHandle({ className, ...props }: ComponentProps<typeof PanelResizeHandle>) {

@@ -189,6 +189,26 @@ describe("overview", () => {
   });
 });
 
+describe("overview details the counts block cannot show", () => {
+  it("keeps a maximum size that is not a number in the properties", async () => {
+    const { mock } = renderShell("default", seed("shipment-events", "topic"));
+    setTransport({
+      listen: (e, cb) => mock.listen(e, cb),
+      async invoke<T>(cmd: string, args?: Record<string, unknown>) {
+        const r = await mock.invoke<T>(cmd, args);
+        if (cmd !== "entity_details") return r;
+        const d = r as { properties: { name: string; value: string }[] };
+        return { ...d, properties: d.properties.map((p) => (p.name === "MaxSizeInMegabytes" ? { ...p, value: "unlimited" } : p)) } as T;
+      },
+    });
+    await userEvent.keyboard("{F5}");
+    const props = await screen.findByRole("region", { name: "Properties" });
+    await waitFor(() => expect(within(props).getByText("Max size")).toBeInTheDocument());
+    expect(within(props).getByText("unlimited")).toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "Counts" })).getByText("4.0 MiB")).toBeInTheDocument();
+  });
+});
+
 describe("overview polling", () => {
   afterEach(() => vi.useRealTimers());
 
@@ -201,6 +221,20 @@ describe("overview polling", () => {
     expect(first).toBeGreaterThan(0);
     await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
     await waitFor(() => expect(reads()).toBe(first + 1));
+    unmount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(40_000); });
+    expect(reads()).toBe(first + 1);
+  });
+
+  it("reads a topic's subscriptions again every 10 s too, without logging the reads", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const { mock, unmount } = renderShell("default", seed("shipment-events", "topic"));
+    const reads = () => mock.calls.filter((c) => c.cmd === "list_subscriptions").length;
+    await screen.findByRole("table", { name: "Subscriptions" });
+    const first = reads();
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    await waitFor(() => expect(reads()).toBe(first + 1));
+    expect(activityStore.all().some((e) => /subscription/i.test(e.action))).toBe(false);
     unmount();
     await act(async () => { await vi.advanceTimersByTimeAsync(40_000); });
     expect(reads()).toBe(first + 1);

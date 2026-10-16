@@ -64,8 +64,9 @@ describe("commands over the mock transport", () => {
     expect(l.queues.map((q) => q.name)).toContain("invoice-generate");
     expect(log).toContain("Connected to Logistics");
     expect(log).toContain("Listed 4 queues and 4 topics");
-    await commands.listSubscriptions("p-logistics", "stock-levels");
-    expect(log).toContain("Listed 1 subscription of stock-levels");
+    // Subscriptions are read on every expand and polled by a topic's Overview: only a failure is logged.
+    expect(await commands.listSubscriptions("p-logistics", "stock-levels")).toHaveLength(1);
+    expect(log.some((a) => /subscription/i.test(a))).toBe(false);
   });
 
   it("rejects listing before connecting with not_connected", async () => {

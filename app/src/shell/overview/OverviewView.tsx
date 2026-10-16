@@ -141,7 +141,8 @@ function ConnectionStringCopy({ profileId, entity, eligible, entra }: { profileI
 /** A topic's subscriptions with their counts; a name opens that subscription. */
 function SubscriptionsTable({ topic, profileId }: { topic: string; profileId: string | null }) {
   const { dispatch } = useShell();
-  const [q] = useSubscriptionsFor(profileId, [topic]);
+  // Read again while the Overview is shown, like its details (the engine logs only failures of either).
+  const [q] = useSubscriptionsFor(profileId, [topic], REFRESH_MS);
   const subs: SubscriptionInfo[] | undefined = q?.data;
   const body = ((): ReactNode => {
     if (!q || q.isPending) return <SkeletonRows rows={3} columns={3} />;
@@ -153,7 +154,7 @@ function SubscriptionsTable({ topic, profileId }: { topic: string; profileId: st
       <>
         <table aria-label="Subscriptions" className="w-full border-collapse text-12">
           <thead>
-            <tr className="border-b border-line text-11 text-muted">
+            <tr className="border-b border-line text-12 text-muted">
               <th scope="col" className="py-1 pr-3 text-left font-normal">Name</th>
               <th scope="col" className="px-3 py-1 text-right font-normal">Active</th>
               <th scope="col" className="py-1 pl-3 text-right font-normal">Dead-letter</th>
@@ -198,13 +199,13 @@ function SubscriptionsTable({ topic, profileId }: { topic: string; profileId: st
   );
 }
 
-function PropertiesSection({ d, hasCounts, fresh }: { d: EntityDetails; hasCounts: boolean; fresh: boolean }) {
+function PropertiesSection({ d, hasCounts, fresh, maxMb }: { d: EntityDetails; hasCounts: boolean; fresh: boolean; maxMb: number | null }) {
   const [state, flash] = useFlash();
   const copyJson = () => {
     if (!navigator.clipboard) return flash("failed");
     navigator.clipboard.writeText(propertiesJson(d.properties)).then(() => flash("copied"), () => flash("failed"));
   };
-  const groups = groupProperties(d.properties, { size: d.size_in_bytes != null, messageCount: hasCounts, subscriptionCount: d.kind === "topic" });
+  const groups = groupProperties(d.properties, { size: d.size_in_bytes != null, maxSize: d.size_in_bytes != null && maxMb !== null, messageCount: hasCounts, subscriptionCount: d.kind === "topic" });
   return (
     <section aria-label="Properties" className="min-w-0 flex-1">
       <div className="mb-1.5 flex h-5 items-center gap-2">
@@ -322,7 +323,7 @@ export function OverviewView({ tab }: { tab: EntityTab }) {
       </div>
       <div className="flex min-w-[320px] max-w-[680px] flex-1 flex-col">
         {isTopic && <SubscriptionsTable topic={tab.id} profileId={conn.profileId} />}
-        <PropertiesSection d={d} hasCounts={c !== null} fresh={!q.isError || showCounts} />
+        <PropertiesSection d={d} hasCounts={c !== null} fresh={!q.isError || showCounts} maxMb={maxMb} />
       </div>
     </div>
   );

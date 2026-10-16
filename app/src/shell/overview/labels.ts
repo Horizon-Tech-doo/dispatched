@@ -60,10 +60,11 @@ const GROUP_OF: Record<string, "Delivery" | "Features" | "Lifecycle"> = {
 export const GROUPS = ["Delivery", "Features", "Lifecycle", "Other"] as const;
 export interface PropertyGroup { title: (typeof GROUPS)[number]; items: EntityProperty[] }
 
-/** The properties in groups (each keeps the service's order; empty groups are left out). `size` leaves out the size and
- *  its maximum and `messageCount` the message count: the counts block shows them already; `subscriptionCount` the number of subscriptions (the Subscriptions table has it). */
-export function groupProperties(props: EntityProperty[], drop: { size?: boolean; messageCount?: boolean; subscriptionCount?: boolean }): PropertyGroup[] {
-  const shown = props.filter((p) => !(drop.size && (p.name === "SizeInBytes" || p.name === "MaxSizeInMegabytes")) && !(drop.messageCount && p.name === "MessageCount") && !(drop.subscriptionCount && p.name === "SubscriptionCount"));
+/** The properties in groups (each keeps the service's order; empty groups are left out). What the counts block shows is
+ *  left out on request: `size` the size, `maxSize` its limit (only when the block could show it), `messageCount` the
+ *  message count, `subscriptionCount` the number of subscriptions (a topic's table has it). */
+export function groupProperties(props: EntityProperty[], drop: { size?: boolean; maxSize?: boolean; messageCount?: boolean; subscriptionCount?: boolean }): PropertyGroup[] {
+  const shown = props.filter((p) => !(drop.size && p.name === "SizeInBytes") && !(drop.maxSize && p.name === "MaxSizeInMegabytes") && !(drop.messageCount && p.name === "MessageCount") && !(drop.subscriptionCount && p.name === "SubscriptionCount"));
   return GROUPS.map((title) => ({ title, items: shown.filter((p) => (GROUP_OF[p.name] ?? "Other") === title) })).filter((g) => g.items.length > 0);
 }
 

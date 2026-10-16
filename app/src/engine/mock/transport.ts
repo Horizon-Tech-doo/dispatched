@@ -503,9 +503,8 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
       }
       case "list_subscriptions": {
         if (!active || active.id !== args.profileId) throw new EngineError("not_connected", "Choose a connection first.");
-        const subs = fx.subscriptions[args.topic as string] ?? [];
-        activity(`Listed ${count(subs.length, "subscription", "subscriptions")} of ${args.topic}`, started);
-        return subs;
+        // Read on every expand and polled by a topic's Overview: as Rust, only a failure is logged.
+        return quietly(`Listing subscriptions of ${args.topic} failed`, started, () => fx.subscriptions[args.topic as string] ?? []);
       }
       case "peek_page": {
         // As `browse::prepare`: the entity and the filter are checked before anything else, and not logged.

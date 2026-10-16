@@ -243,3 +243,34 @@ test("message grid columns keep their minimum widths beside the detail pane, and
   expect(await widthOf("Reason")).toBeGreaterThanOrEqual(149);
   expect(await widthOf("Description")).toBeGreaterThanOrEqual(199);
 });
+
+test("a narrow window raises the tree to 200 px without changing its saved size; a drag is what changes it", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await go(page, logistics);
+  const pane = page.locator('[data-panel-id="tree"]');
+  const width = async () => Math.round((await pane.boundingBox())!.width);
+  const narrowAndBack = async () => {
+    await page.setViewportSize({ width: 640, height: 800 });
+    await expect.poll(width).toBeGreaterThanOrEqual(199);
+    // The counts keep their room beside the name.
+    await expect(tree(page).getByRole("treeitem", { name: "invoice-generate" }).getByText("1,284", { exact: true })).toBeVisible();
+    await page.setViewportSize({ width: 1440, height: 900 });
+  };
+  await expect(tree(page).getByRole("treeitem", { name: "invoice-generate" })).toBeVisible();
+  const saved = await width();
+  expect(saved).toBeGreaterThan(240); // the saved 18% of 1440 px
+  await narrowAndBack();
+  await expect.poll(width).toBeGreaterThanOrEqual(saved - 2);
+  await expect.poll(width).toBeLessThanOrEqual(saved + 2);
+  // A drag at the handle is a choice: it is kept through a narrow window.
+  const handle = (await page.locator("[data-panel-resize-handle-id]").first().boundingBox())!;
+  await page.mouse.move(handle.x + 1, handle.y + 200);
+  await page.mouse.down();
+  await page.mouse.move(handle.x + 101, handle.y + 200, { steps: 5 });
+  await page.mouse.up();
+  const dragged = await width();
+  expect(dragged).toBeGreaterThan(saved + 80);
+  await narrowAndBack();
+  await expect.poll(width).toBeGreaterThanOrEqual(dragged - 3);
+  await expect.poll(width).toBeLessThanOrEqual(dragged + 3);
+});

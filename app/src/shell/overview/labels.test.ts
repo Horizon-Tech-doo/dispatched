@@ -55,9 +55,13 @@ describe("property groups", () => {
   });
   it("drops what the counts block already shows, and empty groups", () => {
     const props = [p("LockDuration"), p("SizeInBytes"), p("MaxSizeInMegabytes"), p("MessageCount")];
-    expect(groupProperties(props, { size: true, messageCount: true }).flatMap((g) => g.items.map((i) => i.name))).toEqual(["LockDuration"]);
+    expect(groupProperties(props, { size: true, maxSize: true, messageCount: true }).flatMap((g) => g.items.map((i) => i.name))).toEqual(["LockDuration"]);
     expect(groupProperties(props, {}).flatMap((g) => g.items.map((i) => i.name))).toEqual(["LockDuration", "MaxSizeInMegabytes", "SizeInBytes", "MessageCount"]);
     expect(groupProperties([p("LockDuration")], {}).map((g) => g.title)).toEqual(["Delivery"]);
+  });
+  it("keeps a maximum size the counts block could not show", () => {
+    const props = [p("SizeInBytes"), p("MaxSizeInMegabytes", "n/a")];
+    expect(groupProperties(props, { size: true }).flatMap((g) => g.items.map((i) => i.name))).toEqual(["MaxSizeInMegabytes"]);
   });
   it("can leave out the subscription count a topic's table already shows", () => {
     const props = [p("SubscriptionCount", "3"), p("EnablePartitioning")];
