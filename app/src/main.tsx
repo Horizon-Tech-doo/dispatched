@@ -9,7 +9,12 @@ applyTheme(resolveTheme("system", window.matchMedia("(prefers-color-scheme: dark
 
 const boot =
   import.meta.env.VITE_DISPATCHED_MOCK === "1"
-    ? import("./engine/mock/transport").then((m) => m.installMock())
+    ? import("./engine/mock/transport").then(async (m) => {
+        m.installMock();
+        // Mock builds only (screenshots and e2e): lets a script put a view in a state no control here reaches yet.
+        const v = await import("./shell/messages/viewStore");
+        (window as unknown as { __dispatchedMock?: unknown }).__dispatchedMock = { setViewState: v.setViewState, viewKey: v.viewKey };
+      })
     : Promise.resolve();
 
 void boot.then(() => {

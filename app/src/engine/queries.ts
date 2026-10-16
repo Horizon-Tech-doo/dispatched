@@ -1,7 +1,30 @@
 import { QueryClient, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as commands from "./commands";
 import type { EngineError } from "./ipc";
-import type { EntityKindName, ExportRequest, FilterSpec, PeekFrom, PeekView, ProfileDraft } from "./types";
+import type { EntityKindName, ExportRequest, FilterIssue, FilterSpec, PeekFrom, PeekView, ProfileDraft } from "./types";
+
+const FILTER_KEYS = ["property", "body_contains", "body_regex", "body_json_path", "body_json_equals", "session_id"] as const;
+/** A filter as the one thing it means: only the conditions that are set (blank after a trim is no condition), in a
+ *  fixed order, text as typed. `{}` and a filter of nulls are the same filter, so they share a query key. */
+export function normalizeFilter(f: FilterSpec): FilterSpec {
+  const out: FilterSpec = {};
+  for (const k of FILTER_KEYS) {
+    const v = f[k];
+    if (typeof v === "string" && v.trim() !== "") out[k] = v;
+  }
+  return out;
+}
+/** The fields the engine can find a problem in. */
+const CHECKED = ["property", "body_regex", "body_json_path", "body_json_equals"] as const;
+/** What a check looks at: the checked fields that are set. */
+const checkable = (f: FilterSpec): FilterSpec => {
+  const n = normalizeFilter(f);
+  const out: FilterSpec = {};
+  for (const k of CHECKED) if (n[k]) out[k] = n[k];
+  return out;
+};
+/** No field that can have a problem is set. */
+export const nothingToCheck = (f: FilterSpec) => Object.keys(checkable(f)).length === 0;
 
 export const keys = {
   appInfo: ["app-info"] as const,
@@ -14,13 +37,13 @@ export const keys = {
   setting: (key: string) => ["setting", key] as const,
   /** A peek stream; `tailN` is the "from the end" count (null for forward peeks, whose Top N is not part of the key). */
   peek: (profileId: string | null, entity: string, view: PeekView, from: PeekFrom, filter: FilterSpec, tailN: number | null) =>
-    ["peek", profileId, entity, view, from, filter, tailN] as const,
+    ["peek", profileId, entity, view, from, normalizeFilter(filter), tailN] as const,
   message: (profileId: string | null, entity: string, view: PeekView, sequence: number | null) => ["message", profileId, entity, view, sequence] as const,
   details: (profileId: string | null, kind: EntityKindName, entity: string) => ["entity-details", profileId, kind, entity] as const,
   rules: (profileId: string | null, entity: string) => ["rules", profileId, entity] as const,
   sessions: (profileId: string | null, entity: string) => ["sessions", profileId, entity] as const,
   dashboard: (profileId: string | null) => ["dashboard", profileId] as const,
-  filterCheck: (filter: FilterSpec) => ["filter-check", filter] as const,
+  filterCheck: (filter: FilterSpec) => ["filter-check", checkable(filter)] as const,
   signIns: ["sign-ins"] as const,
 };
 
@@ -183,20 +206,21 @@ export const useDashboard = (profileId: string | null, refetchMs = 0) =>
     refetchInterval: refetchMs > 0 ? refetchMs : false,
   });
 
-const CHECKED: (keyof FilterSpec)[] = ["property", "body_regex", "body_json_path", "body_json_equals"];
-/** No field that can have a problem is set (the engine treats a field blank after a trim as no condition). */
-const nothingToCheck = (f: FilterSpec) => CHECKED.every((k) => !f[k]?.trim());
+const filterCheckOptions = (filter: FilterSpec) => ({
+  queryKey: keys.filterCheck(filter),
+  queryFn: () => commands.checkFilter(checkable(filter)),
+  staleTime: Infinity,
+});
 
 /** Problems with a filter, checked by the engine. A filter with nothing to check needs no call (`data` stays
  *  undefined: no issues). */
 export const useFilterCheck = (filter: FilterSpec) =>
-  useQuery({
-    queryKey: keys.filterCheck(filter),
-    queryFn: () => commands.checkFilter(filter),
-    enabled: !nothingToCheck(filter),
-    staleTime: Infinity,
-    gcTime: 30_000,
-  });
+  useQuery({ ...filterCheckOptions(filter), enabled: !nothingToCheck(filter), gcTime: 30_000 });
+
+/** The problems with a filter now: the answer already cached or on its way, else a check. A check that fails to
+ *  run reads as no problems, so the peek itself says what is wrong. */
+export const checkFilterNow = (qc: QueryClient, filter: FilterSpec) =>
+  nothingToCheck(filter) ? Promise.resolve([]) : qc.fetchQuery(filterCheckOptions(filter)).catch((): FilterIssue[] => []);
 
 /** Starts an export with a pick from `commands.pickExportPath`; progress arrives on `onJob`. */
 export const useStartExport = () =>

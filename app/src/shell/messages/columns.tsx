@@ -85,8 +85,9 @@ export function parseColumns(saved: unknown, view: PeekView, sessions: boolean):
  *  columns this entity can't show (Session, on an entity without sessions) stay in it, where they were, so
  *  changing columns here doesn't drop them for the entities that do show them. */
 export function mergeColumns(saved: unknown, next: ColumnId[], view: PeekView, sessions: boolean): ColumnId[] {
-  const list = savedList(saved);
-  if (!list) return next;
+  // Nothing saved yet: the group's defaults stand, as they would for an entity with sessions, so Session is
+  // not lost the first time someone changes columns on an entity without.
+  const list = savedList(saved) ?? defaultColumns(view, true);
   const shown = new Set<ColumnId>(fillable(list, view, sessions));
   const out = [...next];
   list.forEach((id, i) => {

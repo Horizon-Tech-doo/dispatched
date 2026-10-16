@@ -1,6 +1,7 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
+import { setTransport, type IpcTransport } from "@/engine";
 import { renderShell } from "../test-utils";
 import { setViewState, viewKey } from "./viewStore";
 
@@ -27,8 +28,11 @@ describe("filter bar", () => {
     renderShell("default", seed);
     const bar = await openBar();
     await typeInto(within(bar).getByLabelText("Properties"), "sys.Subject == 'x'");
-    expect(await within(bar).findByText(/unexpected `=` at column \d+/)).toBeInTheDocument();
+    // A plain sentence, then the engine's own words (without its prefix and backticks) on the detail line.
+    expect(await within(bar).findByText("Use = to compare.", { selector: "p > span" })).toBeInTheDocument();
+    expect(within(bar).getByText(/^unexpected = at column \d+$/)).toBeInTheDocument();
     expect(within(bar).getByRole("button", { name: "Apply" })).toBeDisabled();
+    expect(within(bar).getByRole("status")).toHaveTextContent("Use = to compare.");
   });
 
   it("applies with Enter and counts the conditions on the toggle", async () => {
@@ -64,7 +68,7 @@ describe("filter bar", () => {
     await typeInto(within(bar).getByLabelText("Body contains"), "x{Enter}");
     await waitFor(() => expect(lastPeek(mock).body_contains).toBe("x"));
     expect(screen.getByRole("button", { name: /Filter/ })).toHaveTextContent("1");
-    await userEvent.click(within(bar).getByRole("button", { name: "Clear" }));
+    await userEvent.click(within(bar).getByRole("button", { name: "Clear filter" }));
     // The unfiltered view was read a moment ago and is still cached, so there may be no new peek: the applied
     // filter and the fields are what show it is cleared.
     await waitFor(() => expect(screen.getByRole("button", { name: /Filter/ })).not.toHaveTextContent("1"));
@@ -78,7 +82,7 @@ describe("filter bar", () => {
     const before = peeks(mock);
     // Typed and submitted inside the 250 ms the check waits.
     await typeInto(within(bar).getByLabelText("Properties"), "sys.Subject == 'x'{Enter}");
-    expect(await within(bar).findByText(/unexpected `=` at column \d+/)).toBeInTheDocument();
+    expect(await within(bar).findByText("Use = to compare.", { selector: "p > span" })).toBeInTheDocument();
     expect(peeks(mock)).toBe(before);
   });
 
@@ -98,7 +102,7 @@ describe("filter bar", () => {
     const bar = await openBar();
     await typeInto(within(bar).getByLabelText("Body contains"), "zzz");
     const before = peeks(mock);
-    act(() => within(bar).getByRole("button", { name: "Clear" }).focus());
+    act(() => within(bar).getByRole("button", { name: "Clear filter" }).focus());
     await userEvent.keyboard("{Enter}");
     await waitFor(() => expect(within(bar).getByLabelText("Body contains")).toHaveValue(""));
     await new Promise((r) => setTimeout(r, 50));
@@ -127,5 +131,137 @@ describe("filter bar", () => {
     await userEvent.click(within(bar).getByRole("button", { name: "Remove session RMA-1001" }));
     await waitFor(() => expect(lastPeek(mock).session_id ?? null).toBeNull());
     expect(within(bar).getByLabelText("Body contains")).toHaveValue("draft");
+  });
+
+  it("runs a fresh peek when a recently used filter is applied again or cleared", async () => {
+    const { mock } = renderShell("default", seed);
+    const bar = await openBar();
+    await screen.findByRole("grid");
+    await typeInto(within(bar).getByLabelText("Body contains"), "SHP{Enter}");
+    await waitFor(() => expect(lastPeek(mock).body_contains).toBe("SHP"));
+    const withFilter = peeks(mock);
+    await userEvent.click(within(bar).getByRole("button", { name: "Clear filter" }));
+    await waitFor(() => expect(peeks(mock)).toBeGreaterThan(withFilter));
+    expect(lastPeek(mock).body_contains ?? null).toBeNull();
+    const cleared = peeks(mock);
+    // The same filter again, a moment later: not the rows cached for it.
+    await typeInto(within(bar).getByLabelText("Body contains"), "SHP{Enter}");
+    await waitFor(() => expect(peeks(mock)).toBeGreaterThan(cleared));
+    expect(lastPeek(mock).body_contains).toBe("SHP");
+  });
+
+  it("checks each settled text once", async () => {
+    const { mock } = renderShell("default", seed);
+    const bar = await openBar();
+    await typeInto(within(bar).getByLabelText("Properties"), "sys.DeliveryCount > 3");
+    await new Promise((r) => setTimeout(r, 450));
+    expect(mock.calls.filter((c) => c.cmd === "check_filter")).toHaveLength(1);
+  });
+
+  it("holds Apply for a check that is still running", async () => {
+    const { mock } = renderShell("default", seed);
+    let release!: () => void;
+    let checks = 0;
+    const gate = new Promise<void>((r) => (release = r));
+    const slow: IpcTransport = {
+      listen: mock.listen,
+      invoke: async <T,>(cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === "check_filter") {
+          checks++;
+          await gate;
+        }
+        return mock.invoke<T>(cmd, args);
+      },
+    };
+    setTransport(slow);
+    const bar = await openBar();
+    await screen.findByRole("grid");
+    const before = peeks(mock);
+    await typeInto(within(bar).getByLabelText("Properties"), "sys.DeliveryCount > 3");
+    await waitFor(() => expect(checks).toBe(1));
+    await userEvent.click(within(bar).getByRole("button", { name: "Apply" }));
+    expect(peeks(mock)).toBe(before);
+    await act(async () => release());
+    await waitFor(() => expect(lastPeek(mock).property).toBe("sys.DeliveryCount > 3"));
+  });
+
+  it("keeps the body segment after applying with its field empty", async () => {
+    renderShell("default", seed);
+    const bar = await openBar();
+    await userEvent.click(within(bar).getByRole("radio", { name: "Regex" }));
+    await typeInto(within(bar).getByLabelText("Body regex"), "abc{Enter}");
+    await waitFor(() => expect(screen.getByRole("button", { name: /Filter/ })).toHaveTextContent("1"));
+    await userEvent.click(within(bar).getByRole("radio", { name: "JSONPath" }));
+    act(() => within(bar).getByLabelText("JSONPath").focus());
+    await userEvent.clear(within(bar).getByLabelText("JSONPath"));
+    await userEvent.click(within(bar).getByRole("button", { name: "Apply" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /Filter/ })).not.toHaveTextContent("1"));
+    expect(within(bar).getByRole("radio", { name: "JSONPath" })).toBeChecked();
+  });
+
+  it("applies only a changed filter, and says when the fields are not applied", async () => {
+    renderShell("default", seed);
+    const bar = await openBar();
+    const apply = within(bar).getByRole("button", { name: "Apply" });
+    expect(apply).toBeDisabled();
+    expect(within(bar).queryByText("Not applied")).toBeNull();
+    await typeInto(within(bar).getByLabelText("Body contains"), "SHP");
+    expect(within(bar).getByText("Not applied")).toBeInTheDocument();
+    expect(apply).toBeEnabled();
+    await userEvent.click(apply);
+    await waitFor(() => expect(within(bar).queryByText("Not applied")).toBeNull());
+    expect(apply).toBeDisabled();
+  });
+
+  it("shows the property syntax only while the field is focused or has a problem", async () => {
+    renderShell("default", seed);
+    const bar = await openBar();
+    expect(within(bar).getByText("sys.MessageId")).toBeInTheDocument();
+    act(() => within(bar).getByLabelText("Body contains").focus());
+    expect(within(bar).queryByText("sys.MessageId")).toBeNull();
+    await typeInto(within(bar).getByLabelText("Properties"), "sys.Subject == 'x'");
+    act(() => within(bar).getByLabelText("Body contains").focus());
+    expect(await within(bar).findByText("sys.MessageId")).toBeInTheDocument();
+  });
+
+  it("says how Equals compares while it is focused", async () => {
+    renderShell("default", seed);
+    const bar = await openBar();
+    await userEvent.click(within(bar).getByRole("radio", { name: "JSONPath" }));
+    expect(within(bar).queryByText(/Compared as JSON/)).toBeNull();
+    act(() => within(bar).getByLabelText("Equals").focus());
+    expect(within(bar).getByText(/Compared as JSON/)).toBeInTheDocument();
+  });
+
+  it("marks the toggle as controlling the bar, and focuses the first field after the chip is removed", async () => {
+    renderShell("default", seed);
+    await screen.findByRole("grid");
+    const toggle = screen.getByRole("button", { name: /Filter/ });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    setViewState(viewKey("p-logistics", "invoice-generate", "dead-letter"), { from: { kind: "start" }, topN: 100, filter: {}, filterOpen: true, sorting: null, detailOpen: false }, { filter: { session_id: "RMA-1001" } });
+    const bar = await screen.findByRole("search", { name: "Message filter" });
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(toggle).toHaveAttribute("aria-controls", bar.id);
+    await userEvent.click(within(bar).getByRole("button", { name: "Remove session RMA-1001" }));
+    await waitFor(() => expect(within(bar).getByLabelText("Properties")).toHaveFocus());
+  });
+
+  it("shows the applied filter after the Filter button when the bar is closed, and clears it from there", async () => {
+    const { mock } = renderShell("default", seed);
+    const bar = await openBar();
+    await typeInto(within(bar).getByLabelText("Properties"), "attempt >= 2");
+    await typeInto(within(bar).getByLabelText("Body contains"), "held{Enter}");
+    await waitFor(() => expect(lastPeek(mock).body_contains).toBe("held"));
+    await userEvent.keyboard("{Escape}");
+    const summary = await screen.findByRole("button", { name: 'Edit filter: attempt >= 2 · body contains "held"' });
+    expect(summary).toHaveTextContent('attempt >= 2 · body contains "held"');
+    await userEvent.click(summary);
+    expect(screen.getByRole("search", { name: "Message filter" })).toBeInTheDocument();
+    // Open, the clear action is the bar's own: the one in the toolbar is gone.
+    expect(screen.getAllByRole("button", { name: "Clear filter" })).toHaveLength(1);
+    await userEvent.keyboard("{Escape}");
+    await userEvent.click(await screen.findByRole("button", { name: "Clear filter" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /Filter/ })).not.toHaveTextContent("2"));
+    expect(screen.queryByRole("button", { name: /^Edit filter/ })).toBeNull();
   });
 });

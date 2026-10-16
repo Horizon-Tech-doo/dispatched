@@ -54,8 +54,10 @@ describe("message columns", () => {
     expect(mergeColumns(saved, ["seq", "subject", "size", "prop:region"], "active", false)).toEqual(["seq", "session", "subject", "size", "prop:region"]);
     // A session entity can show everything: nothing is hidden, so the shown list is the saved list.
     expect(mergeColumns(saved, ["seq", "subject"], "active", true)).toEqual(["seq", "subject"]);
-    // Nothing saved yet: the shown list is saved as it is.
-    expect(mergeColumns(undefined, ["seq", "subject"], "active", false)).toEqual(["seq", "subject"]);
+    // Nothing saved yet: the group's defaults stand, so Session is kept for session entities.
+    expect(mergeColumns(undefined, ["seq", "subject"], "active", false)).toEqual(["seq", "subject", "session"]);
+    expect(mergeColumns(undefined, ["seq", "subject"], "active", true)).toEqual(["seq", "subject"]);
+    expect(mergeColumns(undefined, ["seq", "subject"], "dead-letter", false)).toEqual(["seq", "subject"]);
     // A hidden column at the front stays at the front.
     expect(mergeColumns(["session", "seq"], ["seq", "size"], "active", false)).toEqual(["session", "seq", "size"]);
   });

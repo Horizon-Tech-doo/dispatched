@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { setTransport } from "@/engine";
 import { renderShell } from "../test-utils";
-import { subTabsFor } from "./subtabs";
+import { countPlaceholderCh, countsKey, rememberCounts, subTabsFor } from "./subtabs";
 
 // In jsdom the resizable panels swallow pointer-downs, so focus moves explicitly (as in the tree tests).
 const focus = (el: HTMLElement) => act(() => el.focus());
@@ -48,7 +48,7 @@ describe("entity tabs", () => {
     const views = await screen.findByRole("tablist", { name: "Entity views" });
     const messages = within(views).getByRole("tab", { name: /Messages/ });
     await waitFor(() => expect(messages.querySelector("[data-count-placeholder]")).not.toBeNull());
-    expect(messages.querySelector("[data-count-placeholder]")).toHaveClass("min-w-[3ch]");
+    expect(messages.querySelector("[data-count-placeholder]")).toHaveStyle({ minWidth: "3ch" });
     // Tabs without a count reserve nothing.
     expect(within(views).getByRole("tab", { name: "Overview" }).querySelector("[data-count-placeholder]")).toBeNull();
     await act(async () => release());
@@ -56,6 +56,32 @@ describe("entity tabs", () => {
     await waitFor(() => expect(within(messages).getByText("2,906")).toBeInTheDocument());
     expect(within(messages).getByText("2,906").className).not.toMatch(/min-w-/);
     expect(messages.querySelector("[data-count-placeholder]")).toBeNull();
+  });
+
+  it("holds the room a tab's count took last time while it loads again", async () => {
+    const sub = "shipment-events/subscriptions/tracking-sync";
+    const { mock } = renderShell("default", { last_profile: "p-logistics", "shell:p-logistics": { tabs: [{ id: sub, kind: "subscription", subTab: "overview" }], activeTab: sub } });
+    rememberCounts(countsKey("p-logistics", sub), { active: 12_345, dead_letter: 5, scheduled: 0, transfer: 0, transfer_dead_letter: 0, approximate: false, truncated: false });
+    const gate = new Promise<void>(() => {});
+    setTransport({
+      listen: mock.listen,
+      invoke: async <T,>(cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === "list_subscriptions") await gate;
+        return mock.invoke<T>(cmd, args);
+      },
+    });
+    const views = await screen.findByRole("tablist", { name: "Entity views" });
+    const messages = within(views).getByRole("tab", { name: /Messages/ });
+    // "12,345" is six characters wide; Dead-letter's "5" one; a tab with no remembered count holds three.
+    await waitFor(() => expect(messages.querySelector("[data-count-placeholder]")).toHaveStyle({ minWidth: "6ch" }));
+    expect(within(views).getByRole("tab", { name: /Dead-letter/ }).querySelector("[data-count-placeholder]")).toHaveStyle({ minWidth: "1ch" });
+  });
+
+  it("sizes a placeholder from the last count, else three characters", () => {
+    const messages = subTabsFor("queue").find((t) => t.id === "messages")!;
+    expect(countPlaceholderCh(messages, null)).toBe(3);
+    expect(countPlaceholderCh(messages, { active: 1_284, dead_letter: 0, scheduled: 0, transfer: 0, transfer_dead_letter: 0, approximate: false, truncated: false })).toBe(5);
+    expect(countPlaceholderCh(subTabsFor("queue").find((t) => t.id === "deferred")!, { active: 1, dead_letter: 0, scheduled: 0, transfer: 0, transfer_dead_letter: 0, approximate: false, truncated: false })).toBe(3);
   });
 
   it("shows the kind word beside a queue or topic name, with no glyph, and the topic beside a subscription", async () => {

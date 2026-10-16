@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { commands, keys, useEntities, type EntityCounts, type PeekView } from "@/engine";
+import { formatNumber } from "@/ui";
 import { useShell } from "../context";
 import { splitSubscriptionId } from "../entityId";
 import type { EntityKind, EntityTab, SubTabId } from "../state";
@@ -63,6 +64,20 @@ const iso = (d: string | null) => {
 /** The sub-tab to show: a persisted one that does not apply to this kind of entity falls back to Overview. */
 export function validSubTab(kind: EntityKind, subTab: SubTabId): SubTabId {
   return subTabsFor(kind).some((d) => d.id === subTab) ? subTab : "overview";
+}
+
+/** The last counts seen for each entity this session, so a tab that is loading its counts again holds the room they
+ *  took last time. (Kept here, not in the query cache: that is empty exactly when a count is loading.) */
+const seenCounts = new Map<string, EntityCounts>();
+export const countsKey = (profileId: string | null, entity: string) => `${profileId ?? ""}|${entity}`;
+export const rememberCounts = (key: string, counts: EntityCounts) => void seenCounts.set(key, counts);
+export const recallCounts = (key: string): EntityCounts | null => seenCounts.get(key) ?? null;
+export const forgetCounts = () => seenCounts.clear();
+
+/** Room (in digit widths) a sub-tab's loading count holds: what its last count took, else three. */
+export function countPlaceholderCh(def: SubTabDef, last: EntityCounts | null): number {
+  const c = last && def.count ? def.count(last) : null;
+  return c ? formatNumber(c.value).length : 3;
 }
 
 export interface EntityInfo {

@@ -54,6 +54,20 @@ describe("Field", () => {
   });
 });
 
+describe("Field detail and inline layout", () => {
+  it("shows the engine's text on a detail line under the problem, and keeps the label beside an inline control", () => {
+    render(
+      <Field inline={72} label="Properties" error="This expression can't be read." detail="unexpected = at column 14">
+        {(ids) => <Input {...ids} />}
+      </Field>,
+    );
+    const input = screen.getByLabelText("Properties");
+    expect(input).toHaveAccessibleDescription(/can't be read/);
+    expect(input).toHaveAccessibleDescription(/unexpected = at column 14/);
+    expect(screen.getByText("unexpected = at column 14").className).toContain("font-mono");
+  });
+});
+
 describe("CountBadge", () => {
   it("formats and marks attention only above zero", () => {
     const { rerender } = render(<CountBadge value={3417} attention />);

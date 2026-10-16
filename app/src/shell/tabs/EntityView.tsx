@@ -1,15 +1,11 @@
+import { useEffect } from "react";
 import { Button, CountBadge, EmptyState, SkeletonRows, Tabs, TabsContent, TabsList, TabsTrigger } from "@/ui";
 import { useShell } from "../context";
 import { MessagesView } from "../messages/MessagesView";
 import type { EntityTab, SubTabId } from "../state";
-import { splitSubscription, subTabsFor, useEntityInfo, validSubTab, viewOf, type EntityInfo, type SubTabDef } from "./subtabs";
+import { countPlaceholderCh, countsKey, recallCounts, rememberCounts, splitSubscription, subTabsFor, useEntityInfo, validSubTab, viewOf, type EntityInfo, type SubTabDef } from "./subtabs";
 
 const KIND_LINE = { queue: "Queue", topic: "Topic", subscription: "Subscription" } as const;
-
-/** Width held for a sub-tab's count while it loads, so the tab row moves as little as it can when the count
- *  arrives. Once loaded the count takes only the room it needs: a slot sized for the largest count leaves wide gaps
- *  after short ones ("Transfer DLQ 0    Scheduled"). */
-const COUNT_PLACEHOLDER = "min-w-[3ch]";
 
 /** One sub-tab's content. Message views load on their own; only the entity's own facts wait for its info. */
 function SubTabBody({ tab, def, info }: { tab: EntityTab; def: SubTabDef; info: EntityInfo }) {
@@ -21,8 +17,14 @@ function SubTabBody({ tab, def, info }: { tab: EntityTab; def: SubTabDef; info: 
 }
 
 export function EntityView({ tab }: { tab: EntityTab }) {
-  const { dispatch } = useShell();
+  const { dispatch, conn } = useShell();
   const info = useEntityInfo(tab);
+  const seenKey = countsKey(conn.profileId, tab.id);
+  // While counts load, each tab holds the room its count took last time (a first-ever load holds a little).
+  const last = info.counts ?? recallCounts(seenKey);
+  useEffect(() => {
+    if (info.counts) rememberCounts(seenKey, info.counts);
+  }, [info.counts, seenKey]);
   const sub = tab.kind === "subscription" ? splitSubscription(tab.id) : null;
   const name = sub ? sub.name : tab.id;
 
@@ -58,8 +60,10 @@ export function EntityView({ tab }: { tab: EntityTab }) {
                 {c ? (
                   <CountBadge value={c.value} quality={info.counts ?? undefined} attention={c.attention} />
                 ) : (
-                  // Hold some of the count's place while it loads.
-                  d.count && info.status === "loading" && <span aria-hidden="true" data-count-placeholder className={COUNT_PLACEHOLDER} />
+                  // Hold the count's place while it loads.
+                  d.count && info.status === "loading" && (
+                    <span aria-hidden="true" data-count-placeholder className="tabular-nums" style={{ minWidth: `${countPlaceholderCh(d, last)}ch` }} />
+                  )
                 )}
               </TabsTrigger>
             );

@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { setTransport } from "./ipc";
 import { createMockTransport } from "./mock/transport";
 import * as commands from "./commands";
-import { createQueryClient, keys, useDeleteProfile, useEntities, useEntityDetails, useFilterCheck, useProfiles, useSaveProfile, useSignOut, useTenants } from "./queries";
+import { checkFilterNow, createQueryClient, keys, normalizeFilter, useDeleteProfile, useEntities, useEntityDetails, useFilterCheck, useProfiles, useSaveProfile, useSignOut, useTenants } from "./queries";
 import { EngineError } from "./ipc";
 
 function wrapper() {
@@ -87,6 +87,27 @@ describe("queries", () => {
     expect(mock.calls.some((c) => c.cmd === "check_filter")).toBe(false);
     rerender({ f: { property: "a ==" } });
     await waitFor(() => expect(result.current.data?.map((i) => i.field)).toEqual(["property"]));
+  });
+
+  it("keys a filter by what it means: nulls, blanks and an empty filter are one filter", () => {
+    expect(normalizeFilter({ property: null, body_contains: "  ", session_id: undefined })).toEqual({});
+    expect(keys.peek("p", "q", "active", { kind: "start" }, { body_regex: null }, null)).toEqual(keys.peek("p", "q", "active", { kind: "start" }, {}, null));
+    // Text keeps its spaces: it is sent as typed.
+    expect(normalizeFilter({ body_regex: " a b ", property: "x" })).toEqual({ property: "x", body_regex: " a b " });
+    // A check looks at the checked fields only.
+    expect(keys.filterCheck({ property: "a", body_contains: "x" })).toEqual(keys.filterCheck({ property: "a", body_contains: "y" }));
+  });
+
+  it("checks a filter now: the cached or running answer, else one call; nothing to check is no call", async () => {
+    const mock = createMockTransport("default");
+    setTransport(mock);
+    const client = createQueryClient();
+    expect(await checkFilterNow(client, { body_contains: "x" })).toEqual([]);
+    expect(mock.calls.filter((c) => c.cmd === "check_filter")).toHaveLength(0);
+    const [a, b] = await Promise.all([checkFilterNow(client, { property: "a ==" }), checkFilterNow(client, { property: "a ==" })]);
+    expect(a.map((i) => i.field)).toEqual(["property"]);
+    expect(b).toEqual(a);
+    expect(mock.calls.filter((c) => c.cmd === "check_filter")).toHaveLength(1);
   });
 
   it("refreshes sign-ins, the account, profiles, tenants and discovery after a sign-out", async () => {

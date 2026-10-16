@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { useMemo, useRef, useState, type ReactNode } from "react";
-import { TAIL_MAX, usePeekStream, type EntityCounts, type FilterSpec, type MessageSummary, type PeekView } from "@/engine";
+import { useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { TAIL_MAX, normalizeFilter, usePeekStream, type EntityCounts, type FilterSpec, type MessageSummary, type PeekView } from "@/engine";
 import { Button, DataGrid, EmptyState, Problem, formatNumber, rowHeight } from "@/ui";
 import { yearOf } from "../time";
 import { useShell } from "../context";
@@ -64,6 +64,7 @@ export function MessagesView({
   // The filter bar takes focus only when the user opens it, not when a view with the bar already open is shown again.
   const [focusBar, setFocusBar] = useState(false);
   const filterToggle = useRef<HTMLButtonElement>(null);
+  const filterBarId = useId();
   const [columnIds, setColumnIds, resetColumns] = useColumnPrefs(view, requiresSession);
   const n = stream.messages.length;
   // Data-sized columns: Seq as wide as the longest sequence number, timestamps with their year only when a row is
@@ -101,6 +102,14 @@ export function MessagesView({
   const restart = () => {
     setSel(noSelection);
     void qc.resetQueries({ queryKey: ["peek", profileId, tab.id, view] });
+  };
+  // Applying or clearing a filter is always a fresh read: a recently used filter must not come back from the cache
+  // (the rows may have changed since). A filter equal to the one in force restarts it, since its key would not change.
+  const applyFilter = (next: FilterSpec) => {
+    const filter = normalizeFilter(next);
+    void qc.removeQueries({ queryKey: ["peek", profileId, tab.id, view], type: "inactive" });
+    if (JSON.stringify(filter) === JSON.stringify(normalizeFilter(vs.filter))) restart();
+    else setVs({ filter });
   };
   const tail = vs.from.kind === "end";
   const filtered = filterCount(vs.filter) > 0;
@@ -154,8 +163,11 @@ export function MessagesView({
         onFrom={(from) => setVs(from.kind === "end" && vs.topN > TAIL_MAX ? { from, topN: TAIL_MAX } : { from })}
         topN={vs.topN}
         onTopN={(topN) => setVs({ topN })}
+        filter={vs.filter}
         filterCount={filterCount(vs.filter)}
         filterOpen={vs.filterOpen}
+        filterBarId={filterBarId}
+        onClearFilter={() => applyFilter({})}
         onToggleFilter={() => {
           setFocusBar(!vs.filterOpen);
           setVs({ filterOpen: !vs.filterOpen });
@@ -175,7 +187,8 @@ export function MessagesView({
         <FilterBar
           applied={vs.filter}
           autoFocus={focusBar}
-          onApply={(filter) => setVs({ filter })}
+          id={filterBarId}
+          onApply={applyFilter}
           onClose={() => {
             setVs({ filterOpen: false });
             filterToggle.current?.focus();
@@ -209,7 +222,7 @@ export function MessagesView({
                 <EmptyState
                   title="No messages match this filter"
                   body={`Scanned ${plural(stream.scanned, "message")}.`}
-                  action={<Button onClick={() => setVs({ filter: {} })}>Clear filter</Button>}
+                  action={<Button onClick={() => applyFilter({})}>Clear filter</Button>}
                 />
               ) : (
                 <EmptyState

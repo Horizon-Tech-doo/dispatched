@@ -649,6 +649,43 @@ export const shots: {
     },
   },
   {
+    name: "messages-filter-collapsed",
+    path: seedTab("invoice-generate", "queue", "dead-letter"),
+    ready: (p) => peekStatus(p).getByText(/37 messages/),
+    prepare: async (page) => {
+      await page.getByRole("button", { name: "Filter" }).click();
+      const bar = page.getByRole("search", { name: "Message filter" });
+      await bar.getByLabel("Properties").fill("attempt >= 2");
+      await bar.getByLabel("Body contains").fill("held");
+      await bar.getByLabel("Body contains").press("Enter");
+      await peekStatus(page).getByText(/matching messages? · scanned 37/).waitFor();
+      await bar.getByLabel("Body contains").press("Escape");
+      await page.getByRole("search", { name: "Message filter" }).waitFor({ state: "detached" });
+      await page.getByRole("grid").focus();
+    },
+  },
+  {
+    name: "messages-filter-json-session",
+    path: seedTab("returns-intake", "queue", "messages"),
+    ready: (p) => peekStatus(p).getByText(/48 messages/),
+    prepare: async (page) => {
+      // A session condition has no control to set it yet (Sessions comes later): put it in the view's state.
+      await page.evaluate(() => {
+        const m = (window as unknown as { __dispatchedMock: { setViewState(k: string, d: unknown, p: unknown): void; viewKey(p: string, t: string, v: string): string } }).__dispatchedMock;
+        const defaults = { from: { kind: "start" }, topN: 100, filter: {}, filterOpen: true, sorting: null, detailOpen: false };
+        m.setViewState(m.viewKey("p-logistics", "returns-intake", "active"), defaults, { filterOpen: true, filter: { session_id: "RMA-1010" } });
+      });
+      const bar = page.getByRole("search", { name: "Message filter" });
+      await bar.getByRole("radio", { name: "JSONPath" }).click();
+      await bar.getByLabel("JSONPath").fill("$.status");
+      await bar.getByLabel("Equals").fill("in_transit");
+      await bar.getByLabel("Equals").press("Enter");
+      await page.getByRole("button", { name: "Filter 2", exact: true }).waitFor();
+      await peekStatus(page).getByText(/matching messages? · scanned/).waitFor();
+      await page.getByRole("grid").focus();
+    },
+  },
+  {
     name: "messages-filter-error",
     path: seedTab("invoice-generate", "queue", "dead-letter"),
     ready: (p) => peekStatus(p).getByText(/37 messages/),
@@ -656,7 +693,7 @@ export const shots: {
       await page.getByRole("button", { name: "Filter" }).click();
       const bar = page.getByRole("search", { name: "Message filter" });
       await bar.getByLabel("Properties").fill("sys.Subject == 'x'");
-      await bar.getByText(/unexpected `=` at column/).waitFor();
+      await bar.getByText("Use = to compare.", { exact: true }).first().waitFor();
     },
   },
   {

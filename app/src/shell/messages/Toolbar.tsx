@@ -1,11 +1,12 @@
-import { CircleAlert, Columns3, Filter, RefreshCw, Square } from "lucide-react";
+import { CircleAlert, Columns3, Filter, RefreshCw, Square, X } from "lucide-react";
 import { useId, useState, type ReactNode, type Ref } from "react";
-import { TAIL_MAX, type PeekFrom } from "@/engine";
+import { TAIL_MAX, type FilterSpec, type PeekFrom } from "@/engine";
 import {
   Button, DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger,
-  Hint, Input, Segmented, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, cn, formatNumber,
+  Hint, IconButton, Input, Segmented, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, cn, formatNumber,
 } from "@/ui";
 import { COLUMN_LABEL, propColumn, type ColumnId } from "./columns";
+import { filterSummary } from "./filterText";
 
 export const TOP_N = [50, 100, 500, 1000, 5000, 10000, 50000] as const;
 
@@ -14,8 +15,12 @@ export function Toolbar(p: {
   onFrom(f: PeekFrom): void;
   topN: number;
   onTopN(n: number): void;
+  filter: FilterSpec;
   filterCount: number;
   filterOpen: boolean;
+  /** The filter bar's id, for the toggle's `aria-controls`. */
+  filterBarId?: string;
+  onClearFilter(): void;
   onToggleFilter(): void;
   /** For returning focus to the toggle when the filter bar closes with Escape. */
   filterToggleRef?: Ref<HTMLButtonElement>;
@@ -50,6 +55,7 @@ export function Toolbar(p: {
     setPicking(false);
     if (p.from.kind !== "sequence" || p.from.sequence !== n) p.onFrom({ kind: "sequence", sequence: n });
   };
+  const summary = filterSummary(p.filter);
   const toggle = (id: ColumnId) => p.onColumns(p.columns.includes(id) ? p.columns.filter((c) => c !== id) : [...p.columns, id]);
   return (
     <div role="toolbar" aria-label="Peek options" className="flex h-8 shrink-0 items-center gap-2 border-b border-line px-3">
@@ -116,12 +122,37 @@ export function Toolbar(p: {
           ))}
         </SelectContent>
       </Select>
-      <div className="ml-auto flex items-center gap-1">
-        <Button ref={p.filterToggleRef} variant="quiet" aria-pressed={p.filterOpen} onClick={p.onToggleFilter} className={cn(p.filterOpen && "bg-selection")}>
+      <div className="ml-auto flex min-w-0 items-center gap-1">
+        <Button
+          ref={p.filterToggleRef}
+          variant="quiet"
+          aria-expanded={p.filterOpen}
+          aria-controls={p.filterOpen ? p.filterBarId : undefined}
+          onClick={p.onToggleFilter}
+          className={cn("shrink-0", p.filterOpen && "bg-selection")}
+        >
           <Filter aria-hidden="true" className="text-icon" />
           Filter
           {p.filterCount > 0 && <span className="tabular-nums text-muted">{p.filterCount}</span>}
         </Button>
+        {/* Closed with a filter applied: what it is, so the rows are never a mystery. Opens the bar. */}
+        {!p.filterOpen && summary && (
+          <>
+            <Hint label={summary}>
+              <button
+                type="button"
+                aria-label={`Edit filter: ${summary}`}
+                onClick={p.onToggleFilter}
+                className="min-w-0 max-w-[360px] truncate rounded-ctl px-1 font-mono text-11 text-muted hover:text-fg focus-visible:outline focus-visible:outline-1 focus-visible:-outline-offset-1 focus-visible:outline-fg"
+              >
+                {summary}
+              </button>
+            </Hint>
+            <IconButton label="Clear filter" onClick={p.onClearFilter}>
+              <X />
+            </IconButton>
+          </>
+        )}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="quiet">
