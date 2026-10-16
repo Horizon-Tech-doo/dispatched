@@ -60,6 +60,15 @@ export const shots: {
     },
   },
   {
+    name: "catalogue-viewer",
+    path: "/#catalogue",
+    prepare: async (page) => {
+      await page.getByRole("heading", { name: "Viewer", exact: true }).first().evaluate((el) => el.scrollIntoView({ block: "start" }));
+      await page.keyboard.press("Shift"); // keyboard modality so :focus-visible matches
+      await page.getByRole("region", { name: "JSON body" }).first().focus();
+    },
+  },
+  {
     name: "catalogue-overlays",
     path: "/#catalogue",
     prepare: async (page) => {

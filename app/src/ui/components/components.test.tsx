@@ -9,6 +9,7 @@ import { CountBadge, ProdBadge } from "./badge";
 import { Kbd } from "./kbd";
 import { EmptyState } from "./empty-state";
 import { SkeletonRows } from "./skeleton";
+import { ToggleGroup } from "./toggle-group";
 
 describe("Button", () => {
   it("is a type=button that clicks and disables", async () => {
@@ -80,5 +81,20 @@ describe("ProdBadge, Kbd, EmptyState, SkeletonRows", () => {
     expect(screen.getByText(/K$/)).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "No dead letters" })).toBeInTheDocument();
     expect(screen.getByRole("status", { name: "Loading" }).querySelectorAll("[data-skeleton-row]")).toHaveLength(3);
+  });
+});
+
+describe("ToggleGroup", () => {
+  it("toggles values independently with aria-pressed", async () => {
+    const onChange = vi.fn();
+    const opts = [{ value: "active", label: "Active" }, { value: "dlq", label: "Dead-letter" }] as const;
+    render(<ToggleGroup label="Counts" values={["active"]} options={[...opts]} onChange={onChange} />);
+    expect(screen.getByRole("group", { name: "Counts" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Active" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Dead-letter" })).toHaveAttribute("aria-pressed", "false");
+    await userEvent.click(screen.getByRole("button", { name: "Dead-letter" }));
+    expect(onChange).toHaveBeenCalledWith(["active", "dlq"]);
+    await userEvent.click(screen.getByRole("button", { name: "Active" }));
+    expect(onChange).toHaveBeenLastCalledWith([]);
   });
 });

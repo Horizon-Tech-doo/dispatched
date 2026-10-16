@@ -6,8 +6,8 @@ import {
   CountBadge, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
   EmptyState, EntityGlyph, Problem, Field, Hint, IconButton, Input, Kbd, LabelSwatch, MenuShortcut, Panel, PanelGroup, ProdBadge,
   ResizeHandle, Segmented, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Sheet, SkeletonRows, Textarea,
-  DataGrid, Tabs, TabsList, TabsTrigger, ThemeScope, TooltipProvider, Tree,
-  labelColors, rowHeight, shortcutLabel, type Density, type EntityKind, type GridSort, type ThemeName, type TreeNode,
+  CodeView, DataGrid, HexView, Tabs, TabsList, TabsTrigger, ThemeScope, ToggleGroup, TooltipProvider, Tree,
+  labelColors, prettyJson, prettyXml, rowHeight, shortcutLabel, type Density, type EntityKind, type GridSort, type ThemeName, type TreeNode,
 } from "@/ui";
 
 const SUB_TABS = ["Overview", "Messages", "Dead-letter", "Subscriptions", "Rules", "Properties", "Metrics", "Access", "Settings"];
@@ -186,6 +186,31 @@ function GridDemo({ density }: { density: Density }) {
   );
 }
 
+const JSON_BODY = prettyJson(
+  '{"orderId":"c1f0b3a8-52d1-4a0e-9c64-7e2f1d9ab301","customer":{"id":48211907345123456789,"name":"Nordlicht Spedition"},"lines":[{"sku":"PAL-120","qty":6},{"sku":"BOX-014","qty":40}],"note":"Deliver \\"dock 4\\", ring twice","priority":null,"fragile":false,"tags":[]}',
+)!;
+const XML_BODY = prettyXml(
+  '<?xml version="1.0" encoding="utf-8"?><shipment id="48199"><!-- rerouted --><origin>Rotterdam</origin><destination country="DE">Hamburg</destination><manifest><![CDATA[2 x PAL-120 < 1.5 t & sealed]]></manifest><handling/></shipment>',
+)!;
+const HEX_BYTES = new Uint8Array(64).map((_, i) => (i < 40 ? '{"id":48199,"state":"dead-lettered"}'.charCodeAt(i % 37) : (i * 37) & 0xff));
+
+function ViewerDemo() {
+  const [counts, setCounts] = useState<("active" | "dlq" | "scheduled")[]>(["active", "dlq"]);
+  return (
+    <div className="flex w-full flex-col gap-3">
+      <div className="self-start"><ToggleGroup
+        label="Counts to show"
+        values={counts}
+        onChange={setCounts}
+        options={[{ value: "active", label: "Active" }, { value: "dlq", label: "Dead-letter" }, { value: "scheduled", label: "Scheduled" }]}
+      /></div>
+      <div className="h-[226px] w-full border border-line"><CodeView text={JSON_BODY} label="JSON body" /></div>
+      <div className="h-[130px] w-full border border-line"><CodeView text={XML_BODY} label="XML body" /></div>
+      <div className="h-[66px] w-full border border-line"><HexView bytes={HEX_BYTES} label="Hex body" /></div>
+    </div>
+  );
+}
+
 function SegmentedDemo() {
   const [value, setValue] = useState("system");
   return (
@@ -329,6 +354,9 @@ function Column({ theme, density }: { theme: ThemeName; density: Density }) {
         </Section>
         <Section title="Grid">
           <GridDemo density={density} />
+        </Section>
+        <Section title="Viewer">
+          <ViewerDemo />
         </Section>
         <Section title="Loading and empty">
           <div className="w-72 border border-line"><SkeletonRows rows={4} columns={2} /></div>
