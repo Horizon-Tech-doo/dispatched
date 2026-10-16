@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./tabs";
 import { Sheet } from "./sheet";
 import { CommandGroup, CommandInput, CommandItem, CommandList, CommandPaletteDialog } from "./command";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./dropdown-menu";
+import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./dropdown-menu";
 import { Button } from "./button";
 
 describe("Tabs", () => {
@@ -155,5 +155,22 @@ describe("DropdownMenu", () => {
     await userEvent.click(screen.getByRole("button", { name: "Logistics" }));
     await userEvent.click(await screen.findByRole("menuitem", { name: "Manage profiles" }));
     expect(onSelect).toHaveBeenCalledOnce();
+  });
+  it("checkbox items report their state and toggle", async () => {
+    const onCheckedChange = vi.fn();
+    render(
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild><Button>Columns</Button></DropdownMenuTrigger>
+        <DropdownMenuContent>
+          <DropdownMenuCheckboxItem checked onCheckedChange={onCheckedChange}>Subject</DropdownMenuCheckboxItem>
+          <DropdownMenuCheckboxItem checked={false}>Reason</DropdownMenuCheckboxItem>
+        </DropdownMenuContent>
+      </DropdownMenu>,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Columns" }));
+    expect(await screen.findByRole("menuitemcheckbox", { name: "Subject" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("menuitemcheckbox", { name: "Reason" })).toHaveAttribute("aria-checked", "false");
+    await userEvent.click(screen.getByRole("menuitemcheckbox", { name: "Subject" }));
+    expect(onCheckedChange).toHaveBeenCalledWith(false);
   });
 });

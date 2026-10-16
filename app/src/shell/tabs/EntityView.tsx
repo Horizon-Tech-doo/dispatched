@@ -7,8 +7,9 @@ import { splitSubscription, subTabsFor, useEntityInfo, validSubTab, viewOf, type
 const KIND_LINE = { queue: "Queue", topic: "Topic", subscription: "Subscription" } as const;
 
 /** A sub-tab count's reserved width: room for "99,999" in tabular numerals (five digit-wide ch plus a
- *  narrower comma), so counts up to that size, and the placeholder before them, never move the row. */
-const COUNT_SLOT = "min-w-[6ch] tabular-nums";
+ *  narrower comma), so counts up to that size, and the placeholder before them, never move the row. The count
+ *  starts right after its label (the button would centre it), and the spare width trails. */
+const COUNT_SLOT = "min-w-[6ch] text-left tabular-nums";
 
 /** One sub-tab's content. Message views load on their own; only the entity's own facts wait for its info. */
 function SubTabBody({ tab, def, info }: { tab: EntityTab; def: SubTabDef; info: EntityInfo }) {

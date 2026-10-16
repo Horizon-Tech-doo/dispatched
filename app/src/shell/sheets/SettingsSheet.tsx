@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { useAppInfo, useProfiles, useSignIns, useSignOut } from "@/engine";
 import { Badge, Button, Problem, Segmented, Sheet } from "@/ui";
 import { useShell } from "../context";
-import type { AutoRefresh } from "../state";
+import type { AutoRefresh, PeekSize } from "../state";
 import { sentence } from "./profileErrors";
 import { SignInProgress, useSignInFlow } from "./SignInPanel";
 
@@ -161,6 +161,14 @@ export function SettingsSheet() {
             value={String(prefs.autoRefresh)}
             onChange={(v) => setPrefs({ autoRefresh: Number(v) as AutoRefresh })}
             options={[{ value: "0", label: "Off" }, { value: "30", label: "30 s" }, { value: "60", label: "60 s" }]}
+          />
+        </Row>
+        <Row label="Peek size" hint="Messages each view reads at first. Peek more reads the same number again.">
+          <Segmented
+            label="Peek size"
+            value={String(prefs.peekSize)}
+            onChange={(v) => setPrefs({ peekSize: Number(v) as PeekSize })}
+            options={[{ value: "50", label: "50" }, { value: "100", label: "100" }, { value: "500", label: "500" }, { value: "1000", label: "1,000" }]}
           />
         </Row>
         <Row label="Version">

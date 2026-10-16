@@ -65,7 +65,9 @@ describe("usePeekStream", () => {
     await connected(mock);
     const { result } = renderHook(() => usePeekStream({ ...base, topN: 100 }), { wrapper });
     await waitFor(() => expect(result.current.messages).toHaveLength(100));
+    expect(result.current.target).toBe(100);
     act(() => result.current.peekMore());
+    expect(result.current.target).toBe(200);
     await waitFor(() => expect(result.current.messages).toHaveLength(200));
   });
 

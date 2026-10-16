@@ -1,3 +1,4 @@
+import { Check } from "lucide-react";
 import { DropdownMenu as M } from "radix-ui";
 import type { ComponentProps } from "react";
 import { cn } from "../lib/cn";
@@ -19,6 +20,19 @@ export function DropdownMenuContent({ className, sideOffset = 2, align = "start"
 }
 export function DropdownMenuItem({ className, ...props }: ComponentProps<typeof M.Item>) {
   return <M.Item className={cn(menuItem, className)} {...props} />;
+}
+/** A menu row with an on/off check mark (the mark's column is kept when off, so labels line up). */
+export function DropdownMenuCheckboxItem({ className, children, ...props }: ComponentProps<typeof M.CheckboxItem>) {
+  return (
+    <M.CheckboxItem className={cn(menuItem, "pl-7", className)} {...props}>
+      <span className="absolute left-2.5 inline-flex size-3 items-center justify-center">
+        <M.ItemIndicator>
+          <Check aria-hidden="true" className="!size-3" />
+        </M.ItemIndicator>
+      </span>
+      {children}
+    </M.CheckboxItem>
+  );
 }
 export function DropdownMenuSeparator({ className, ...props }: ComponentProps<typeof M.Separator>) {
   return <M.Separator className={cn("my-1 h-px bg-line", className)} {...props} />;

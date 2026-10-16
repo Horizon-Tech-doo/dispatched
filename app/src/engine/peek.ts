@@ -31,6 +31,8 @@ export interface PeekStream {
   messages: MessageSummary[];
   /** Messages examined by every page so far. */
   scanned: number;
+  /** The rows this round reads up to: the rows before it plus Top N (from the end: Top N). */
+  target: number;
   /** The first page is on its way. */
   loading: boolean;
   /** Further pages are on their way. */
@@ -133,6 +135,7 @@ export function usePeekStream(o: PeekStreamOptions): PeekStream {
   return {
     messages,
     scanned,
+    target: tail ? tailN! : target,
     loading: q.isPending && q.fetchStatus !== "idle",
     streaming: q.isFetchingNextPage,
     error: q.error ?? null,

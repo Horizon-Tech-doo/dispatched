@@ -47,8 +47,12 @@ export interface DataGridProps<R> {
 }
 
 const HEADER_HEIGHT = 24;
-// Wide enough for five digits plus the gutter padding and rule.
-const ROW_NUMBER_WIDTH = "52px";
+/** The row-number gutter: 52px holds five digits plus its padding and rule; more rows widen it by the extra digits
+ *  (mono 11px digits are 6.6px wide). */
+export function rowNumberWidth(rowCount: number): string {
+  const digits = String(Math.max(1, rowCount)).length;
+  return digits <= 5 ? "52px" : `${Math.ceil(digits * 6.6) + 20}px`;
+}
 const SKELETON_WIDTHS = ["w-[62%]", "w-[48%]", "w-[71%]", "w-[39%]", "w-[56%]", "w-[66%]", "w-[44%]", "w-[58%]"];
 
 export function DataGrid<R>(p: DataGridProps<R>) {
@@ -84,7 +88,7 @@ export function DataGrid<R>(p: DataGridProps<R>) {
   const rows = table.getRowModel().rows;
   const leafColumns = table.getVisibleLeafColumns();
   const columnTemplate = leafColumns.map((c) => c.columnDef.meta?.width ?? "minmax(80px, 1fr)").join(" ");
-  const template = p.rowNumbers ? `${ROW_NUMBER_WIDTH} ${columnTemplate}` : columnTemplate;
+  const template = p.rowNumbers ? `${rowNumberWidth(rows.length)} ${columnTemplate}` : columnTemplate;
   const colCount = leafColumns.length + (p.rowNumbers ? 1 : 0);
 
   const { initialRect } = p;
@@ -179,7 +183,7 @@ export function DataGrid<R>(p: DataGridProps<R>) {
         <div key={r} data-skeleton-row className="grid items-center px-2.5" style={{ height: p.rowHeight, gridTemplateColumns: template }}>
           {p.rowNumbers && <div className="border-r border-line pl-1 pr-2.5"><Skeleton className="ml-auto w-[60%]" /></div>}
           {leafColumns.map((c, ci) => (
-            <div key={c.id} className="px-1">
+            <div key={c.id} className="px-2">
               <Skeleton className={cn(SKELETON_WIDTHS[(r + ci * 3) % SKELETON_WIDTHS.length], c.columnDef.meta?.align === "end" && "ml-auto")} />
             </div>
           ))}
@@ -230,14 +234,14 @@ export function DataGrid<R>(p: DataGridProps<R>) {
               key={h.id}
               role="columnheader"
               aria-sort={dir === "asc" ? "ascending" : dir === "desc" ? "descending" : undefined}
-              className={cn("truncate", h.column.getCanSort() ? "h-full" : "px-1", meta?.align === "end" && "text-right")}
+              className={cn("truncate", h.column.getCanSort() ? "h-full" : "px-2", meta?.align === "end" && "text-right")}
             >
               {h.column.getCanSort() ? (
                 <button
                   type="button"
                   onClick={h.column.getToggleSortingHandler()}
                   className={cn(
-                    "flex h-full w-full items-center gap-1 px-1 hover:bg-hover hover:text-fg focus-visible:outline focus-visible:outline-1 focus-visible:-outline-offset-1 focus-visible:outline-fg",
+                    "flex h-full w-full items-center gap-1 px-2 hover:bg-hover hover:text-fg focus-visible:outline focus-visible:outline-1 focus-visible:-outline-offset-1 focus-visible:outline-fg",
                     dir ? "text-fg" : "text-muted",
                     meta?.align === "end" && "flex-row-reverse",
                   )}
@@ -287,7 +291,7 @@ export function DataGrid<R>(p: DataGridProps<R>) {
                     <div
                       key={c.id}
                       role="gridcell"
-                      className={cn("truncate px-1", meta?.align === "end" && "text-right tabular-nums", meta?.mono && "font-mono text-11 tabular-nums")}
+                      className={cn("truncate px-2", meta?.align === "end" && "text-right tabular-nums", meta?.mono && "font-mono text-11 tabular-nums")}
                     >
                       {flexRender(c.column.columnDef.cell, c.getContext())}
                     </div>

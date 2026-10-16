@@ -1,8 +1,27 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
-import { EngineError, setTransport } from "@/engine";
+import { EngineError, setTransport, type IpcTransport, type MessageSummary, type PeekPageView, type PeekRequest } from "@/engine";
 import { renderShell } from "../test-utils";
+import { setViewState, viewKey, type ViewState } from "./viewStore";
+
+const TRACKING = "shipment-events/subscriptions/tracking-sync";
+
+/** The mock behind `renderShell`, with `edit` changing a command's answer (or holding it) before it returns. */
+function around(mock: IpcTransport, edit: (cmd: string, args: Record<string, unknown> | undefined, answer: () => Promise<unknown>) => Promise<unknown>) {
+  setTransport({ listen: mock.listen, invoke: <T,>(cmd: string, args?: Record<string, unknown>) => edit(cmd, args, () => mock.invoke(cmd, args)) as Promise<T> });
+}
+
+const VIEW_DEFAULTS: ViewState = { from: { kind: "start" }, topN: 100, filter: {}, filterOpen: false, sorting: null, detailOpen: false };
+/** Start a view with some of its state set, as if the user had chosen it. */
+const presetView = (tabId: string, view: string, patch: Partial<ViewState>) => setViewState(viewKey("p-logistics", tabId, view), VIEW_DEFAULTS, patch);
+
+const summary = (seq: number): MessageSummary => ({
+  sequence_number: seq, state: "active", message_id: `m-${seq}`, correlation_id: null, session_id: null, subject: "s", content_type: null, to: null,
+  reply_to: null, enqueued_time: "2026-10-15T09:00:00Z", scheduled_enqueue_time: null, delivery_count: 0, time_to_live_ms: null,
+  dead_letter_reason: null, dead_letter_description: null, dead_letter_source: null, application_properties: {}, body_kind: "empty", body_size: 0,
+  body_preview: null,
+});
 
 const seedTab = (id: string, kind: "queue" | "subscription", subTab: string) => ({
   last_profile: "p-logistics",
@@ -17,9 +36,9 @@ describe("message views", () => {
     const g = await grid();
     expect(await within(g).findAllByText("MaxDeliveryCountExceeded")).not.toHaveLength(0);
     const status = screen.getByRole("status", { name: "Peek status" });
-    await waitFor(() => expect(status).toHaveTextContent("37 messages"));
-    expect(status).toHaveTextContent("End of the dead-letter queue");
-    expect(status).toHaveTextContent("Peek only, nothing locked");
+    await waitFor(() => expect(status).toHaveTextContent("37 messages · end of the dead-letter queue"));
+    // The global status bar says it once; the view does not repeat it.
+    expect(status).not.toHaveTextContent("Peek only");
   });
 
   it("peek more reads the next Top N", async () => {
@@ -72,6 +91,8 @@ describe("message views", () => {
   it("an empty view says so in plain words", async () => {
     renderShell("default", seedTab("label-print", "queue", "dead-letter"));
     expect(await screen.findByRole("heading", { name: "No dead letters" })).toBeInTheDocument();
+    // The empty state says it; the status line has nothing to add.
+    expect(screen.getByRole("status", { name: "Peek status" })).toHaveTextContent(/^$/);
   });
 
   it("peek again after Peek more reads Top N again, not the grown total", async () => {
@@ -124,5 +145,165 @@ describe("message views", () => {
     await waitFor(() => expect(status).toHaveTextContent("200 messages"));
     expect(peeks).toBe(before + 1);
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("shows the round's progress while it streams, and Stop in the toolbar ends it", async () => {
+    const { mock } = renderShell("default", seedTab(TRACKING, "subscription", "dead-letter"));
+    presetView(TRACKING, "dead-letter", { topN: 5000 });
+    let pages = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    around(mock, async (cmd, _args, answer) => {
+      if (cmd === "peek_page" && ++pages === 2) await gate;
+      return answer();
+    });
+    const status = await screen.findByRole("status", { name: "Peek status" });
+    await waitFor(() => expect(status).toHaveTextContent("500 of 5,000 · reading…"));
+    const toolbar = screen.getByRole("toolbar", { name: "Peek options" });
+    expect(within(toolbar).queryByRole("button", { name: "Peek again" })).toBeNull();
+    await userEvent.click(within(toolbar).getByRole("button", { name: "Stop" }));
+    release();
+    await waitFor(() => expect(status).toHaveTextContent("1,000 messages · stopped"));
+    expect(within(toolbar).getByRole("button", { name: "Peek again" })).toBeInTheDocument();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(pages).toBe(2);
+  });
+
+  it("says when a scan from the end stopped before the newest messages", async () => {
+    const { mock } = renderShell("default", seedTab(TRACKING, "subscription", "dead-letter"));
+    presetView(TRACKING, "dead-letter", { from: { kind: "end" } });
+    around(mock, async (cmd, args, answer) => {
+      const page = (await answer()) as PeekPageView;
+      return cmd === "peek_page" && (args?.request as PeekRequest).from.kind === "end" ? { ...page, exhausted: false } : page;
+    });
+    const status = await screen.findByRole("status", { name: "Peek status" });
+    await waitFor(() => expect(status).toHaveTextContent("100 messages · the scan stopped before the end, so these are not the newest"));
+  });
+
+  it("says older messages may not have been examined when a scan from the end hit its limit", async () => {
+    const { mock } = renderShell("default", seedTab(TRACKING, "subscription", "dead-letter"));
+    presetView(TRACKING, "dead-letter", { from: { kind: "end" } });
+    around(mock, async (cmd, args, answer) => {
+      const page = (await answer()) as PeekPageView;
+      if (cmd !== "peek_page" || (args?.request as PeekRequest).from.kind !== "end") return page;
+      return { ...page, messages: page.messages.slice(-3), scanned: 100_000, scan_limit: 100_000, exhausted: true };
+    });
+    const status = await screen.findByRole("status", { name: "Peek status" });
+    await waitFor(() => expect(status).toHaveTextContent("3 matching messages in the newest 100,000 · older messages may not have been examined"));
+  });
+
+  it("holds 100,000 rows: Top N 50,000 can peek more once", async () => {
+    const { mock } = renderShell("default", seedTab(TRACKING, "subscription", "dead-letter"));
+    presetView(TRACKING, "dead-letter", { topN: 50_000 });
+    around(mock, async (cmd, args, answer) => {
+      if (cmd !== "peek_page") return answer();
+      const r = args!.request as PeekRequest;
+      const from = r.from.kind === "sequence" ? r.from.sequence : 1;
+      const messages = Array.from({ length: r.max }, (_, i) => summary(from + i));
+      return { messages, scanned: r.max, scan_limit: r.scan_limit ?? 5000, next_sequence: from + r.max, exhausted: false } satisfies PeekPageView;
+    });
+    const status = await screen.findByRole("status", { name: "Peek status" });
+    await waitFor(() => expect(status).toHaveTextContent("50,000 messages · more available"), { timeout: 10_000 });
+    await userEvent.click(within(status).getByRole("button", { name: "Peek more" }));
+    await waitFor(() => expect(status).toHaveTextContent("100,000 messages · the view holds up to 100,000 messages"), { timeout: 10_000 });
+    expect(within(status).queryByRole("button", { name: "Peek more" })).toBeNull();
+  }, 30_000);
+
+  it("offers only the columns the view can fill, and resets them", async () => {
+    renderShell("default", seedTab("invoice-generate", "queue", "messages"));
+    const g = await grid();
+    act(() => screen.getByRole("button", { name: "Columns" }).focus());
+    await userEvent.keyboard("{Enter}");
+    await screen.findByRole("menuitemcheckbox", { name: "Subject" });
+    expect(screen.queryByRole("menuitemcheckbox", { name: "Reason" })).toBeNull();
+    expect(screen.queryByRole("menuitemcheckbox", { name: "Session" })).toBeNull();
+    await userEvent.click(screen.getByRole("menuitemcheckbox", { name: "Subject" }));
+    await waitFor(() => expect(within(g).queryByRole("columnheader", { name: "Subject" })).toBeNull());
+    await userEvent.click(screen.getByRole("menuitem", { name: "Reset columns" }));
+    await waitFor(() => expect(within(g).getByRole("columnheader", { name: "Subject" })).toBeInTheDocument());
+  });
+
+  it("clears the selection when the peek starts again", async () => {
+    renderShell("default", seedTab("invoice-generate", "queue", "dead-letter"));
+    const g = await grid();
+    await within(g).findAllByText("MaxDeliveryCountExceeded");
+    await userEvent.click(within(g).getAllByRole("row")[1]);
+    expect(within(g).getAllByRole("row")[1]).toHaveAttribute("aria-selected", "true");
+    await userEvent.click(screen.getByRole("button", { name: "Peek again" }));
+    await waitFor(() => expect(g.querySelectorAll('[aria-selected="true"]')).toHaveLength(0));
+    await within(g).findAllByText("MaxDeliveryCountExceeded");
+    expect(g.querySelectorAll('[aria-selected="true"]')).toHaveLength(0);
+  });
+
+  it("refuses a sequence number too large to type, and says so", async () => {
+    renderShell("default", seedTab("invoice-generate", "queue", "dead-letter"));
+    await grid();
+    await userEvent.click(screen.getByRole("radio", { name: "Sequence" }));
+    const field = screen.getByRole("textbox", { name: "From sequence number" });
+    await userEvent.type(field, "123456789012345678901{Enter}");
+    expect(field).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByRole("alert")).toHaveTextContent(/too large/i);
+    expect(screen.getByRole("radio", { name: "Sequence" })).toHaveAttribute("aria-checked", "true");
+    await userEvent.clear(field);
+    await userEvent.type(field, "41030{Enter}");
+    expect(field).not.toHaveAttribute("aria-invalid");
+    await waitFor(() => expect(screen.getByRole("status", { name: "Peek status" })).toHaveTextContent("7 messages"));
+  });
+
+  it("explains an empty scheduled view the listing counts as not empty", async () => {
+    const { mock } = renderShell("default", seedTab("invoice-generate", "queue", "scheduled"));
+    around(mock, async (cmd, args, answer) => {
+      const v = await answer();
+      if (cmd === "list_entities") {
+        const l = v as { queues: { name: string; counts: { scheduled: number } | null }[] };
+        for (const q of l.queues) if (q.name === "invoice-generate" && q.counts) q.counts = { ...q.counts, scheduled: 3 };
+      }
+      if (cmd === "peek_page" && (args?.request as PeekRequest).view === "scheduled") return { ...(v as PeekPageView), messages: [] };
+      return v;
+    });
+    expect(await screen.findByRole("heading", { name: "No scheduled messages" })).toBeInTheDocument();
+    expect(screen.getByText(/they may have become active since/)).toBeInTheDocument();
+  });
+
+  it("shows compact enqueued times with the full time on hover", async () => {
+    renderShell("default", seedTab("invoice-generate", "queue", "dead-letter"));
+    const g = await grid();
+    await within(g).findAllByText("MaxDeliveryCountExceeded");
+    const cell = within(within(g).getAllByRole("row")[1]).getAllByRole("gridcell")[2];
+    expect(cell.textContent).toMatch(/^\d{2} [A-Z][a-z]{2} \d{2}:\d{2}:\d{2}$/);
+    expect(cell.querySelector("[title]")?.getAttribute("title")).toMatch(/^2026-10-15T/);
+  });
+
+  it("reads the Peek size setting as each view's first Top N", async () => {
+    renderShell("default", { ...seedTab(TRACKING, "subscription", "dead-letter"), ui: { peekSize: 500 } });
+    const status = await screen.findByRole("status", { name: "Peek status" });
+    await waitFor(() => expect(status).toHaveTextContent("500 messages · more available"));
+    await userEvent.keyboard("{Control>},{/Control}");
+    const sheet = await screen.findByRole("dialog", { name: "Settings" });
+    const size = within(sheet).getByRole("radiogroup", { name: "Peek size" });
+    expect(within(size).getByRole("radio", { name: "500" })).toHaveAttribute("aria-checked", "true");
+    await userEvent.click(within(size).getByRole("radio", { name: "1,000" }));
+    await waitFor(() => expect(status).toHaveTextContent("1,000 messages"));
+  });
+
+  it("forgets a connection's view state when switching to another connection", async () => {
+    renderShell("default", seedTab("invoice-generate", "queue", "dead-letter"));
+    let g = await grid();
+    await within(g).findAllByText("MaxDeliveryCountExceeded");
+    await userEvent.click(within(within(g).getByRole("columnheader", { name: /Seq/ })).getByRole("button"));
+    expect(within(g).getByRole("columnheader", { name: /Seq/ })).toHaveAttribute("aria-sort", "ascending");
+    const steps: [RegExp, RegExp, RegExp][] = [
+      [/^Connection: Logistics/, /Partner gateway/, /^Connection: Partner/],
+      [/^Connection: Partner/, /^Logistics sb-logistics-prod/, /^Connection: Logistics/],
+    ];
+    for (const [selector, item, after] of steps) {
+      act(() => screen.getByRole("button", { name: selector }).focus());
+      await userEvent.keyboard("{Enter}");
+      await userEvent.click(await screen.findByRole("menuitem", { name: item }));
+      await screen.findByRole("button", { name: after });
+    }
+    g = await grid();
+    await within(g).findAllByText("MaxDeliveryCountExceeded");
+    expect(within(g).getByRole("columnheader", { name: /Seq/ })).not.toHaveAttribute("aria-sort");
   });
 });

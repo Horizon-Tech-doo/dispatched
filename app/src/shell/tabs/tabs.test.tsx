@@ -52,7 +52,7 @@ describe("entity tabs", () => {
     // Tabs without a count reserve nothing.
     expect(within(views).getByRole("tab", { name: "Overview" }).querySelector("[data-count-placeholder]")).toBeNull();
     await act(async () => release());
-    await waitFor(() => expect(within(messages).getByText("2,906")).toHaveClass("min-w-[6ch]"));
+    await waitFor(() => expect(within(messages).getByText("2,906")).toHaveClass("min-w-[6ch]", "text-left"));
     expect(messages.querySelector("[data-count-placeholder]")).toBeNull();
   });
 

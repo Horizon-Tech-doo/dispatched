@@ -2,10 +2,11 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState, type ReactNode } from "react";
 import { TAIL_MAX, usePeekStream, type EntityCounts, type FilterSpec, type MessageSummary, type PeekView } from "@/engine";
 import { Button, DataGrid, EmptyState, Problem, formatNumber, rowHeight } from "@/ui";
+import { yearOf } from "../time";
 import { useShell } from "../context";
 import type { EntityTab } from "../state";
 import { VIEW_LABEL } from "../tabs/subtabs";
-import { buildColumns, useColumnPrefs } from "./columns";
+import { buildColumns, optionalColumns, useColumnPrefs } from "./columns";
 import { describePeekError } from "./peekError";
 import { Toolbar } from "./Toolbar";
 import { useViewState, viewKey, type ViewState } from "./viewStore";
@@ -18,17 +19,17 @@ const EMPTY: Record<PeekView, string> = {
   deferred: "No deferred messages",
 };
 
-/** The view's count in the entity listing, to explain an empty peek of a view the listing says is not empty. */
-const LISTED: Partial<Record<PeekView, (c: EntityCounts) => number>> = {
-  active: (c) => c.active,
-  "dead-letter": (c) => c.dead_letter,
-  "transfer-dead-letter": (c) => c.transfer_dead_letter,
-  scheduled: (c) => c.scheduled,
+/** The view's count in the entity listing, to explain an empty peek of a view the listing says is not empty, and why
+ *  the two can differ. */
+const LISTED: Partial<Record<PeekView, { count: (c: EntityCounts) => number; since: string }>> = {
+  active: { count: (c) => c.active, since: "they may have been received since" },
+  "dead-letter": { count: (c) => c.dead_letter, since: "they may have been received since" },
+  "transfer-dead-letter": { count: (c) => c.transfer_dead_letter, since: "they may have been received since" },
+  scheduled: { count: (c) => c.scheduled, since: "they may have become active since" },
 };
 
-/** The grid holds at most this many rows: the row-number gutter fits five digits, and more rows than this belong in
- *  an export, not a scrolling grid. */
-export const ROW_LIMIT = 99_999;
+/** The grid holds at most this many rows: more than this belongs in an export, not a scrolling grid. */
+export const ROW_LIMIT = 100_000;
 
 export const filterCount = (f: FilterSpec) =>
   [f.property, f.body_contains || f.body_regex || f.body_json_path, f.session_id].filter((v) => typeof v === "string" && v.trim() !== "").length;
@@ -61,16 +62,31 @@ export function MessagesView({
   );
   const [vs, setVs] = useViewState(viewKey(profileId, tab.id, view), defaults);
   const stream = usePeekStream({ profileId, entity: tab.id, view, from: vs.from, topN: vs.topN, filter: vs.filter });
-  const [columnIds, setColumnIds] = useColumnPrefs(view, requiresSession);
+  const [columnIds, setColumnIds, resetColumns] = useColumnPrefs(view, requiresSession);
   const n = stream.messages.length;
-  // Sized to the longest sequence number read so far; changes rarely, so the columns are rarely rebuilt.
+  // Data-sized columns: Seq as wide as the longest sequence number, timestamps with their year only when a row is
+  // from another year. Both change rarely, so the columns are rarely rebuilt.
   const seqDigits = useMemo(() => {
     let max = 0;
     for (const m of stream.messages) if (m.sequence_number > max) max = m.sequence_number;
     return String(max).length;
   }, [stream.messages]);
-  const columns = useMemo(() => buildColumns(columnIds, seqDigits), [columnIds, seqDigits]);
-  const [sel, setSel] = useState<{ ids: Set<string>; focus: string | null }>({ ids: new Set(), focus: null });
+  const withYear = useMemo(() => {
+    const year = new Date().getFullYear();
+    return stream.messages.some((m) => [m.enqueued_time, m.scheduled_enqueue_time].some((t) => { const y = yearOf(t); return y !== null && y !== year; }));
+  }, [stream.messages]);
+  const columns = useMemo(() => buildColumns(columnIds, { seqDigits, withYear }), [columnIds, seqDigits, withYear]);
+  const offered = useMemo(() => optionalColumns(view, requiresSession), [view, requiresSession]);
+  const noSelection = { ids: new Set<string>(), focus: null };
+  const [sel, setSel] = useState<{ ids: Set<string>; focus: string | null }>(noSelection);
+  // A new peek (Peek again, F5, another From, Top N or filter) starts with nothing selected: the rows are not the
+  // ones that were selected. Adjusted during render, so a stale selection is never drawn.
+  const selFor = `${JSON.stringify(vs.from)}|${vs.topN}|${JSON.stringify(vs.filter)}|${stream.loading}`;
+  const [selKey, setSelKey] = useState(selFor);
+  if (selKey !== selFor) {
+    setSelKey(selFor);
+    setSel(noSelection);
+  }
   const qc = useQueryClient();
   const label = VIEW_LABEL[view];
   const propertyNames = useMemo(() => {
@@ -80,29 +96,36 @@ export function MessagesView({
   }, [stream.messages]);
 
   // A reset (never an invalidate) of every peek of this view: the hook starts a fresh round at Top N.
-  const restart = () => void qc.resetQueries({ queryKey: ["peek", profileId, tab.id, view] });
+  const restart = () => {
+    setSel(noSelection);
+    void qc.resetQueries({ queryKey: ["peek", profileId, tab.id, view] });
+  };
   const tail = vs.from.kind === "end";
   const filtered = filterCount(vs.filter) > 0;
   // The error stays on the query while a retry is on its way: show it only when it can be acted on.
   const failure = stream.error && stream.canRetry ? describePeekError(stream.error.kind, stream.error.message, label) : null;
   const atLimit = n + vs.topN > ROW_LIMIT;
   const canPeekMore = !stream.streaming && stream.canPeekMore && !atLimit;
+  const end =
+    view === "dead-letter" ? "dead-letter queue" : view === "transfer-dead-letter" ? "transfer dead-letter queue" : tab.kind === "subscription" ? "subscription" : "queue";
 
+  // Segments in lowercase after the first; nothing when the pane itself already says it (empty, or a failed first page).
   const status = (() => {
     if (stream.loading) return "Reading…";
-    if (failure && n === 0) return "Nothing read";
-    const rows = filtered ? `${plural(n, "matching message")} · scanned ${formatNumber(stream.scanned)}` : plural(n, "message");
+    if (failure && n === 0) return "";
     if (tail) {
       if (!stream.exhausted) return `${plural(n, "message")} · the scan stopped before the end, so these are not the newest`;
       if (stream.olderNotExamined)
-        return `${plural(n, "matching message")} in the newest ${formatNumber(stream.scanned)}; older messages may not have been examined`;
-      return `Last ${plural(n, "message")}`;
+        return `${plural(n, "matching message")} in the newest ${formatNumber(stream.scanned)} · older messages may not have been examined`;
+      return n === 0 ? "" : `Last ${plural(n, "message")}`;
     }
+    const scanned = filtered ? ` · scanned ${formatNumber(stream.scanned)}` : "";
+    const rows = `${plural(n, filtered ? "matching message" : "message")}${scanned}`;
     if (failure) return `${rows} · the next page failed`;
-    if (stream.streaming) return `${rows} · reading more…`;
-    if (stream.budgetHit)
-      return n === 0 ? `Scanned ${formatNumber(stream.scanned)} messages, none matched. Peek more to keep scanning.` : `${rows}. Peek more to keep scanning.`;
-    if (stream.exhausted) return `${rows} · End of the ${label}`;
+    if (stream.streaming) return `${formatNumber(n)} of ${formatNumber(stream.target)}${filtered ? " matching" : ""}${scanned} · reading…`;
+    if (stream.budgetHit) return `${rows} · scan limit reached, peek more to keep scanning`;
+    if (n === 0 && stream.exhausted) return "";
+    if (stream.exhausted) return `${rows} · end of the ${end}`;
     if (stream.stopped) return `${rows} · stopped`;
     if (stream.canPeekMore && atLimit) return `${rows} · the view holds up to ${formatNumber(ROW_LIMIT)} messages`;
     return `${rows} · more available`;
@@ -119,7 +142,8 @@ export function MessagesView({
 
   // No rows: the failure is the whole pane. Rows already read stay, with the failure above them.
   const paneError = failure && n === 0 ? <EmptyState tone="error" title={failure.title} body={failure.body} detail={stream.error!.message} action={fixAction} /> : null;
-  const listed = counts && LISTED[view]?.(counts);
+  const listedView = LISTED[view];
+  const listed = counts && listedView ? listedView.count(counts) : 0;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -132,8 +156,12 @@ export function MessagesView({
         filterOpen={vs.filterOpen}
         onToggleFilter={filterBar !== undefined ? () => setVs({ filterOpen: !vs.filterOpen }) : undefined}
         columns={columnIds}
+        offered={offered}
         onColumns={setColumnIds}
+        onResetColumns={resetColumns}
         propertyNames={propertyNames}
+        streaming={stream.streaming}
+        onStop={stream.stop}
         onRefresh={restart}
         exportMenu={exportMenu}
       />
@@ -170,7 +198,7 @@ export function MessagesView({
               ) : (
                 <EmptyState
                   title={EMPTY[view]}
-                  body={listed ? `The entity lists ${plural(listed, "message")} here; they may have been received since. Peek again to check.` : undefined}
+                  body={listed ? `The entity lists ${plural(listed, "message")} here; ${listedView!.since}. Peek again to check.` : undefined}
                   action={listed ? <Button onClick={restart}>Peek again</Button> : undefined}
                 />
               )
@@ -182,17 +210,11 @@ export function MessagesView({
       </div>
       <div role="status" aria-label="Peek status" className="flex h-[22px] shrink-0 items-center gap-2 border-t border-line px-3 text-11 text-muted">
         <span className="truncate tabular-nums">{status}</span>
-        {stream.streaming && (
-          <Button size="sm" className="h-[18px] text-11" onClick={stream.stop}>
-            Stop
-          </Button>
-        )}
         {canPeekMore && (
           <Button size="sm" className="h-[18px] text-11" onClick={stream.peekMore}>
             Peek more
           </Button>
         )}
-        <span className="ml-auto shrink-0">Peek only, nothing locked</span>
       </div>
     </div>
   );

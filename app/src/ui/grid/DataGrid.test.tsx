@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import type { ColumnDef } from "@tanstack/react-table";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
-import { DataGrid, type DataGridProps, type GridSort } from "./DataGrid";
+import { DataGrid, rowNumberWidth, type DataGridProps, type GridSort } from "./DataGrid";
 
 interface Msg { seq: number; subject: string; size: string }
 const columns: ColumnDef<Msg, unknown>[] = [
@@ -346,6 +346,15 @@ describe("DataGrid sorting and columns", () => {
     const rendered = screen.getAllByRole("row").length;
     expect(rendered).toBeLessThan(120);
     expect(seqColumn()[0]).toBe("57999");
+  });
+
+  it("widens the row-number gutter past five digits only", () => {
+    expect(rowNumberWidth(20)).toBe("52px");
+    expect(rowNumberWidth(99_999)).toBe("52px");
+    expect(rowNumberWidth(100_000)).toBe("60px");
+    expect(rowNumberWidth(1_000_000)).toBe("67px");
+    render(<Sorted rowNumbers />);
+    expect(screen.getAllByRole("row")[0].style.gridTemplateColumns.startsWith("52px ")).toBe(true);
   });
 
   it("labels the row-number column", () => {

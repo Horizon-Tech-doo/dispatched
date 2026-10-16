@@ -13,6 +13,11 @@ interface ConnState {
 
 const idle: ConnState = { status: "idle", view: null, error: null, profileId: null };
 
+/** Queries that belong to one connection: dropped whenever the connection changes, so another connection (or the
+ *  same one, connected again) never shows them. Peeks and message details are keyed by profile, but a reconnect of
+ *  the same profile must read again too. */
+const PER_CONNECTION = [["entities"], ["subscriptions"], ["peek"], ["message"]];
+
 export function useConnectionController() {
   const qc = useQueryClient();
   const [s, setS] = useState<ConnState>(idle);
@@ -30,8 +35,7 @@ export function useConnectionController() {
       try {
         const view = await commands.connect(profileId);
         if (n !== latest.current) return;
-        qc.removeQueries({ queryKey: ["entities"] });
-        qc.removeQueries({ queryKey: ["subscriptions"] });
+        for (const queryKey of PER_CONNECTION) qc.removeQueries({ queryKey });
         setS({ status: "connected", view, error: null, profileId });
         void commands.settingsSet("last_profile", profileId).catch(() => {});
       } catch (e) {
@@ -45,8 +49,7 @@ export function useConnectionController() {
   const disconnect = useCallback(async () => {
     latest.current++;
     await commands.disconnect().catch(() => {});
-    qc.removeQueries({ queryKey: ["entities"] });
-    qc.removeQueries({ queryKey: ["subscriptions"] });
+    for (const queryKey of PER_CONNECTION) qc.removeQueries({ queryKey });
     setS(idle);
     void commands.settingsSet("last_profile", null).catch(() => {});
   }, [qc]);
@@ -57,8 +60,7 @@ export function useConnectionController() {
     (profileId: string) => {
       if (current.current.profileId !== profileId || current.current.status !== "connected") return;
       latest.current++;
-      qc.removeQueries({ queryKey: ["entities"] });
-      qc.removeQueries({ queryKey: ["subscriptions"] });
+      for (const queryKey of PER_CONNECTION) qc.removeQueries({ queryKey });
       setS(idle);
       void commands.settingsSet("last_profile", null).catch(() => {});
     },

@@ -18,7 +18,9 @@ export type Scenario =
   // customs-docs holds 12,000 active messages (scan budgets); exports keep running until cancelled.
   | "many-messages" | "export-slow"
   // Every peek page is refused: the identity lacks Listen.
-  | "peek-error";
+  | "peek-error"
+  // A peek's first page arrives; the next one never does (screenshots of a view still reading).
+  | "peek-slow";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -504,6 +506,7 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
         const filter = r.filter ?? {};
         const hit = (m: MockMessage) => accepts(r.view, m) && matches(m, filter);
         // A load is up to 20 pages: as Rust, a page is logged only when it fails.
+        if (scenario === "peek-slow" && r.from.kind === "sequence") await new Promise(() => {});
         return quietly(`Peeking ${entity} failed`, started, () => {
           if (scenario === "peek-error")
             throw new EngineError("forbidden", "access denied (needs Listen): Unauthorized access. 'Listen' claim(s) are required to perform this operation.");

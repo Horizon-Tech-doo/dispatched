@@ -1,8 +1,9 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { createContext, useCallback, useContext, useEffect, useState, type Dispatch, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type Dispatch, type ReactNode } from "react";
 import { useTheme } from "@/ui";
 import { startEventCapture } from "./drawer/activity";
 import { useConnectionController, type ConnectionController } from "./connection";
+import { clearViewStates } from "./messages/viewStore";
 import { installStore } from "./sheets/installState";
 import { usePrefs, useProfileShell, type Prefs, type ProfileShell, type ShellAction } from "./state";
 
@@ -57,6 +58,14 @@ export function ShellProvider({ children }: { children: ReactNode }) {
   else if ((conn.status === "idle" || conn.status === "failed") && shellProfileId !== null) setShellProfileId(null);
   const live = conn.status === "connected" || (conn.status === "connecting" && shellProfileId !== null && conn.profileId === shellProfileId);
   const [shell, dispatch, shellLoaded] = useProfileShell(shellProfileId);
+  // Leaving a connection forgets its views' state (Top N, From, filters, sorting): it was about that namespace's
+  // messages. A reconnect of the same profile keeps it, as it keeps the tabs.
+  const shownProfile = useRef(shellProfileId);
+  useEffect(() => {
+    const was = shownProfile.current;
+    shownProfile.current = shellProfileId;
+    if (was !== null && was !== shellProfileId) clearViewStates(was);
+  }, [shellProfileId]);
   const [sheet, setSheet] = useState<SheetState>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const qc = useQueryClient();

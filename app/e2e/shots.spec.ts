@@ -11,9 +11,10 @@ const onScreen = async (page: Page, el: Locator) => {
 };
 
 /** A connected logistics workbench with one entity tab open on `subTab` (drawer closed, so the view has the room). */
-const seedTab = (id: string, kind: "queue" | "subscription", subTab: string, scenario = "default") =>
+const seedTab = (id: string, kind: "queue" | "subscription", subTab: string, scenario = "default", extra: Record<string, unknown> = {}) =>
   `/?scenario=${scenario}&autoconnect=p-logistics&seed=${encodeURIComponent(
     JSON.stringify({
+      ...extra,
       "shell:p-logistics": {
         tabs: [{ id, kind, subTab }], activeTab: id, expanded: ["group:queues", "group:topics"], selected: null,
         layout: { treeSize: 18, drawerOpen: false, drawerSize: 18, drawerTab: "activity" },
@@ -602,6 +603,24 @@ export const shots: {
       await page.getByRole("radio", { name: "End" }).click();
       await peekStatus(page).getByText("Last 100 messages").waitFor();
     },
+  },
+  {
+    name: "messages-sorted",
+    path: seedTab("invoice-generate", "queue", "dead-letter"),
+    ready: (p) => peekStatus(p).getByText(/37 messages/),
+    prepare: async (page) => {
+      // By keyboard, so the pointer never hovers a header.
+      await page.getByRole("grid").getByRole("button", { name: "Seq" }).focus();
+      await page.keyboard.press("Enter");
+      await page.keyboard.press("Enter");
+      await page.getByRole("columnheader", { name: /Seq/ }).and(page.locator('[aria-sort="descending"]')).waitFor();
+      await page.getByRole("grid").focus();
+    },
+  },
+  {
+    name: "messages-streaming",
+    path: seedTab("shipment-events/subscriptions/tracking-sync", "subscription", "dead-letter", "peek-slow", { ui: { peekSize: 1000 } }),
+    ready: (p) => peekStatus(p).getByText("500 of 1,000 · reading…"),
   },
   {
     name: "messages-columns-menu",

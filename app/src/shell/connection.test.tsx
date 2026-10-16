@@ -66,4 +66,28 @@ describe("connection controller", () => {
     expect(mock.calls.some((c) => c.cmd === "disconnect")).toBe(false);
     expect(mock.calls).toContainEqual({ cmd: "settings_set", args: { key: "last_profile", value: null } });
   });
+
+  it("drops peeks and message details on connect and disconnect, so another connection never shows them", async () => {
+    setTransport(createMockTransport("default"));
+    const client = createQueryClient();
+    const { result } = renderHook(() => useConnectionController(), {
+      wrapper: ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>,
+    });
+    const seed = () => {
+      client.setQueryData(["peek", "p-logistics", "invoice-generate", "active"], { pages: [], pageParams: [] });
+      client.setQueryData(["message", "p-logistics", "invoice-generate", "active", 1], null);
+    };
+    const cached = () => client.getQueryCache().findAll().filter((q) => q.queryKey[0] === "peek" || q.queryKey[0] === "message").length;
+    seed();
+    await act(() => result.current.connect("p-logistics"));
+    expect(cached()).toBe(0);
+    seed();
+    await act(() => result.current.disconnect());
+    expect(cached()).toBe(0);
+    seed();
+    await act(() => result.current.connect("p-logistics"));
+    seed();
+    act(() => result.current.closedByEngine("p-logistics"));
+    expect(cached()).toBe(0);
+  });
 });
