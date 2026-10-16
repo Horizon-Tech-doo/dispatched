@@ -368,9 +368,9 @@ describe("M1c commands on the mock", () => {
 });
 
 describe("suggestedFileName", () => {
-  it("names the file as the save dialog does, in UTC", async () => {
+  it("names the file as the save dialog does, in the user's local time", async () => {
     const { suggestedFileName } = await import("./exportName");
-    const at = new Date("2026-10-16T09:41:59Z");
+    const at = new Date(2026, 9, 16, 9, 41, 59); // local time
     expect(suggestedFileName("invoice-generate", "dead-letter", "json", at)).toBe("invoice-generate-dead-letter-20261016-0941.json");
     expect(suggestedFileName("shipment-events/subscriptions/tracking-sync", "active", "NDJSON", at)).toBe("shipment-events-subscriptions-tracking-sync-active-20261016-0941.ndjson");
   });
