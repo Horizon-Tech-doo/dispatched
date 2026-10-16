@@ -358,7 +358,7 @@ export const shots: {
       await sheet.getByLabel("Name", { exact: true }).fill("Orders production");
       await sheet.getByLabel("Connection string").fill("Endpoint=sb://orders.servicebus.windows.net/;SharedAccessKeyName=reader;SharedAccessKey=c2VjcmV0");
       await sheet.getByRole("button", { name: "Test connection" }).click();
-      await sheet.getByRole("status").waitFor();
+      await sheet.getByRole("status").getByText(/^Tested /).waitFor();
     },
     holds: (p) => p.getByRole("dialog", { name: "Add connection" }),
     viewportOnly: true,
@@ -437,7 +437,7 @@ export const shots: {
       const sheet = page.getByRole("dialog", { name: "Edit Logistics", exact: true });
       await sheet.getByLabel("Proxy").fill("http://proxy.corp:8080");
       await sheet.getByRole("button", { name: "Test connection" }).click();
-      await sheet.getByRole("status").waitFor();
+      await sheet.getByRole("status").getByText(/^Tested /).waitFor();
     },
     holds: (p) => p.getByRole("dialog", { name: "Edit Logistics", exact: true }),
     viewportOnly: true,

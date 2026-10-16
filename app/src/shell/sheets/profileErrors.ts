@@ -43,3 +43,11 @@ export function checkAdvice(label: "Management" | "Messaging", kind: string): st
       return "Check the connection settings and test again.";
   }
 }
+
+/** A skipped check's reason in the app's words: Rust's two pinned reasons are worded for the command line. */
+export function skippedReason(reason: string): string {
+  if (reason.includes("management check failed"))
+    return "No queue could be listed because the Management check failed. Pin an entity to test receive rights.";
+  if (reason.includes("no entity to probe")) return "No entity to test. Pin one to test receive rights.";
+  return sentence(reason);
+}

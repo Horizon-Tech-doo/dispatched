@@ -101,6 +101,30 @@ describe("Accounts in Settings", () => {
     expect(mock.calls).toContainEqual({ cmd: "settings_set", args: { key: "last_profile", value: null } });
   });
 
+  it("still resets the connection when the sheet closes before the sign-out returns", async () => {
+    const user = userEvent.setup();
+    const { mock } = renderShell("default", { last_profile: "p-logistics-dev" });
+    await mock.invoke("sign_in", { tenant: null, deviceCode: false });
+    await screen.findByRole("button", { name: /Connection: Logistics dev/ });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const invoke = mock.invoke.bind(mock);
+    mock.invoke = (async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "sign_out") await gate;
+      return invoke(cmd, args);
+    }) as typeof mock.invoke;
+    const sheet = await openSettings(user);
+    const row = await within(sheet).findByRole("listitem", { name: /ops@contoso.example/ });
+    await user.click(within(row).getByRole("button", { name: "Sign out" }));
+    await user.click(within(row).getByRole("button", { name: "Sign out ops@contoso.example" }));
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Settings" })).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: /Connection: Logistics dev/ })).toBeInTheDocument();
+    release();
+    await waitFor(() => expect(screen.queryByRole("button", { name: /Connection: Logistics dev/ })).not.toBeInTheDocument());
+    expect(mock.calls.some((c) => c.cmd === "disconnect")).toBe(false);
+  });
+
   it("signs in again to the tenant of the user's own expired sign-in, with the progress inside its row", async () => {
     const user = userEvent.setup();
     const { mock } = renderShell("default");

@@ -13,6 +13,13 @@ async function chooseMenuItem(user: ReturnType<typeof userEvent.setup>, trigger:
   await user.click(await screen.findByRole("menuitem", { name: item }));
 }
 
+/** The test result region once something has landed in it (it is always in the sheet, so it can announce). */
+const testResult = async (sheet: HTMLElement) => {
+  const status = within(sheet).getByRole("status");
+  await waitFor(() => expect(status).not.toBeEmptyDOMElement());
+  return status;
+};
+
 const CS = "Endpoint=sb://orders.servicebus.windows.net/;SharedAccessKeyName=reader;SharedAccessKey=c2VjcmV0";
 
 describe("ProfileSheet", () => {
@@ -166,7 +173,7 @@ describe("ProfileSheet", () => {
     await user.type(within(sheet).getByLabelText("Name"), "Orders");
     await user.type(within(sheet).getByLabelText("Connection string"), CS);
     await user.click(within(sheet).getByRole("button", { name: "Test connection" }));
-    expect(await within(sheet).findByRole("status")).toHaveTextContent("Tested orders.servicebus.windows.net as SAS key reader, AMQP.");
+    expect(await testResult(sheet)).toHaveTextContent("Tested orders.servicebus.windows.net as SAS key reader, AMQP.");
     expect(within(sheet).getByText(/Management works/)).toBeInTheDocument();
     expect(mock.calls.some((c) => c.cmd === "profile_test_draft")).toBe(true);
     expect(mock.calls.some((c) => c.cmd === "profile_save")).toBe(false);
@@ -238,13 +245,13 @@ describe("ProfileSheet details", () => {
     expect(test).toBeEnabled();
     expect(within(sheet).queryByText(/Save to test/)).not.toBeInTheDocument();
     await user.click(test);
-    expect(await within(sheet).findByRole("status")).toHaveTextContent("AMQP over WebSockets");
+    expect(await testResult(sheet)).toHaveTextContent("AMQP over WebSockets");
     const sent = mock.calls.find((c) => c.cmd === "profile_test_draft")!.args as { draft: { id: string; name: string; proxy: string; auth: { connection_string: string | null } } };
     expect(sent.draft).toMatchObject({ id: "p-logistics", name: "Logistics EU", proxy: "http://p:1" });
     expect(sent.draft.auth.connection_string).toBeNull(); // the engine uses the stored string
     expect(mock.calls.some((c) => c.cmd === "profile_save")).toBe(false);
     await user.type(within(sheet).getByLabelText("Proxy"), "0");
-    expect(within(sheet).queryByRole("status")).not.toBeInTheDocument();
+    expect(within(sheet).getByRole("status")).toBeEmptyDOMElement();
   });
 
   it("tests an incomplete form by showing what is missing, like Save", async () => {
@@ -265,14 +272,59 @@ describe("ProfileSheet details", () => {
     renderShell("forbidden");
     const sheet = await openEdit(user, "Logistics");
     await user.click(within(sheet).getByRole("button", { name: "Test connection" }));
-    const status = await within(sheet).findByRole("status");
+    const status = await testResult(sheet);
     expect(status).toHaveTextContent("Tested sb-logistics-prod.servicebus.windows.net as SAS key reader, AMQP.");
     const alert = within(status).getByRole("alert");
     expect(within(alert).getByText("Management failed")).toBeInTheDocument();
     expect(within(alert).getByText(/needs the Manage right|Give it the Manage right/)).toBeInTheDocument();
     expect(within(alert).getByText(/access denied \(needs Manage\)/)).toHaveClass("font-mono");
     expect(within(status).getByText("Messaging not tested")).toBeInTheDocument();
-    expect(within(status).getByText(/management check failed/)).toBeInTheDocument();
+    expect(within(status).getByText(/the Management check failed/)).toBeInTheDocument();
+  });
+
+  it("words the skipped check for the app, and shows other reasons as they come", async () => {
+    const user = userEvent.setup();
+    const { mock } = renderShell("forbidden");
+    const sheet = await openEdit(user, "Logistics");
+    expect(within(sheet).getByRole("status")).toBeEmptyDOMElement(); // there before any result, so a result is announced
+    await user.click(within(sheet).getByRole("button", { name: "Test connection" }));
+    const status = await testResult(sheet);
+    expect(within(status).getByText("No queue could be listed because the Management check failed. Pin an entity to test receive rights.")).toBeInTheDocument();
+    expect(status).not.toHaveTextContent("pass an entity");
+    // The other pinned reason, and an unknown one.
+    for (const [reason, shown] of [
+      ["no entity to probe; pass one", "No entity to test. Pin one to test receive rights."],
+      ["the namespace is paused", "The namespace is paused."],
+    ]) {
+      const invoke = mock.invoke.bind(mock);
+      mock.invoke = (async (cmd: string, args?: Record<string, unknown>) => {
+        const r = await invoke(cmd, args);
+        return cmd === "profile_test_draft" ? { ...(r as object), management: { status: "ok", detail: "listed 4 queues (Manage)" }, messaging: { status: "skipped", reason } } : r;
+      }) as typeof mock.invoke;
+      await user.type(within(sheet).getByLabelText("Proxy"), "x"); // a changed form clears the old result
+      await user.clear(within(sheet).getByLabelText("Proxy"));
+      await user.click(within(sheet).getByRole("button", { name: "Test connection" }));
+      await waitFor(() => expect(within(sheet).getByRole("status")).toHaveTextContent(shown));
+    }
+  });
+
+  it("drops a result when the connection's sign-in is signed in again", async () => {
+    const user = userEvent.setup();
+    const { mock, client } = renderShell("default");
+    await mock.invoke("sign_in", { tenant: null, deviceCode: false });
+    const sheet = await openEdit(user, "Logistics dev");
+    await user.click(within(sheet).getByRole("button", { name: "Test connection" }));
+    await testResult(sheet);
+    // Same account, same sign-in, but its `live` flag flips as the engine reports it.
+    const invoke = mock.invoke.bind(mock);
+    mock.invoke = (async (cmd: string, args?: Record<string, unknown>) => {
+      const r = await invoke(cmd, args);
+      return cmd === "profiles_list"
+        ? (r as { id: string; bound_sign_in: { live: boolean } | null }[]).map((p) => (p.bound_sign_in ? { ...p, bound_sign_in: { ...p.bound_sign_in, live: false } } : p))
+        : r;
+    }) as typeof mock.invoke;
+    await client.invalidateQueries({ queryKey: ["profiles"] });
+    await waitFor(() => expect(within(sheet).getByRole("status")).toBeEmptyDOMElement());
   });
 
   it("brings a new result into view, and drops it when the account changes", async () => {
@@ -284,12 +336,12 @@ describe("ProfileSheet details", () => {
     if (!within(sheet).queryByText(/Signed in as/)) await user.click(within(sheet).getByRole("button", { name: "Sign in with Entra ID" }));
     await within(sheet).findByText(/Signed in as ops@contoso.example/);
     await user.click(within(sheet).getByRole("button", { name: "Test connection" }));
-    const status = await within(sheet).findByRole("status");
+    const status = await testResult(sheet);
     expect(status).toHaveTextContent("Entra ID");
     expect(scroll).toHaveBeenCalledWith({ block: "nearest" });
     await user.click(within(sheet).getByRole("button", { name: "Use another account" }));
     await within(sheet).findByText(/Signed in as dev@fabrikam.example/);
-    expect(within(sheet).queryByRole("status")).not.toBeInTheDocument();
+    expect(within(sheet).getByRole("status")).toBeEmptyDOMElement();
     scroll.mockRestore();
   });
 
@@ -298,10 +350,10 @@ describe("ProfileSheet details", () => {
     const { client } = renderShell("default");
     const sheet = await openEdit(user, "Logistics");
     await user.click(within(sheet).getByRole("button", { name: "Test connection" }));
-    await within(sheet).findByRole("status");
+    await testResult(sheet);
     await client.invalidateQueries({ queryKey: ["account"] });
     await client.invalidateQueries({ queryKey: ["profiles"] });
-    expect(within(sheet).getByRole("status")).toBeInTheDocument();
+    expect(within(sheet).getByRole("status")).not.toBeEmptyDOMElement();
   });
 
   it("disables Test while a sign-in is waiting and says why", async () => {
@@ -327,7 +379,7 @@ describe("ProfileSheet details", () => {
     await user.type(within(sheet).getByLabelText("Name"), "Orders");
     await user.type(within(sheet).getByLabelText("Connection string"), CS);
     await user.click(within(sheet).getByRole("button", { name: "Test connection" }));
-    await within(sheet).findByRole("status");
+    await testResult(sheet);
     await waitFor(() => expect(JSON.stringify(client.getMutationCache().getAll().map((m) => m.state))).not.toContain("c2VjcmV0"));
   });
 

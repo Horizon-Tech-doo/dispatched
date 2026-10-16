@@ -9,7 +9,7 @@ import {
   cn, labelColors,
 } from "@/ui";
 import { useShell } from "../context";
-import { checkAdvice, placeError, sentence, type Errors } from "./profileErrors";
+import { checkAdvice, placeError, sentence, skippedReason, type Errors } from "./profileErrors";
 import { NamespacePicker } from "./NamespacePicker";
 import { SignInPanel, TenantSignInAction, useSigningIn } from "./SignInPanel";
 
@@ -78,7 +78,7 @@ function CheckLine({ label, c }: { label: "Management" | "Messaging"; c: Check }
       )}
       <span className="flex min-w-0 flex-col">
         <span className="font-semibold">{skipped ? `${label} not tested` : `${label} works`}</span>
-        <span className="text-muted">{skipped ? sentence(c.reason) : c.detail}</span>
+        <span className="text-muted">{skipped ? skippedReason(c.reason) : c.detail}</span>
       </span>
     </li>
   );
@@ -206,6 +206,15 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
           : !bound.same_account
             ? `This connection uses a different account, ${bound.user_principal}. Sign in with that account to use it.`
             : null;
+  // Signing in again with the same account flips the bound sign-in's `live` flag: a result from before it is stale.
+  const boundLive = bound?.live;
+  const lastLive = useRef(boundLive);
+  useEffect(() => {
+    if (lastLive.current === boundLive) return;
+    lastLive.current = boundLive;
+    formVersion.current++;
+    setTested(null);
+  }, [boundLive]);
   // An edited Entra profile whose sign-in record is gone: a test has no sign-in to use until it is saved.
   const signInGone = editing && profile.auth.kind === "entra" && profile.bound_sign_in == null;
   // The tenant an edited Entra profile lives in, and its name when the tenant list has it.
@@ -551,9 +560,10 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
           {(ids) => <Textarea {...ids} mono value={f.pins} onChange={(e) => set("pins", e.target.value)} />}
         </Field>
 
-        {tested && (
-          <div ref={resultBox} role="status" className="flex flex-col gap-2 border-t border-line pt-3">
-            {"report" in tested ? (
+        {/* Always there, so a result that lands in it is announced; empty it takes no room (it cancels the form's gap). */}
+        <div ref={resultBox} role="status" className={tested ? "flex flex-col gap-2 border-t border-line pt-3" : "-mt-4"}>
+          {tested &&
+            ("report" in tested ? (
               <>
                 <p className="m-0 text-11 text-muted">
                   Tested <span className="font-mono" data-selectable>{tested.report.host}</span> as {tested.report.auth}, {TRANSPORT_NAME[tested.report.transport]}.
@@ -574,9 +584,8 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
                   </>
                 }
               />
-            )}
-          </div>
-        )}
+            ))}
+        </div>
       </form>
     </Sheet>
   );
