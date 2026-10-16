@@ -3,6 +3,8 @@ import { Button, CountBadge, EmptyState, SkeletonRows, Tabs, TabsContent, TabsLi
 import { useShell } from "../context";
 import { MessagesView } from "../messages/MessagesView";
 import { OverviewView } from "../overview/OverviewView";
+import { RulesView } from "../rules/RulesView";
+import { SessionsView } from "../sessions/SessionsView";
 import type { EntityTab, SubTabId } from "../state";
 import { countPlaceholderCh, countsKey, recallCounts, rememberCounts, splitSubscription, subTabsFor, useEntityInfo, validSubTab, viewOf, type EntityInfo, type SubTabDef } from "./subtabs";
 
@@ -13,6 +15,10 @@ function SubTabBody({ tab, def, info }: { tab: EntityTab; def: SubTabDef; info: 
   const view = viewOf(def.id);
   if (view) return <MessagesView tab={tab} view={view} counts={info.counts} requiresSession={info.facts.includes("sessions")} />;
   if (def.id === "overview") return <OverviewView tab={tab} />;
+  if (def.id === "rules") return <RulesView tab={tab} />;
+  // Whether the entity uses sessions comes with its listing: wait for it rather than list sessions of an entity without.
+  if (def.id === "sessions")
+    return info.status === "loading" ? <SkeletonRows rows={6} /> : <SessionsView tab={tab} requiresSession={info.status === "found" ? info.facts.includes("sessions") : null} />;
   if (def.id === "listener")
     return <EmptyState title="Listener isn't available yet" body="Live receive, with auto-complete and message rates, comes with the operate features." />;
   return info.status === "loading" ? <SkeletonRows rows={6} /> : <EmptyState title={`${def.label} isn't available yet`} body={def.description} />;
@@ -72,7 +78,7 @@ export function EntityView({ tab }: { tab: EntityTab }) {
           })}
         </TabsList>
         {defs.map((d) => (
-          <TabsContent key={d.id} value={d.id} className={viewOf(d.id) || d.id === "overview" ? "overflow-hidden" : "overflow-y-auto"}>
+          <TabsContent key={d.id} value={d.id} className={viewOf(d.id) || ["overview", "sessions", "rules"].includes(d.id) ? "overflow-hidden" : "overflow-y-auto"}>
             <SubTabBody tab={tab} def={d} info={info} />
           </TabsContent>
         ))}

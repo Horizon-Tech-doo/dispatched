@@ -44,6 +44,8 @@ export interface DataGridProps<R> {
   onSortingChange?(sort: GridSort | null): void;
   /** A leading `#` column numbering the rows in display order. */
   rowNumbers?: boolean;
+  /** The row's accessible name, when its cells alone do not name it well (e.g. a session's id). */
+  rowLabel?(row: R): string;
 }
 
 const HEADER_HEIGHT = 24;
@@ -275,6 +277,7 @@ export function DataGrid<R>(p: DataGridProps<R>) {
                 data-row-id={row.id}
                 aria-rowindex={v.index + 2}
                 aria-selected={selected}
+                aria-label={p.rowLabel?.(row.original)}
                 onClick={(e) => onRowClick(e, v.index)}
                 onDoubleClick={() => p.onActivate?.(row.id)}
                 className={cn(

@@ -19,8 +19,8 @@ export type Scenario =
   // customs-docs holds 12,000 active messages (scan budgets); exports keep running until cancelled.
   | "many-messages" | "export-slow"
   // An export fails after its second tick (the connection resets); selected messages `export-missing` lost two
-  // of the ones asked for (received since the grid read them).
-  | "export-fails" | "export-missing"
+  // of the ones asked for (received since the grid read them); `export-refused` is refused before it starts.
+  | "export-fails" | "export-missing" | "export-refused"
   // Every peek page is refused: the identity lacks Listen.
   | "peek-error"
   // A peek's first page arrives; the next one never does (screenshots of a view still reading).
@@ -682,6 +682,8 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
         const entity = entityPath(r.entity);
         if (!["json", "ndjson", "jsonl"].includes(String(r.format).trim().toLowerCase()))
           throw new EngineError("invalid", `unknown export format \`${r.format}\`; use json or ndjson`);
+        // `export-refused`: the engine refuses a request the sheet let through (the filter changed behind it).
+        if (scenario === "export-refused") throw new EngineError("invalid", "body regex: Invalid regular expression: /(/: Unterminated group");
         if (r.scope.kind === "all") {
           const bad = issuesOf(r.scope.filter ?? {});
           if (bad.length) throw new EngineError("invalid", bad[0].message);

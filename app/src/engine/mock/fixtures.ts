@@ -247,6 +247,18 @@ export const rules: Record<string, RuleInfo[]> = {
       created_at: null,
     },
   ],
-  // A filter the reader does not understand (the engine's `unknown`).
-  "carrier-updates/subscriptions/eta-recalc": [defaultRule, { name: "legacy-route", filter: { kind: "unknown" }, action: null, created_at: "2026-09-20T14:05:00Z" }],
+  // A filter the reader does not understand (the engine's `unknown`), and a correlation filter that sets nothing (never matches).
+  "carrier-updates/subscriptions/eta-recalc": [
+    defaultRule,
+    { name: "legacy-route", filter: { kind: "unknown" }, action: null, created_at: "2026-09-20T14:05:00Z" },
+    {
+      name: "unset",
+      filter: {
+        kind: "correlation", correlation_id: null, message_id: null, to: null, reply_to: null, subject: null, session_id: null,
+        reply_to_session_id: null, content_type: null, properties: [],
+      },
+      action: null,
+      created_at: null,
+    },
+  ],
 };

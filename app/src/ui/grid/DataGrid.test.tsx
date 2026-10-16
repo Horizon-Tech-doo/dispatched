@@ -13,7 +13,7 @@ const columns: ColumnDef<Msg, unknown>[] = [
 ];
 const rows = (n: number): Msg[] => Array.from({ length: n }, (_, i) => ({ seq: 48000 + i, subject: `Subject ${i}`, size: "1.8 KB" }));
 
-function Harness({ data = rows(20), onActivate = () => {}, ...rest }: { data?: Msg[]; onActivate?: (id: string) => void; loading?: boolean; empty?: React.ReactNode; error?: React.ReactNode; rowHeight?: number }) {
+function Harness({ data = rows(20), onActivate = () => {}, ...rest }: { data?: Msg[]; onActivate?: (id: string) => void; loading?: boolean; empty?: React.ReactNode; error?: React.ReactNode; rowHeight?: number; rowLabel?: (r: Msg) => string }) {
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [focus, setFocus] = useState<string | null>(null);
   return (
@@ -76,6 +76,11 @@ describe("DataGrid", () => {
     await user.click(rowEls()[6]);
     await user.keyboard("{/Shift}");
     expect(selectedRows().map((r) => r.getAttribute("data-row-id"))).toEqual(["48003", "48004", "48005", "48006"]);
+  });
+
+  it("names a row from rowLabel", () => {
+    render(<Harness rowLabel={(r) => `Message ${r.seq}`} />);
+    expect(screen.getByRole("row", { name: "Message 48002" })).toBeInTheDocument();
   });
 
   it("shows loading and empty states instead of rows", () => {

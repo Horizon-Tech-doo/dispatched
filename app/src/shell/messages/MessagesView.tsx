@@ -14,7 +14,7 @@ import { DetailPane } from "./DetailPane";
 import { FilterBar } from "./FilterBar";
 import { describePeekError } from "./peekError";
 import { Toolbar } from "./Toolbar";
-import { useViewState, viewKey, type ViewState } from "./viewStore";
+import { defaultViewState, useViewState, viewKey } from "./viewStore";
 
 const EMPTY: Record<PeekView, string> = {
   active: "No active messages",
@@ -54,10 +54,7 @@ export function MessagesView({
 }) {
   const { conn, prefs, shell, dispatch, openSheet } = useShell();
   const profileId = conn.profileId;
-  const defaults = useMemo<ViewState>(
-    () => ({ from: { kind: "start" }, topN: prefs.peekSize, filter: {}, filterOpen: false, sorting: null, detailOpen: false }),
-    [prefs.peekSize],
-  );
+  const defaults = useMemo(() => defaultViewState(prefs.peekSize), [prefs.peekSize]);
   const [vs, setVs] = useViewState(viewKey(profileId, tab.id, view), defaults);
   const stream = usePeekStream({ profileId, entity: tab.id, view, from: vs.from, topN: vs.topN, filter: vs.filter });
   // The filter bar takes focus only when the user opens it, not when a view with the bar already open is shown again.

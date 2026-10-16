@@ -11,6 +11,9 @@ export interface ViewState {
   detailOpen: boolean;
 }
 
+/** What a view shows before the user changes anything. Built once per Top N default, so the snapshot stays stable. */
+export const defaultViewState = (topN: number): ViewState => ({ from: { kind: "start" }, topN, filter: {}, filterOpen: false, sorting: null, detailOpen: false });
+
 /** View state lives for the session (not persisted): switching sub-tabs or tabs keeps it. */
 const states = new Map<string, ViewState>();
 const subs = new Set<() => void>();

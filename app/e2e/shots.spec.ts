@@ -104,12 +104,11 @@ function detailShots(): Shot[] {
       path: DETAIL_VIEW(),
       prepare: async (p) => {
         await peekStatus(p).getByText(/100 messages/).waitFor();
-        // The pane is open (Enter or a double click did it) but nothing is selected: put the view in that state.
-        await p.evaluate(() => {
-          const m = (window as unknown as { __dispatchedMock: { setViewState(k: string, d: unknown, p: unknown): void; viewKey(p: string, t: string, v: string): string } }).__dispatchedMock;
-          const defaults = { from: { kind: "start" }, topN: 100, filter: {}, filterOpen: false, sorting: null, detailOpen: false };
-          m.setViewState(m.viewKey("p-logistics", "shipment-events/subscriptions/tracking-sync", "dead-letter"), defaults, { detailOpen: true });
-        });
+        // The pane is open (Enter on a row did it) but nothing is selected: Peek again reads the view anew and drops the selection.
+        await p.locator("[data-row-id]").nth(1).click();
+        await p.getByRole("grid").press("Enter");
+        await p.getByRole("region", { name: "Body" }).first().waitFor();
+        await p.getByRole("button", { name: "Peek again" }).click();
         await p.getByRole("heading", { name: "No message selected" }).waitFor();
       },
     },
@@ -146,13 +145,14 @@ function exportShots(): Shot[] {
     await sheet(page).getByRole("button", { name: /^Export 37 messages…/ }).click();
     await jobs(page).getByRole("listitem").waitFor();
   };
-  /** Put the view in a state no control reaches yet (a filter set before the sheet opens). */
-  const setFilter = (page: Page, filter: Record<string, string>) =>
-    page.evaluate((f) => {
-      const m = (window as unknown as { __dispatchedMock: { setViewState(k: string, d: unknown, p: unknown): void; viewKey(p: string, t: string, v: string): string } }).__dispatchedMock;
-      const defaults = { from: { kind: "start" }, topN: 100, filter: {}, filterOpen: false, sorting: null, detailOpen: false };
-      m.setViewState(m.viewKey("p-logistics", "invoice-generate", "dead-letter"), defaults, { filter: f });
-    }, filter);
+  /** Apply a "Body contains" filter through the filter bar. */
+  const filterBody = async (page: Page, text: string) => {
+    await page.getByRole("button", { name: "Filter" }).click();
+    const bar = page.getByRole("search", { name: "Message filter" });
+    await bar.getByLabel("Body contains").fill(text);
+    await bar.getByLabel("Body contains").press("Enter");
+    await peekStatus(page).getByText(/matching messages? · scanned/).waitFor();
+  };
   const selectRows = async (page: Page, n: number) => {
     await page.getByRole("grid").focus();
     await page.keyboard.press("Home");
@@ -172,14 +172,13 @@ function exportShots(): Shot[] {
       viewportOnly: true,
     },
     {
-      // A file chosen, then the request refused (a filter that does not compile): the file is kept and named.
+      // A file chosen, then the request refused by the engine: the file is kept and named.
       name: "export-sheet-file-chosen",
-      path: INVOICES(),
+      path: INVOICES("export-refused"),
       ready: (p) => peekStatus(p).getByText(/37 messages/),
       prepare: async (page) => {
-        await setFilter(page, { body_regex: "(" });
         await openExport(page, "Export all…");
-        await sheet(page).getByRole("button", { name: "Export messages…" }).click();
+        await sheet(page).getByRole("button", { name: /^Export 37 messages…/ }).click();
         await sheet(page).getByRole("alert").waitFor();
         await sheet(page).getByRole("button", { name: "Choose another file" }).waitFor();
       },
@@ -224,7 +223,7 @@ function exportShots(): Shot[] {
       path: INVOICES("export-slow"),
       ready: (p) => peekStatus(p).getByText(/37 messages/),
       prepare: async (page) => {
-        await setFilter(page, { body_contains: "SHP" });
+        await filterBody(page, "SHP");
         await openExport(page, "Export all…");
         await sheet(page).getByRole("button", { name: "Export messages…" }).click();
         await jobs(page).getByText(/ written · .* scanned$/).waitFor();
@@ -321,6 +320,37 @@ function overviewShots(): Shot[] {
         await page.setViewportSize({ width: 640, height: 800 });
         await counts(page).waitFor();
       },
+    },
+  ];
+}
+
+/** The Sessions and Rules sub-tabs. */
+function sessionsAndRulesShots(): Shot[] {
+  return [
+    {
+      name: "sessions",
+      path: seedTab("returns-intake", "queue", "sessions"),
+      ready: (p) => p.getByRole("row", { name: "RMA-1004" }),
+      prepare: async (p) => {
+        await p.getByRole("row", { name: "RMA-1004" }).click();
+        await p.getByRole("grid", { name: "Sessions" }).focus();
+      },
+    },
+    {
+      name: "sessions-none",
+      path: seedTab("invoice-generate", "queue", "sessions"),
+      ready: (p) => p.getByRole("heading", { name: "This queue doesn't use sessions" }),
+    },
+    {
+      name: "rules",
+      path: seedTab(TRACKING, "subscription", "rules"),
+      ready: (p) => p.getByRole("listitem", { name: "priority" }),
+    },
+    {
+      // An unknown filter and a correlation filter that sets nothing.
+      name: "rules-odd",
+      path: seedTab("carrier-updates/subscriptions/eta-recalc", "subscription", "rules"),
+      ready: (p) => p.getByRole("listitem", { name: "unset" }),
     },
   ];
 }
@@ -960,12 +990,11 @@ export const shots: Shot[] = [
     path: seedTab("returns-intake", "queue", "messages"),
     ready: (p) => peekStatus(p).getByText(/48 messages/),
     prepare: async (page) => {
-      // A session condition has no control to set it yet (Sessions comes later): put it in the view's state.
-      await page.evaluate(() => {
-        const m = (window as unknown as { __dispatchedMock: { setViewState(k: string, d: unknown, p: unknown): void; viewKey(p: string, t: string, v: string): string } }).__dispatchedMock;
-        const defaults = { from: { kind: "start" }, topN: 100, filter: {}, filterOpen: true, sorting: null, detailOpen: false };
-        m.setViewState(m.viewKey("p-logistics", "returns-intake", "active"), defaults, { filterOpen: true, filter: { session_id: "RMA-1010" } });
-      });
+      // The session condition is set the way a user sets it: peek one session from the Sessions sub-tab.
+      await page.getByRole("tab", { name: "Sessions" }).click();
+      await page.getByRole("row", { name: "RMA-1010" }).click();
+      await page.getByRole("button", { name: "Peek messages" }).click();
+      await page.getByRole("button", { name: "Remove session RMA-1010" }).waitFor();
       const bar = page.getByRole("search", { name: "Message filter" });
       await bar.getByRole("radio", { name: "JSONPath" }).click();
       await bar.getByLabel("JSONPath").fill("$.status");
@@ -1003,6 +1032,7 @@ export const shots: Shot[] = [
   ...detailShots(),
   ...exportShots(),
   ...overviewShots(),
+  ...sessionsAndRulesShots(),
 ];
 
 for (const colorScheme of ["dark", "light"] as const) {
