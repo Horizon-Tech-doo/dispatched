@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<brokeredMessage xmlns="http://schemas.microsoft.com/servicebusexplorer">
+  <messageId>MyMessageId</messageId>
+  <correlationId>c-1</correlationId>
+  <contentType>application/xml</contentType>
+  <label>MyLabel</label>
+  <timeToLive>00:10:00</timeToLive>
+  <forcePersistence>false</forcePersistence>
+  <body><![CDATA[<order id="1"/>]]></body>
+  <properties>
+    <property>
+      <key>When</key>
+      <type>DateTime</type>
+      <value>2026-10-17T09:00:00Z</value>
+    </property>
+  </properties>
+</brokeredMessage>

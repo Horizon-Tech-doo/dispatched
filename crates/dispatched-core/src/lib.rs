@@ -13,6 +13,7 @@ pub mod error;
 pub mod explorer;
 pub mod export;
 pub mod filter;
+pub mod import;
 pub mod jobs;
 pub mod messaging;
 pub mod mgmt;
@@ -33,6 +34,7 @@ pub use export::{
     continuation, stream_pages, write_messages,
 };
 pub use filter::{BodyFilter, FilterField, FilterIssue, FilterSpec, MessageFilter, PropertyFilter};
+pub use import::{ImportedMessage, read_messages};
 pub use jobs::{
     ItemOutcome, ItemResult, JobEvent, JobKind, JobReport, NoProgress, NotReached, Progress,
     RecordingProgress,

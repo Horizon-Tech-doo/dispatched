@@ -9,6 +9,7 @@ pub mod props;
 pub mod scan;
 pub mod sessions;
 pub mod summary;
+pub mod template;
 #[cfg(feature = "test-support")]
 pub mod testing;
 mod tokens_ledger;
@@ -31,3 +32,4 @@ pub use scan::{
 };
 pub use sessions::{BrokerList, SessionListing, SessionSummary};
 pub use summary::{DETAIL_BODY_CAP, MessageDetail, MessageSummary};
+pub use template::{parse_template_json, parse_template_xml, read_template};

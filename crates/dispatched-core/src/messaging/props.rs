@@ -364,7 +364,7 @@ fn parse_clock(t: &str) -> Option<u128> {
 }
 
 /// A duration text as a signed span (zero and negative allowed).
-fn parse_span(text: &str) -> Result<time::Duration> {
+pub(crate) fn parse_span(text: &str) -> Result<time::Duration> {
     let n = parse_nanos(text)?;
     let secs = i64::try_from(n / NANOS_PER_SECOND as i128)
         .map_err(|_| Error::Invalid(format!("'{text}' is too long a duration")))?;

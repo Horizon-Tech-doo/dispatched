@@ -1,0 +1,19 @@
+{
+  "messageId": "MyMessageId",
+  "sessionId": "MySession",
+  "correlationId": "MyCorrelation",
+  "contentType": "application/json",
+  "label": "MyLabel",
+  "partitionKey": "MySession",
+  "to": "MyTo",
+  "replyTo": "MyReplyTo",
+  "replyToSessionId": "MyReplySession",
+  "timeToLive": "01:00:00",
+  "scheduledEnqueueTimeUtc": "2026-10-17T09:30:00",
+  "forcePersistence": false,
+  "body": "{\"orderId\":1}",
+  "properties": [
+    { "key": "Country", "type": "String", "value": "Italy" },
+    { "key": "Quantity", "type": "Int32", "value": "5" }
+  ]
+}
