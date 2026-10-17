@@ -1,0 +1,592 @@
+//! Per-message job results, progress events and report files for bulk operations.
+
+use crate::activity::Outcome;
+use crate::export::{ExportFormat, FileExport};
+use crate::{Error, Result};
+use serde::ser::SerializeStruct;
+use serde::{Serialize, Serializer};
+use std::path::Path;
+use std::sync::Mutex;
+use time::OffsetDateTime;
+
+/// What a job does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum JobKind {
+    Send,
+    Import,
+    CancelScheduled,
+    Receive,
+    SettleDeferred,
+    Delete,
+    Move,
+    Resubmit,
+    Purge,
+}
+
+impl JobKind {
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Send | Self::Import => "Sent",
+            Self::CancelScheduled => "Cancelled",
+            Self::Receive => "Received",
+            Self::SettleDeferred => "Settled",
+            Self::Delete => "Deleted",
+            Self::Move => "Moved",
+            Self::Resubmit => "Resubmitted",
+            Self::Purge => "Removed",
+        }
+    }
+}
+
+/// Why an item was never attempted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NotReached {
+    Timeout,
+    Budget,
+    HeldLimit,
+    /// Held locks could not be renewed in time, so the search stopped and released them.
+    LockTime,
+    Cancelled,
+}
+
+/// What happened to one message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", rename_all = "kebab-case")]
+pub enum ItemOutcome {
+    Succeeded {
+        detail: Option<String>,
+    },
+    Failed {
+        /// The stable `error_kind` string.
+        kind: &'static str,
+        reason: String,
+    },
+    Skipped {
+        reason: String,
+    },
+    Missing,
+    NotReached {
+        why: NotReached,
+    },
+}
+
+/// The result for one message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ItemResult {
+    pub sequence_number: Option<i64>,
+    pub message_id: Option<String>,
+    pub session_id: Option<String>,
+    pub entity: String,
+    pub new_sequence_number: Option<i64>,
+    pub outcome: ItemOutcome,
+}
+
+/// The finished record of a job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobReport {
+    /// The activity op id (set by `ops::gated`); links the report file to its activity entries.
+    pub op_id: Option<String>,
+    pub kind: JobKind,
+    pub entity: String,
+    pub target: Option<String>,
+    pub started_at: OffsetDateTime,
+    pub finished_at: OffsetDateTime,
+    pub cancelled: bool,
+    pub items: Vec<ItemResult>,
+    pub notes: Vec<String>,
+}
+
+fn not_reached_text(why: NotReached) -> &'static str {
+    match why {
+        NotReached::Timeout => "not reached: time limit",
+        NotReached::Budget => "not reached: message budget",
+        NotReached::HeldLimit => "not reached: held-message limit",
+        NotReached::LockTime => "not reached: locks could not be renewed in time",
+        NotReached::Cancelled => "not reached: cancelled",
+    }
+}
+
+impl JobReport {
+    fn count(&self, f: impl Fn(&ItemOutcome) -> bool) -> u64 {
+        self.items.iter().filter(|i| f(&i.outcome)).count() as u64
+    }
+
+    /// Items that worked.
+    pub fn succeeded(&self) -> u64 {
+        self.count(|o| matches!(o, ItemOutcome::Succeeded { .. }))
+    }
+
+    /// Items that failed or were never reached.
+    pub fn failed(&self) -> u64 {
+        self.count(|o| {
+            matches!(
+                o,
+                ItemOutcome::Failed { .. } | ItemOutcome::NotReached { .. }
+            )
+        })
+    }
+
+    /// Items skipped or already gone.
+    pub fn skipped(&self) -> u64 {
+        self.count(|o| matches!(o, ItemOutcome::Skipped { .. } | ItemOutcome::Missing))
+    }
+
+    /// The overall outcome for the activity log.
+    pub fn outcome(&self) -> Outcome {
+        if self.cancelled {
+            Outcome::Cancelled
+        } else if self.failed() == 0 {
+            Outcome::Succeeded
+        } else if self.succeeded() == 0 {
+            Outcome::Failed
+        } else {
+            Outcome::PartlyFailed
+        }
+    }
+
+    fn failures(&self) -> impl Iterator<Item = &ItemResult> {
+        self.items.iter().filter(|i| {
+            matches!(
+                i.outcome,
+                ItemOutcome::Failed { .. } | ItemOutcome::NotReached { .. }
+            )
+        })
+    }
+
+    /// Sequence numbers of the failed and not-reached items, for a retry.
+    pub fn failed_sequences(&self) -> Vec<i64> {
+        self.failures().filter_map(|i| i.sequence_number).collect()
+    }
+
+    fn reason(i: &ItemResult) -> String {
+        match &i.outcome {
+            ItemOutcome::Failed { reason, .. } => reason.clone(),
+            ItemOutcome::NotReached { why } => not_reached_text(*why).into(),
+            _ => String::new(),
+        }
+    }
+
+    /// One sentence describing the result.
+    pub fn summary_line(&self) -> String {
+        let verb = self.kind.verb();
+        let place = match &self.target {
+            Some(t) => format!("from {} to {t}", self.entity),
+            None => format!("from {}", self.entity),
+        };
+        let failed = self.failed();
+        if failed == 0 {
+            let n = self.succeeded();
+            let noun = if n == 1 { "message" } else { "messages" };
+            return format!("{verb} {n} {noun} {place}");
+        }
+        let list: Vec<String> = self
+            .failures()
+            .take(5)
+            .map(|i| match i.sequence_number {
+                Some(s) => format!("sequence {s}: {}", Self::reason(i)),
+                None => match &i.message_id {
+                    Some(m) => format!("message {m}: {}", Self::reason(i)),
+                    None => Self::reason(i),
+                },
+            })
+            .collect();
+        let mut list = list.join(", ");
+        if failed > 5 {
+            list.push_str(&format!(", and {} more", failed - 5));
+        }
+        format!(
+            "{verb} {} of {} messages {place}; {failed} failed ({list})",
+            self.succeeded(),
+            self.items.len()
+        )
+    }
+
+    fn failed_json(&self) -> Vec<serde_json::Value> {
+        self.failures()
+            .map(|i| serde_json::json!({"seq": i.sequence_number, "reason": Self::reason(i)}))
+            .collect()
+    }
+
+    fn summary_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "op_id": self.op_id,
+            "kind": self.kind,
+            "entity": self.entity,
+            "target": self.target,
+            "started_at": rfc3339(self.started_at),
+            "finished_at": rfc3339(self.finished_at),
+            "cancelled": self.cancelled,
+            "succeeded": self.succeeded(),
+            "failed": self.failed_json(),
+            "skipped": self.skipped(),
+            "notes": self.notes,
+        })
+    }
+
+    /// Write the report to `path`, atomically (never a partial file; no silent overwrite).
+    /// JSON is one document with the summary and every item; NDJSON is one line per item
+    /// followed by a summary line with `"type":"summary"`.
+    pub fn write(&self, path: &Path, format: ExportFormat, overwrite: bool) -> Result<()> {
+        let mut out = FileExport::create(path, format, overwrite)?;
+        let bytes = match format {
+            ExportFormat::Json => {
+                let mut v = serde_json::to_vec_pretty(self).map_err(json_err)?;
+                v.push(b'\n');
+                v
+            }
+            ExportFormat::Ndjson => {
+                let mut v = Vec::new();
+                for item in &self.items {
+                    serde_json::to_writer(&mut v, item).map_err(json_err)?;
+                    v.push(b'\n');
+                }
+                let mut summary = self.summary_json();
+                summary["type"] = "summary".into();
+                serde_json::to_writer(&mut v, &summary).map_err(json_err)?;
+                v.push(b'\n');
+                v
+            }
+        };
+        out.write_raw(&bytes)?;
+        out.finish()?;
+        Ok(())
+    }
+}
+
+fn json_err(e: serde_json::Error) -> Error {
+    Error::Invalid(format!("could not write the report: {e}"))
+}
+
+fn rfc3339(t: OffsetDateTime) -> String {
+    t.format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
+}
+
+impl Serialize for JobReport {
+    fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        let mut st = s.serialize_struct("JobReport", 11)?;
+        st.serialize_field("op_id", &self.op_id)?;
+        st.serialize_field("kind", &self.kind)?;
+        st.serialize_field("entity", &self.entity)?;
+        st.serialize_field("target", &self.target)?;
+        st.serialize_field("started_at", &rfc3339(self.started_at))?;
+        st.serialize_field("finished_at", &rfc3339(self.finished_at))?;
+        st.serialize_field("cancelled", &self.cancelled)?;
+        st.serialize_field("succeeded", &self.succeeded())?;
+        st.serialize_field("failed", &self.failed_json())?;
+        st.serialize_field("skipped", &self.skipped())?;
+        st.serialize_field("items", &self.items)?;
+        st.serialize_field("notes", &self.notes)?;
+        st.end()
+    }
+}
+
+/// A progress event from a running job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobEvent {
+    Started { kind: JobKind, total: Option<u64> },
+    Item(ItemResult),
+    Progress { done: u64, total: Option<u64> },
+    Note(String),
+}
+
+/// Receives job events. Implementations must be cheap and non-blocking.
+pub trait Progress: Send + Sync {
+    fn event(&self, e: &JobEvent);
+}
+
+/// Ignores every event.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoProgress;
+
+impl Progress for NoProgress {
+    fn event(&self, _: &JobEvent) {}
+}
+
+/// Records every event (test helper).
+#[derive(Debug, Default)]
+pub struct RecordingProgress {
+    events: Mutex<Vec<JobEvent>>,
+}
+
+impl RecordingProgress {
+    /// Everything received so far.
+    pub fn events(&self) -> Vec<JobEvent> {
+        self.events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+}
+
+impl Progress for RecordingProgress {
+    fn event(&self, e: &JobEvent) {
+        self.events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(e.clone());
+    }
+}
+
+/// Builds a [`JobReport`] while emitting progress events.
+#[allow(dead_code)] // used by the ops that follow in this milestone
+pub(crate) struct JobRun<'a> {
+    kind: JobKind,
+    entity: String,
+    target: Option<String>,
+    progress: &'a dyn Progress,
+    total: Option<u64>,
+    started_at: OffsetDateTime,
+    items: Vec<ItemResult>,
+    notes: Vec<String>,
+}
+
+#[allow(dead_code)]
+impl<'a> JobRun<'a> {
+    pub(crate) fn new(
+        kind: JobKind,
+        entity: String,
+        target: Option<String>,
+        progress: &'a dyn Progress,
+        total: Option<u64>,
+    ) -> Self {
+        progress.event(&JobEvent::Started { kind, total });
+        Self {
+            kind,
+            entity,
+            target,
+            progress,
+            total,
+            started_at: OffsetDateTime::now_utc(),
+            items: Vec::new(),
+            notes: Vec::new(),
+        }
+    }
+
+    /// Record one result and emit `Item` then `Progress`.
+    pub(crate) fn item(&mut self, item: ItemResult) {
+        self.progress.event(&JobEvent::Item(item.clone()));
+        self.items.push(item);
+        self.progress.event(&JobEvent::Progress {
+            done: self.items.len() as u64,
+            total: self.total,
+        });
+    }
+
+    /// Record a note for the report and emit it.
+    pub(crate) fn note(&mut self, note: String) {
+        self.progress.event(&JobEvent::Note(note.clone()));
+        self.notes.push(note);
+    }
+
+    /// Close the run.
+    pub(crate) fn finish(self, cancelled: bool) -> JobReport {
+        JobReport {
+            op_id: None,
+            kind: self.kind,
+            entity: self.entity,
+            target: self.target,
+            started_at: self.started_at,
+            finished_at: OffsetDateTime::now_utc(),
+            cancelled,
+            items: self.items,
+            notes: self.notes,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(seq: i64, outcome: ItemOutcome) -> ItemResult {
+        ItemResult {
+            sequence_number: Some(seq),
+            message_id: Some(format!("m{seq}")),
+            session_id: None,
+            entity: "orders/$DeadLetterQueue".into(),
+            new_sequence_number: None,
+            outcome,
+        }
+    }
+    fn ok(seq: i64) -> ItemResult {
+        item(seq, ItemOutcome::Succeeded { detail: None })
+    }
+    fn failed(seq: i64, kind: &'static str, reason: &str) -> ItemResult {
+        item(
+            seq,
+            ItemOutcome::Failed {
+                kind,
+                reason: reason.into(),
+            },
+        )
+    }
+    fn skipped(seq: i64) -> ItemResult {
+        item(
+            seq,
+            ItemOutcome::Skipped {
+                reason: "already there".into(),
+            },
+        )
+    }
+    fn missing(seq: i64) -> ItemResult {
+        item(seq, ItemOutcome::Missing)
+    }
+    fn not_reached(seq: i64, why: NotReached) -> ItemResult {
+        item(seq, ItemOutcome::NotReached { why })
+    }
+    fn report_kind(kind: JobKind, items: &[ItemResult]) -> JobReport {
+        JobReport {
+            op_id: None,
+            kind,
+            entity: "orders/$DeadLetterQueue".into(),
+            target: Some("orders".into()),
+            started_at: OffsetDateTime::now_utc(),
+            finished_at: OffsetDateTime::now_utc(),
+            cancelled: false,
+            items: items.to_vec(),
+            notes: vec![],
+        }
+    }
+    fn report(items: &[ItemResult]) -> JobReport {
+        report_kind(JobKind::Move, items)
+    }
+
+    #[test]
+    fn report_counts_and_outcome() {
+        let mut r = report(&[
+            ok(1),
+            failed(2, "lock_lost", "the lock expired"),
+            skipped(3),
+            missing(4),
+            not_reached(5, NotReached::Timeout),
+        ]);
+        assert_eq!((r.succeeded(), r.failed(), r.skipped()), (1, 2, 2));
+        assert_eq!(r.outcome(), Outcome::PartlyFailed);
+        assert_eq!(r.failed_sequences(), [2, 5]);
+        r.cancelled = true;
+        assert_eq!(r.outcome(), Outcome::Cancelled);
+        assert_eq!(
+            report(&[]).outcome(),
+            Outcome::Succeeded,
+            "nothing to do is success"
+        );
+        assert_eq!(
+            report(&[failed(1, "timeout", "x")]).outcome(),
+            Outcome::Failed
+        );
+    }
+
+    #[test]
+    fn json_has_the_spec_summary_shape() {
+        let r = report(&[ok(1), failed(2, "lock_lost", "the lock expired")]);
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["succeeded"], 1);
+        assert_eq!(
+            v["failed"],
+            serde_json::json!([{"seq": 2, "reason": "the lock expired"}])
+        );
+        assert_eq!(v["skipped"], 0);
+        assert_eq!(v["items"][1]["outcome"]["status"], "failed");
+        assert_eq!(v["items"][1]["outcome"]["kind"], "lock_lost");
+        assert_eq!(v["op_id"], serde_json::Value::Null);
+        let mut r = r;
+        r.op_id = Some("op-1".into());
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["op_id"], "op-1");
+        assert!(
+            time::OffsetDateTime::parse(
+                v["started_at"].as_str().unwrap(),
+                &time::format_description::well_known::Rfc3339
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            serde_json::to_value(NotReached::LockTime).unwrap(),
+            "lock-time"
+        );
+    }
+
+    #[test]
+    fn summary_line_reads_like_a_sentence() {
+        assert_eq!(
+            report_kind(
+                JobKind::Move,
+                &[ok(1), ok(2), failed(3, "lock_lost", "the lock expired")]
+            )
+            .summary_line(),
+            "Moved 2 of 3 messages from orders/$DeadLetterQueue to orders; 1 failed (sequence 3: the lock expired)"
+        );
+        let mut purge = report_kind(JobKind::Purge, &[ok(1)]);
+        purge.target = None;
+        assert_eq!(
+            purge.summary_line(),
+            "Removed 1 message from orders/$DeadLetterQueue"
+        );
+        assert_eq!(
+            report_kind(JobKind::Move, &[ok(1), ok(2)]).summary_line(),
+            "Moved 2 messages from orders/$DeadLetterQueue to orders",
+            "all succeeded: no \"of N\""
+        );
+    }
+
+    #[test]
+    fn summary_line_caps_the_failure_list() {
+        let items: Vec<_> = (1..=7).map(|n| failed(n, "timeout", "slow")).collect();
+        let line = report(&items).summary_line();
+        assert!(line.contains("7 failed ("), "{line}");
+        assert!(line.contains("sequence 5: slow"), "{line}");
+        assert!(!line.contains("sequence 6"), "{line}");
+        assert!(line.ends_with(", and 2 more)"), "{line}");
+    }
+
+    #[test]
+    fn report_writes_json_and_ndjson_atomically() {
+        use crate::export::ExportFormat;
+        let dir = tempfile::tempdir().unwrap();
+        let r = report(&[ok(1), ok(2)]);
+        r.write(&dir.path().join("r.json"), ExportFormat::Json, false)
+            .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("r.json")).unwrap()).unwrap();
+        assert_eq!(v["succeeded"], 2);
+        assert!(
+            r.write(&dir.path().join("r.json"), ExportFormat::Json, false)
+                .is_err(),
+            "no silent overwrite"
+        );
+        r.write(&dir.path().join("r.ndjson"), ExportFormat::Ndjson, false)
+            .unwrap();
+        // NDJSON: one line per item, then one summary line with "type": "summary".
+        let text = std::fs::read_to_string(dir.path().join("r.ndjson")).unwrap();
+        assert_eq!(text.lines().count(), 3);
+        assert!(
+            text.lines()
+                .last()
+                .unwrap()
+                .contains("\"type\":\"summary\"")
+        );
+    }
+
+    #[test]
+    fn job_run_emits_item_and_progress_events() {
+        let p = RecordingProgress::default();
+        let mut run = JobRun::new(JobKind::Delete, "orders".into(), None, &p, Some(2));
+        run.item(ok(1));
+        let r = run.finish(false);
+        assert_eq!(r.items.len(), 1);
+        assert!(matches!(
+            p.events()[0],
+            JobEvent::Started { total: Some(2), .. }
+        ));
+        assert!(matches!(
+            p.events().last().unwrap(),
+            JobEvent::Progress {
+                done: 1,
+                total: Some(2)
+            }
+        ));
+    }
+}
