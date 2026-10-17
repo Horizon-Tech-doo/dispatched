@@ -188,14 +188,15 @@ pub fn parse_template_json(text: &str) -> Result<OutgoingMessage> {
 
 /// Parse an XML template (root `brokeredMessage`, matched by local name).
 pub fn parse_template_xml(text: &str) -> Result<OutgoingMessage> {
-    let root = xml::parse(text).map_err(|e| Error::Invalid(format!("template: {e}")))?;
+    let root = xml::parse_exact(text).map_err(|e| Error::Invalid(format!("template: {e}")))?;
     if root.name != "brokeredMessage" {
         return Err(Error::Invalid(format!(
             "template XML root is '{}'; expected brokeredMessage",
             root.name
         )));
     }
-    let get = |k: &str| root.child(k).map(|n| n.text.clone());
+    // Only the body and property values keep their exact text; other fields are trimmed.
+    let get = |k: &str| root.child(k).map(|n| n.text.trim().to_string());
     let mut raw = Raw {
         message_id: get("messageId"),
         session_id: get("sessionId"),
@@ -208,14 +209,18 @@ pub fn parse_template_xml(text: &str) -> Result<OutgoingMessage> {
         reply_to_session_id: get("replyToSessionId"),
         time_to_live: get("timeToLive"),
         scheduled: get("scheduledEnqueueTimeUtc"),
-        body: get("body"),
+        body: root.child("body").map(|n| n.text.clone()),
         properties: Vec::new(),
     };
     if let Some(props) = root.child("properties") {
         for p in props.children_named("property") {
-            let field = |k: &str| p.child(k).map(|n| n.text.clone()).unwrap_or_default();
-            raw.properties
-                .push((field("key"), field("type"), field("value")));
+            let field = |k: &str| {
+                p.child(k)
+                    .map(|n| n.text.trim().to_string())
+                    .unwrap_or_default()
+            };
+            let value = p.child("value").map(|n| n.text.clone()).unwrap_or_default();
+            raw.properties.push((field("key"), field("type"), value));
         }
     }
     raw.into_message()
@@ -286,6 +291,20 @@ mod tests {
         assert_eq!(read_template(&x).unwrap().subject.as_deref(), Some("X"));
         std::fs::write(&x, "hello").unwrap();
         assert!(read_template(&x).is_err());
+    }
+
+    #[test]
+    fn xml_keeps_exact_text_of_body_and_values() {
+        let t = parse_template_xml(
+            "<brokeredMessage>\n  <body>\n  x\n</body>\n  <properties><property><key>k</key><type>String</type><value> v \n</value></property></properties>\n</brokeredMessage>",
+        )
+        .unwrap();
+        assert_eq!(t.body, OutgoingBody::Bytes(b"\n  x\n".to_vec()));
+        assert_eq!(t.properties["k"], TypedValue::String(" v \n".into()));
+        let t =
+            parse_template_xml("<brokeredMessage><body><![CDATA[ a ]]></body></brokeredMessage>")
+                .unwrap();
+        assert_eq!(t.body, OutgoingBody::Bytes(b" a ".to_vec()));
     }
 
     #[test]

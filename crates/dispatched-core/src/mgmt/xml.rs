@@ -40,10 +40,20 @@ impl Node {
     }
 }
 
-/// Parse `xml` into its root element.
+/// Parse `xml` into its root element, trimming text.
 pub fn parse(xml: &str) -> Result<Node> {
+    parse_with(xml, true)
+}
+
+/// Parse `xml` keeping the exact text of leaf elements; only whitespace between child elements
+/// is dropped.
+pub fn parse_exact(xml: &str) -> Result<Node> {
+    parse_with(xml, false)
+}
+
+fn parse_with(xml: &str, trim: bool) -> Result<Node> {
     let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
+    reader.config_mut().trim_text(trim);
     let mut stack = vec![Node {
         name: "#document".into(),
         ..Node::default()
@@ -82,7 +92,10 @@ pub fn parse(xml: &str) -> Result<Node> {
                     .push_str(&String::from_utf8_lossy(&c));
             }
             Event::End(_) => {
-                let node = stack.pop().expect("balanced end");
+                let mut node = stack.pop().expect("balanced end");
+                if !trim && !node.children.is_empty() {
+                    node.text = node.text.trim().to_string();
+                }
                 stack
                     .last_mut()
                     .ok_or_else(|| Error::Protocol("unbalanced XML".into()))?

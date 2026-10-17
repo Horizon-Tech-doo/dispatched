@@ -93,8 +93,15 @@ fn prop_value(name: &str, p: &RawProp) -> Result<PropValue> {
     Ok(match p.ty.to_ascii_lowercase().as_str() {
         "null" => PropValue::Null,
         "bool" => PropValue::Bool(p.value.as_bool().ok_or_else(|| bad("true or false"))?),
-        "int" => PropValue::Int(p.value.as_i64().ok_or_else(|| bad("an integer"))?),
+        "int" | "int32" | "long" | "int64" => {
+            PropValue::Int(p.value.as_i64().ok_or_else(|| bad("an integer"))?)
+        }
         "uint" => PropValue::UInt(p.value.as_u64().ok_or_else(|| bad("an unsigned integer"))?),
+        "double" if p.value.is_null() => {
+            return Err(Error::Invalid(format!(
+                "property '{name}' (double) has no value; NaN and infinity cannot be imported"
+            )));
+        }
         "double" => PropValue::Double(p.value.as_f64().ok_or_else(|| bad("a number"))?),
         "string" => PropValue::String(text()?.to_string()),
         "timestamp" => PropValue::Timestamp(
@@ -144,8 +151,19 @@ fn convert(raw: Raw) -> Result<ImportedMessage> {
         }
     };
     let mut props = BTreeMap::new();
+    let mut longs = Vec::new();
     for (name, p) in &raw.application_properties {
-        props.insert(name.clone(), prop_value(name, p)?);
+        let value = prop_value(name, p)?;
+        match (p.ty.to_ascii_lowercase().as_str(), &value) {
+            ("long" | "int64", PropValue::Int(n)) => longs.push((name.clone(), *n)),
+            ("int32", PropValue::Int(n)) if i32::try_from(*n).is_err() => {
+                return Err(Error::Invalid(format!(
+                    "property '{name}' (int32) does not fit 32 bits"
+                )));
+            }
+            _ => {}
+        }
+        props.insert(name.clone(), value);
     }
     let properties = copy_properties(
         &props,
@@ -155,6 +173,11 @@ fn convert(raw: Raw) -> Result<ImportedMessage> {
         },
         &mut notes,
     );
+    // The export tags every signed integer `int`; a file that says `long` keeps 64 bits.
+    let mut properties = properties;
+    for (name, n) in longs {
+        properties.insert(name, crate::messaging::TypedValue::Long(n));
+    }
     let message = OutgoingMessage {
         body,
         message_id: non_empty(raw.message_id),
@@ -185,40 +208,98 @@ fn read_one(value: serde_json::Value) -> Result<ImportedMessage> {
             schema.map_or("missing".to_string(), |s| format!("'{s}'"))
         )));
     }
-    let raw: Raw = serde_json::from_value(value).map_err(|e| Error::Invalid(e.to_string()))?;
+    let raw: Raw = match serde_json::from_value(value.clone()) {
+        Ok(r) => r,
+        // serde's own text can quote the offending value (a body, a property); name the field only.
+        Err(_) => return Err(Error::Invalid(shape_error(&value))),
+    };
     debug_assert_eq!(raw.schema.as_deref(), Some(EXPORT_SCHEMA));
     convert(raw)
 }
 
-fn too_many() -> Error {
+fn field_ok<T: serde::de::DeserializeOwned>(v: &serde_json::Value, name: &str) -> bool {
+    v.get(name)
+        .is_none_or(|f| serde_json::from_value::<T>(f.clone()).is_ok())
+}
+
+/// Which field has the wrong shape, without quoting any value.
+fn shape_error(v: &serde_json::Value) -> String {
+    let bad = if !field_ok::<Option<i64>>(v, "sequence_number") {
+        "sequence_number"
+    } else if !field_ok::<RawBody>(v, "body") {
+        "body"
+    } else if !field_ok::<BTreeMap<String, RawProp>>(v, "application_properties") {
+        "application_properties"
+    } else if v
+        .get("time_to_live_ms")
+        .is_some_and(|f| !f.is_null() && f.as_u64().is_none())
+    {
+        "time_to_live_ms"
+    } else {
+        [
+            "message_id",
+            "correlation_id",
+            "session_id",
+            "subject",
+            "content_type",
+            "to",
+            "reply_to",
+            "reply_to_session_id",
+            "partition_key",
+        ]
+        .into_iter()
+        .find(|n| !field_ok::<Option<String>>(v, n))
+        .unwrap_or("message")
+    };
+    format!("{bad} has the wrong shape")
+}
+
+fn too_many(max: usize) -> Error {
     Error::Invalid(format!(
-        "the file holds more than {MAX_IMPORT_MESSAGES} messages; split it and import the parts"
+        "the file holds more than {max} messages; split it and import the parts"
     ))
 }
 
 /// Read a JSON array or NDJSON file of exported messages.
 pub fn read_messages(path: &Path) -> Result<Vec<ImportedMessage>> {
+    read_messages_limited(path, MAX_IMPORT_MESSAGES, MAX_IMPORT_BYTES)
+}
+
+fn read_messages_limited(
+    path: &Path,
+    max_messages: usize,
+    max_bytes: u64,
+) -> Result<Vec<ImportedMessage>> {
+    use std::io::Read;
     let io = |e: std::io::Error| {
         Error::Io(format!(
             "cannot read {}: {e}; check the path and permissions",
             path.display()
         ))
     };
-    let len = std::fs::metadata(path).map_err(io)?.len();
-    if len > MAX_IMPORT_BYTES {
+    // Read through take() so a FIFO or other special file cannot slip past the size cap.
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .map_err(io)?
+        .take(max_bytes + 1)
+        .read_to_end(&mut bytes)
+        .map_err(io)?;
+    if bytes.len() as u64 > max_bytes {
         return Err(Error::Invalid(format!(
-            "{} is larger than 256 MiB; split it and import the parts",
-            path.display()
+            "{} is larger than {} MiB; split it and import the parts",
+            path.display(),
+            max_bytes / (1024 * 1024)
         )));
     }
-    let text = std::fs::read_to_string(path).map_err(io)?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| Error::Invalid(format!("{} is not UTF-8 text", path.display())))?;
     let text = text.trim_start_matches('\u{feff}');
     let mut out = Vec::new();
     if text.trim_start().starts_with('[') {
         let items: Vec<serde_json::Value> = serde_json::from_str(text)
             .map_err(|e| Error::Invalid(format!("{} is not a JSON array: {e}", path.display())))?;
-        if items.len() > MAX_IMPORT_MESSAGES {
-            return Err(too_many());
+        if items.len() > max_messages {
+            return Err(too_many(max_messages));
         }
         for (i, item) in items.into_iter().enumerate() {
             out.push(
@@ -230,8 +311,8 @@ pub fn read_messages(path: &Path) -> Result<Vec<ImportedMessage>> {
             if line.trim().is_empty() {
                 continue;
             }
-            if out.len() >= MAX_IMPORT_MESSAGES {
-                return Err(too_many());
+            if out.len() >= max_messages {
+                return Err(too_many(max_messages));
             }
             let value: serde_json::Value = serde_json::from_str(line)
                 .map_err(|e| Error::Invalid(format!("line {}: not valid JSON: {e}", i + 1)))?;
@@ -335,6 +416,83 @@ mod tests {
         assert_eq!(r[2].message.body, OutgoingBody::Empty);
         assert_eq!(r[2].message.properties.len(), 1);
         assert_eq!(r[2].notes.len(), 2, "{:?}", r[2].notes);
+    }
+
+    #[test]
+    fn shape_errors_never_echo_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("x.ndjson");
+        for bad in [
+            r#"{"schema":"dispatched.message/v1","body":"SECRET-body"}"#,
+            r#"{"schema":"dispatched.message/v1","application_properties":"SECRET-body"}"#,
+            r#"{"schema":"dispatched.message/v1","time_to_live_ms":"SECRET-body"}"#,
+            r#"{"schema":"dispatched.message/v1","subject":{"SECRET-body":1}}"#,
+            r#"{"schema":"dispatched.message/v1","body":{"kind":"text","value":"ok"},"sequence_number":"SECRET-body"}"#,
+        ] {
+            std::fs::write(&p, format!("{bad}\n")).unwrap();
+            let e = read_messages(&p).unwrap_err().to_string();
+            assert!(!e.contains("SECRET"), "{e}");
+            assert!(e.contains("line 1") && e.contains("wrong shape"), "{e}");
+        }
+        std::fs::write(
+            &p,
+            "{\"schema\":\"dispatched.message/v1\",\"body\":\"SECRET-body\"}\n",
+        )
+        .unwrap();
+        assert!(
+            read_messages(&p)
+                .unwrap_err()
+                .to_string()
+                .contains("body has the wrong shape")
+        );
+    }
+
+    #[test]
+    fn long_tag_keeps_64_bits_and_nan_is_refused_clearly() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("x.ndjson");
+        std::fs::write(
+            &p,
+            r#"{"schema":"dispatched.message/v1","application_properties":{"a":{"type":"long","value":5},"b":{"type":"int","value":5}}}"#,
+        )
+        .unwrap();
+        let r = read_messages(&p).unwrap();
+        assert_eq!(r[0].message.properties["a"], TypedValue::Long(5));
+        assert_eq!(r[0].message.properties["b"], TypedValue::Int(5));
+        std::fs::write(
+            &p,
+            r#"{"schema":"dispatched.message/v1","application_properties":{"d":{"type":"double","value":null}}}"#,
+        )
+        .unwrap();
+        let e = read_messages(&p).unwrap_err().to_string();
+        assert!(e.contains("'d'") && e.contains("NaN"), "{e}");
+    }
+
+    #[test]
+    fn caps_on_messages_and_bytes_are_enforced() {
+        let dir = tempfile::tempdir().unwrap();
+        let line = "{\"schema\":\"dispatched.message/v1\"}\n";
+        let nd = dir.path().join("a.ndjson");
+        std::fs::write(&nd, line.repeat(3)).unwrap();
+        assert_eq!(read_messages_limited(&nd, 3, 1 << 20).unwrap().len(), 3);
+        let e = read_messages_limited(&nd, 2, 1 << 20)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("more than 2 messages"), "{e}");
+        let js = dir.path().join("a.json");
+        std::fs::write(
+            &js,
+            format!(
+                "[{}]",
+                ["{\"schema\":\"dispatched.message/v1\"}"; 3].join(",")
+            ),
+        )
+        .unwrap();
+        assert!(read_messages_limited(&js, 2, 1 << 20).is_err());
+        let e = read_messages_limited(&nd, 10, 10).unwrap_err().to_string();
+        assert!(e.contains("larger than"), "{e}");
+        assert_eq!(MAX_IMPORT_MESSAGES, 100_000);
+        assert_eq!(MAX_IMPORT_BYTES, 256 * 1024 * 1024);
     }
 
     #[test]
