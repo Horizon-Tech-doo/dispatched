@@ -3,6 +3,7 @@
 mod connection;
 mod management;
 mod message;
+pub mod outgoing;
 pub mod peek;
 pub mod props;
 pub mod scan;
@@ -19,6 +20,9 @@ pub use management::{ManagementLink, MgmtResponse};
 pub(crate) use message::test_message;
 pub use message::{
     MessageBody, MessageState, PeekedMessage, PropValue, decode_bytes, decode_message, ttl_ms,
+};
+pub use outgoing::{
+    BodySource, CloneOptions, Cloned, Edits, MessageIdSource, OutgoingBody, OutgoingMessage,
 };
 pub use props::{PropType, TypedValue, parse_duration, parse_prop_arg, parse_when};
 pub use scan::{

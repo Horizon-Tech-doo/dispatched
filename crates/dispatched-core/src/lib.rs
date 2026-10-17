@@ -38,8 +38,9 @@ pub use jobs::{
     RecordingProgress,
 };
 pub use messaging::{
-    BrokerList, MessageBody, MessageDetail, MessageState, MessageSummary, PeekOptions, PeekPage,
-    PeekedMessage, PropValue, SessionListing, SessionSummary,
+    BodySource, BrokerList, CloneOptions, Cloned, Edits, MessageBody, MessageDetail,
+    MessageIdSource, MessageState, MessageSummary, OutgoingBody, OutgoingMessage, PeekOptions,
+    PeekPage, PeekedMessage, PropValue, SessionListing, SessionSummary,
 };
 pub use mgmt::{
     CorrelationProperty, EntityCounts, EntityDetails, EntityKind, EntityProperty, ManagementClient,
