@@ -70,6 +70,53 @@ pub async fn peek(
     parse_peek_response(resp)
 }
 
+/// Request body for a peek within one session (no session lock is taken).
+pub fn session_peek_request(
+    from_sequence: i64,
+    count: i32,
+    session_id: &str,
+) -> OrderedMap<String, Value> {
+    let mut body = peek_request(from_sequence, count);
+    body.insert(
+        "session-id".to_string(),
+        Value::String(session_id.to_string()),
+    );
+    body
+}
+
+/// Decode a session peek. Every refusal except 401/403 (auth), 404 (entity gone), 429
+/// (throttled) and 503 (busy) means "can't peek by session here" (a broker that wants a
+/// session lock may answer 410 or 423) and becomes `Unsupported`, so callers fall back to
+/// peeking the whole entity instead of retrying and dropping the connection.
+pub fn parse_session_peek_response(resp: MgmtResponse) -> Result<Vec<PeekedMessage>> {
+    match resp.status {
+        200..=299 | 401 | 403 | 404 | 429 | 503 => parse_peek_response(resp),
+        _ => Err(Error::Unsupported {
+            capability: "peek within a session".into(),
+        }),
+    }
+}
+
+/// Peek up to `max` messages of `session_id` in `address`, starting at `from_sequence`.
+/// Uses `com.microsoft:peek-message` with `session-id`: no receiver link, no session lock.
+pub async fn peek_session(
+    conn: &mut ServiceBusConnection,
+    address: &str,
+    session_id: &str,
+    from_sequence: i64,
+    max: u32,
+) -> Result<Vec<PeekedMessage>> {
+    let count = i32::try_from(max.clamp(1, MAX_PER_REQUEST)).expect("bounded by MAX_PER_REQUEST");
+    let link = conn.management(address).await?;
+    let resp = link
+        .call(
+            OPERATION,
+            session_peek_request(from_sequence, count, session_id),
+        )
+        .await?;
+    parse_session_peek_response(resp)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,6 +155,39 @@ mod tests {
         let body = peek_request(5, 10);
         assert_eq!(body.get("from-sequence-number"), Some(&Value::Long(5)));
         assert_eq!(body.get("message-count"), Some(&Value::Int(10)));
+    }
+
+    #[test]
+    fn session_request_names_the_session() {
+        let body = session_peek_request(5, 10, "RMA-1");
+        assert_eq!(body.get("session-id"), Some(&Value::String("RMA-1".into())));
+        assert_eq!(body.get("from-sequence-number"), Some(&Value::Long(5)));
+    }
+
+    #[test]
+    fn session_peek_that_the_broker_cannot_do_is_unsupported() {
+        // Any refusal except auth, not-found, throttling and busy means "not by session here",
+        // including 410 (lock lost) and 423 (locked) from a broker that wants a session lock.
+        for status in [400, 405, 409, 410, 423, 500, 501] {
+            let e = parse_session_peek_response(response(status, Value::Null)).unwrap_err();
+            assert!(matches!(e, Error::Unsupported { .. }), "{status}: {e:?}");
+        }
+        assert!(matches!(
+            parse_session_peek_response(response(401, Value::Null)).unwrap_err(),
+            Error::Auth(_)
+        ));
+        for status in [403, 404, 429, 503] {
+            let e = parse_session_peek_response(response(status, Value::Null)).unwrap_err();
+            assert!(
+                !matches!(e, Error::Unsupported { .. }),
+                "{status} keeps its own meaning: {e:?}"
+            );
+        }
+        assert!(
+            parse_session_peek_response(response(204, Value::Null))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

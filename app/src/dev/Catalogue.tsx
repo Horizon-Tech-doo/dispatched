@@ -6,8 +6,8 @@ import {
   CountBadge, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
   EmptyState, EntityGlyph, Problem, Field, Hint, IconButton, Input, Kbd, LabelSwatch, MenuShortcut, Panel, PanelGroup, ProdBadge,
   ResizeHandle, Segmented, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Sheet, SkeletonRows, Textarea,
-  DataGrid, Tabs, TabsList, TabsTrigger, ThemeScope, TooltipProvider, Tree,
-  labelColors, rowHeight, shortcutLabel, type Density, type EntityKind, type ThemeName, type TreeNode,
+  BodyState, CodeView, DataGrid, HexView, Tabs, TabsList, TabsTrigger, ThemeScope, ToggleGroup, TooltipProvider, Tree,
+  labelColors, prettyJson, prettyXml, rowHeight, shortcutLabel, type Density, type EntityKind, type GridSort, type ThemeName, type TreeNode,
 } from "@/ui";
 
 const SUB_TABS = ["Overview", "Messages", "Dead-letter", "Subscriptions", "Rules", "Properties", "Metrics", "Access", "Settings"];
@@ -149,6 +149,7 @@ const DEAD_LETTER_COLUMNS: ColumnDef<DeadLetter, string>[] = [
 function GridDemo({ density }: { density: Density }) {
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set(["48199"]));
   const [focusId, setFocusId] = useState<string | null>("48199");
+  const [sorting, setSorting] = useState<GridSort | null>(null);
   const common = { columns: DEAD_LETTER_COLUMNS, getRowId: (r: DeadLetter) => r.seq, rowHeight: rowHeight[density] };
   return (
     <div className="flex w-full flex-col gap-3">
@@ -157,6 +158,9 @@ function GridDemo({ density }: { density: Density }) {
           {...common}
           label="Dead-lettered messages"
           rows={DEAD_LETTERS}
+          rowNumbers
+          sorting={sorting}
+          onSortingChange={setSorting}
           selectedIds={selected}
           focusId={focusId}
           onSelectionChange={(ids, f) => { setSelected(ids); setFocusId(f); }}
@@ -177,6 +181,54 @@ function GridDemo({ density }: { density: Density }) {
             onSelectionChange={() => {}}
           />
         </div>
+      </div>
+    </div>
+  );
+}
+
+const JSON_BODY = prettyJson(
+  '{"orderId":"c1f0b3a8-52d1-4a0e-9c64-7e2f1d9ab301","customer":{"id":48211907345123456789,"name":"Nordlicht Spedition"},"lines":[{"sku":"PAL-120","qty":6},{"sku":"BOX-014","qty":40}],"note":"Deliver \\"dock 4\\", ring twice","priority":null,"fragile":false,"tags":[]}',
+)!;
+const XML_BODY = prettyXml(
+  '<?xml version="1.0" encoding="utf-8"?><shipment id="48199"><!-- rerouted --><origin>Rotterdam</origin><destination country="DE">Hamburg</destination><manifest><![CDATA[2 x PAL-120 < 1.5 t & sealed]]></manifest><handling/></shipment>',
+)!;
+const HEX_BYTES = new Uint8Array(64).map((_, i) => (i < 40 ? '{"id":48199,"state":"dead-lettered"}'.charCodeAt(i % 37) : (i * 37) & 0xff));
+
+function ViewerDemo() {
+  const [counts, setCounts] = useState<("active" | "dlq" | "scheduled")[]>(["active", "dlq"]);
+  return (
+    <div className="flex w-full flex-col gap-3">
+      <div className="self-start"><ToggleGroup
+        label="Counts to show"
+        values={counts}
+        onChange={setCounts}
+        options={[{ value: "active", label: "Active" }, { value: "dlq", label: "Dead-letter" }, { value: "scheduled", label: "Scheduled" }]}
+      /></div>
+      <div className="h-[178px] w-full border border-line"><CodeView text={JSON_BODY} label="JSON body" /></div>
+      <div className="h-[130px] w-full border border-line"><CodeView text={XML_BODY} label="XML body" /></div>
+      <div className="h-[82px] w-full border border-line"><HexView bytes={HEX_BYTES} label="Hex body" /></div>
+    </div>
+  );
+}
+
+const LONG_LINE = '{"payload":"' + Array.from({ length: 6000 }, (_, i) => ((i + 7) * 7919).toString(36)).join("") + '"}';
+const LONG_LINES = `${LONG_LINE}\n{"next":"short line after the cut one"}`;
+const CAPPED_LINES = Array.from({ length: 24 }, (_, i) => `2024-10-15T09:41:${String(i).padStart(2, "0")}Z  shipment 48${190 + i} scanned at Rotterdam`).join("\n");
+const BINARY_BYTES = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52, 0, 0, 0x01, 0x40, 0, 0, 0, 0xc8, 0x08, 0x06, 0, 0, 0, 0x7b, 0xcb, 0x2f]);
+
+function ViewerStatesDemo() {
+  return (
+    <div className="flex w-full flex-col gap-3">
+      <div className="h-[50px] w-full border border-line"><CodeView text={LONG_LINES} label="Long line" /></div>
+      <div className="h-[146px] w-full border border-line"><CodeView text={CAPPED_LINES} label="Capped lines" maxLines={8} /></div>
+      <div className="w-full border border-line px-3 py-1.5"><BodyState kind="empty" /></div>
+      <div className="w-full border border-line">
+        <div className="border-b border-line px-3 py-1.5"><BodyState kind="binary" /></div>
+        <div className="h-[50px]"><HexView bytes={BINARY_BYTES} label="Binary body" /></div>
+      </div>
+      <div className="w-full border border-line">
+        <div className="border-b border-line px-3 py-1.5"><BodyState kind="too-large" /></div>
+        <div className="h-[34px]"><CodeView text={"[".repeat(40) + "]".repeat(40)} label="Raw body" /></div>
       </div>
     </div>
   );
@@ -326,15 +378,21 @@ function Column({ theme, density }: { theme: ThemeName; density: Density }) {
         <Section title="Grid">
           <GridDemo density={density} />
         </Section>
+        <Section title="Viewer">
+          <ViewerDemo />
+        </Section>
+        <Section title="Viewer states">
+          <ViewerStatesDemo />
+        </Section>
         <Section title="Loading and empty">
           <div className="w-72 border border-line"><SkeletonRows rows={4} columns={2} /></div>
           <EmptyState title="No dead letters" body="Messages that fail delivery land here. This subscription has none." />
           <EmptyState
             tone="error"
             title="Can't list subscriptions"
-            body="This identity needs Listen or Manage on shipment-events."
-            detail="access denied (needs Listen): the token does not include the claim"
-            action={<Button>Try again</Button>}
+            body="This key has no Manage right. Use a key whose policy includes Manage."
+            detail="access denied (needs Manage): the token does not include the claim"
+            action={<Button>Edit connection</Button>}
           />
           <div className="w-72 border-y border-line px-3 py-2.5">
             <Problem title="Couldn't refresh" body="The connection was interrupted. Showing the last loaded data." detail="network error: connection reset by peer" action={<Button>Try again</Button>} />

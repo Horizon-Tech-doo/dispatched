@@ -10,6 +10,10 @@ const ctx = () => ({
   subs: { "shipment-events": fx.subscriptions["shipment-events"] },
   profiles: fx.profiles.map((p) => ({ ...p, bound_sign_in: null })),
   activeProfileId: "p-logistics",
+  activeTab: null as { id: string; kind: "queue" | "topic" | "subscription" } | null,
+  host: "sb-logistics-prod.servicebus.windows.net",
+  entra: false,
+  copy: vi.fn(), copyConnectionString: vi.fn(),
   open: vi.fn(), connect: vi.fn(), openSheet: vi.fn(), refresh: vi.fn(), toggleDrawer: vi.fn(), setPrefs: vi.fn(),
 });
 
@@ -28,11 +32,44 @@ describe("buildCommands", () => {
     expect(cmds.find((c) => c.label === "Toggle Jobs and Activity")?.shortcut).toBe("mod+j");
   });
 
+  it("offers the dashboard while connected, and not otherwise", () => {
+    const c = ctx();
+    const cmd = buildCommands(c).find((x) => x.label === "Open dashboard");
+    expect(cmd?.shortcut).toBe("mod+shift+d");
+    cmd!.run();
+    expect(c.open).toHaveBeenCalledWith({ id: "::dashboard", kind: "dashboard" });
+    expect(buildCommands({ ...c, activeProfileId: null }).some((x) => x.label === "Open dashboard")).toBe(false);
+  });
+
   it("lists a pinned entity once even when the namespace lists it too", () => {
     const c = ctx();
     const cmds = buildCommands({ ...c, listing: { ...c.listing, known: [{ entity: "invoice-generate", subscription: null }] } });
     expect(cmds.filter((x) => x.label === "invoice-generate")).toHaveLength(1);
     expect(new Set(cmds.map((x) => x.id)).size).toBe(cmds.length);
+  });
+
+  it("opens the explorer options while connected only", () => {
+    const c = ctx();
+    buildCommands(c).find((x) => x.label === "Explorer options")!.run();
+    expect(c.openSheet).toHaveBeenCalledWith({ kind: "explorer-options" });
+    expect(buildCommands({ ...c, activeProfileId: null }).some((x) => x.label === "Explorer options")).toBe(false);
+  });
+
+  it("copies the URL and the connection string of the entity in the active tab", () => {
+    const c = { ...ctx(), activeTab: { id: "shipment-events/subscriptions/tracking-sync", kind: "subscription" as const } };
+    const cmds = buildCommands(c);
+    cmds.find((x) => x.label === "Copy URL of tracking-sync (shipment-events)")!.run();
+    expect(c.copy).toHaveBeenCalledWith("sb://sb-logistics-prod.servicebus.windows.net/shipment-events/Subscriptions/tracking-sync", "Copied the URL for tracking-sync (shipment-events)");
+    cmds.find((x) => x.label === "Copy connection string of tracking-sync (shipment-events)")!.run();
+    expect(c.copyConnectionString).toHaveBeenCalledWith("shipment-events/subscriptions/tracking-sync");
+  });
+
+  it("offers no entity copy commands without an entity tab, and no connection string on Entra", () => {
+    const c = ctx();
+    expect(buildCommands(c).some((x) => x.group === "This entity")).toBe(false);
+    const entra = buildCommands({ ...c, entra: true, activeTab: { id: "orders", kind: "queue" } });
+    expect(entra.map((x) => x.label)).toContain("Copy URL of orders");
+    expect(entra.some((x) => /connection string/.test(x.label))).toBe(false);
   });
 
   it("sets preferences from the theme and density commands", () => {
@@ -52,6 +89,13 @@ describe("buildCommands", () => {
 });
 
 describe("palette", () => {
+  it("opens from the small search button that stands in for the field in a narrow window", async () => {
+    renderShell("default", { last_profile: "p-logistics" });
+    await screen.findByRole("tree", { name: "Namespace" });
+    await userEvent.click(screen.getByRole("button", { name: "Open the command palette" }));
+    expect(await screen.findByPlaceholderText("Go to entity or command")).toBeInTheDocument();
+  });
+
   it("opens with mod+k and opens an entity", async () => {
     renderShell("default", { last_profile: "p-logistics" });
     await screen.findByRole("tree", { name: "Namespace" });
@@ -62,7 +106,7 @@ describe("palette", () => {
     await waitFor(() => expect(screen.getByRole("tab", { name: /label-print/ })).toHaveAttribute("aria-selected", "true"));
     expect(screen.queryByPlaceholderText("Go to entity or command")).not.toBeInTheDocument();
     // The tree follows: the opened entity is the selected row.
-    expect(screen.getByRole("treeitem", { name: "label-print" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("treeitem", { name: /^label-print(,| \(|$)/ })).toHaveAttribute("aria-selected", "true");
   });
 
   it("groups commands, shows shortcuts and says so when nothing matches", async () => {
@@ -123,7 +167,7 @@ describe("palette", () => {
     await userEvent.type(input, "tracking");
     await userEvent.keyboard("{Enter}");
     await waitFor(() => expect(screen.getByRole("tab", { name: /tracking-sync/ })).toHaveAttribute("aria-selected", "true"));
-    expect(screen.getByRole("treeitem", { name: "tracking-sync" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("treeitem", { name: /^tracking-sync(,| \(|$)/ })).toHaveAttribute("aria-selected", "true");
   });
 
   it("with more than 50 topics, loads no subscriptions and says collapsed topics are not searched", async () => {

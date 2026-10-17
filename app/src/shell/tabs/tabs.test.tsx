@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { setTransport } from "@/engine";
 import { renderShell } from "../test-utils";
-import { subTabsFor } from "./subtabs";
+import { countPlaceholderCh, countsKey, rememberCounts, subTabsFor } from "./subtabs";
 
 // In jsdom the resizable panels swallow pointer-downs, so focus moves explicitly (as in the tree tests).
 const focus = (el: HTMLElement) => act(() => el.focus());
@@ -20,7 +20,7 @@ describe("entity tabs", () => {
   it("open from the tree with Enter and show counts on sub-tabs", async () => {
     renderShell("default", { last_profile: "p-logistics" });
     const tree = await screen.findByRole("tree", { name: "Namespace" });
-    await userEvent.click(await within(tree).findByRole("treeitem", { name: "invoice-generate" }));
+    await userEvent.click(await within(tree).findByRole("treeitem", { name: /^invoice-generate(,| \(|$)/ }));
     await focus(tree);
     await userEvent.keyboard("{Enter}");
     const strip = await screen.findByRole("tablist", { name: "Open entities" });
@@ -30,8 +30,7 @@ describe("entity tabs", () => {
     const dl = within(views).getByRole("tab", { name: /Dead-letter/ });
     expect(within(dl).getByText("37").className).toContain("text-accent");
     await focus(dl); // Radix activates a focused tab; the panels swallow the pointer-down a click starts with
-    expect(await screen.findByRole("heading", { name: "Dead-letter isn't available yet" })).toBeInTheDocument();
-    expect(screen.getByText(/Messages that could not be delivered or processed/)).not.toHaveTextContent("next update");
+    expect(await screen.findByRole("grid", { name: "Dead-letter queue" })).toBeInTheDocument();
   });
 
   it("holds the place of sub-tab counts while they load", async () => {
@@ -49,12 +48,40 @@ describe("entity tabs", () => {
     const views = await screen.findByRole("tablist", { name: "Entity views" });
     const messages = within(views).getByRole("tab", { name: /Messages/ });
     await waitFor(() => expect(messages.querySelector("[data-count-placeholder]")).not.toBeNull());
-    expect(messages.querySelector("[data-count-placeholder]")).toHaveClass("min-w-[6ch]");
+    expect(messages.querySelector("[data-count-placeholder]")).toHaveStyle({ minWidth: "3ch" });
     // Tabs without a count reserve nothing.
     expect(within(views).getByRole("tab", { name: "Overview" }).querySelector("[data-count-placeholder]")).toBeNull();
     await act(async () => release());
-    await waitFor(() => expect(within(messages).getByText("2,906")).toHaveClass("min-w-[6ch]"));
+    // Loaded, the count takes only its own width: no reserved slot to leave a gap before the next tab.
+    await waitFor(() => expect(within(messages).getByText("2,906")).toBeInTheDocument());
+    expect(within(messages).getByText("2,906").className).not.toMatch(/min-w-/);
     expect(messages.querySelector("[data-count-placeholder]")).toBeNull();
+  });
+
+  it("holds the room a tab's count took last time while it loads again", async () => {
+    const sub = "shipment-events/subscriptions/tracking-sync";
+    const { mock } = renderShell("default", { last_profile: "p-logistics", "shell:p-logistics": { tabs: [{ id: sub, kind: "subscription", subTab: "overview" }], activeTab: sub } });
+    rememberCounts(countsKey("p-logistics", sub), { active: 12_345, dead_letter: 5, scheduled: 0, transfer: 0, transfer_dead_letter: 0, approximate: false, truncated: false });
+    const gate = new Promise<void>(() => {});
+    setTransport({
+      listen: mock.listen,
+      invoke: async <T,>(cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === "list_subscriptions") await gate;
+        return mock.invoke<T>(cmd, args);
+      },
+    });
+    const views = await screen.findByRole("tablist", { name: "Entity views" });
+    const messages = within(views).getByRole("tab", { name: /Messages/ });
+    // "12,345" is six characters wide; Dead-letter's "5" one; a tab with no remembered count holds three.
+    await waitFor(() => expect(messages.querySelector("[data-count-placeholder]")).toHaveStyle({ minWidth: "6ch" }));
+    expect(within(views).getByRole("tab", { name: /Dead-letter/ }).querySelector("[data-count-placeholder]")).toHaveStyle({ minWidth: "1ch" });
+  });
+
+  it("sizes a placeholder from the last count, else three characters", () => {
+    const messages = subTabsFor("queue").find((t) => t.id === "messages")!;
+    expect(countPlaceholderCh(messages, null)).toBe(3);
+    expect(countPlaceholderCh(messages, { active: 1_284, dead_letter: 0, scheduled: 0, transfer: 0, transfer_dead_letter: 0, approximate: false, truncated: false })).toBe(5);
+    expect(countPlaceholderCh(subTabsFor("queue").find((t) => t.id === "deferred")!, { active: 1, dead_letter: 0, scheduled: 0, transfer: 0, transfer_dead_letter: 0, approximate: false, truncated: false })).toBe(3);
   });
 
   it("shows the kind word beside a queue or topic name, with no glyph, and the topic beside a subscription", async () => {
@@ -135,7 +162,7 @@ describe("entity tabs", () => {
     renderShell("default", { last_profile: "p-logistics", "shell:p-logistics": { tabs: [{ id: "shipment-events", kind: "topic", subTab: "dead-letter" }], activeTab: "shipment-events" } });
     const views = await screen.findByRole("tablist", { name: "Entity views" });
     expect(within(views).getByRole("tab", { name: "Overview" })).toHaveAttribute("aria-selected", "true");
-    expect(await screen.findByRole("heading", { name: "Overview isn't available yet" })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: "Properties" })).toBeInTheDocument();
   });
 
   it("shows_the_header_and_a_note_when_the_namespace_cannot_be_listed", async () => {
@@ -151,5 +178,12 @@ describe("entity tabs", () => {
     const views = await screen.findByRole("tablist", { name: "Entity views" });
     await waitFor(() => expect(within(views).getByRole("tab", { name: /Dead-letter/ })).toHaveAttribute("aria-selected", "true"));
     expect(await within(views).findByText("3,417")).toBeInTheDocument();
+  });
+});
+
+describe("sub-tab descriptions", () => {
+  it("Sessions promises message counts, not session state (parked for M2)", () => {
+    const sessions = subTabsFor("queue").find((d) => d.id === "sessions")!;
+    expect(sessions.description).toBe("Sessions and their message counts, for session-enabled entities.");
   });
 });

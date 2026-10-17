@@ -15,3 +15,17 @@ export function splitSubscriptionId(id: string): { topic: string; name: string }
   if (at < 0) return { topic: "", name: id };
   return { topic: id.slice(0, at), name: id.slice(at + SEP.length) };
 }
+
+/** The entity as a person reads it: a queue or topic by name, a subscription as `name (topic)`. Copy messages, the
+ *  palette and the tree's row names all say it this way. */
+export function displayName(id: string): string {
+  const { topic, name } = splitSubscriptionId(id);
+  return topic ? `${name} (${topic})` : id;
+}
+
+/** What an entity's connection string is scoped to, as a sentence part: `EntityPath` names the queue or topic, so a
+ *  subscription's string is scoped to its topic (`topic events`); anything else to `fallback`. */
+export function connectionStringScope(id: string, fallback: string): string {
+  const { topic } = splitSubscriptionId(id);
+  return topic ? `topic ${topic}` : fallback;
+}

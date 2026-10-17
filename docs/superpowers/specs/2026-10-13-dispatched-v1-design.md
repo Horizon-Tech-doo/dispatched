@@ -402,3 +402,31 @@ Every milestone ends with a tagged release and a live-verification note.
 - Whether to post in incumbent issues #286, #607 and #863 at the v1.0 launch (marketing decision, after M4).
 - Event Hubs v2 scoping, after v1.0.
 - Trademark: copy Arkived's `docs/trademark-compliance.md` stance ("not affiliated with Microsoft"; "Azure Service Bus" used only descriptively). Use Azure-*style* glyphs drawn by us, not Microsoft's icon set, unless its terms allow use inside an app.
+
+## 13. M1c decisions (2026-10-16)
+
+Decided while planning M1c (`docs/superpowers/plans/2026-10-16-m1c-browse.md`) and confirmed in the live check (`docs/live-verification-m1c.md`):
+
+1. Per-session peek is a broker-side `peek-message` with a session id and takes no session lock. If the source cannot do it (`Unsupported`, which covers every refusal except 401, 403, 404, 429 and 503), the app peeks the whole entity and keeps that session's messages client-side: always correct, only slower.
+2. Session listing merges the broker's `get-message-sessions` with a peek tally of the main queue (capped at 10,000 messages). Either source may fail alone; both failing is an error. Session state needs a lock, so it moves to M2.
+3. "From the end" finds the highest sequence number with one-message peeks (gallop, then bisect, at most 200 probes), then scans back in windows that grow x4 until it has Top N matches, reaches sequence 0, or has examined 100,000 messages. It returns the last N oldest first, has no "Peek more", and caps Top N at 5,000.
+4. Grid rows are summaries with 160-character body previews. The detail pane fetches the full message by sequence number. Bodies over 4 MiB are truncated for display and copy is disabled for them; export writes the whole body.
+5. Filters are a property expression, one body condition (contains, regex or JSONPath with an optional value) and an optional session id, all ANDed, and they run in the Rust scan.
+6. Node colouring uses the five label swatches as an 8px marker on the tree row, from per-connection highlight rules (name regex, or a count at or above a threshold). Amber stays reserved for dead letters, PROD and errors.
+7. The counts the tree shows, the highlight rules, the tree filter and the sub-tab an entity opens on are saved per connection.
+8. Dashboard rows with dead letters are marked by the amber dead-letter number; there is no row tint. Unknown counts are blank cells in "Copy as TSV".
+9. Entity URLs are `sb://{host}/{entity path}` and `.../$DeadLetterQueue`. The entity connection string is the profile's string with `EntityPath` set to the queue or topic (a subscription's string names its topic, as the portal and the Azure SDKs expect), offered for connection-string profiles only and refused when the stored string is scoped to another queue or topic; a key scoped to a topic copies that topic's subscriptions.
+10. The export path comes from the native save dialog, opened by Rust, which handles "replace?". "Export all" uses the view's current filter and session; "Export selected" reads the selected sequence numbers again and reports any that have gone.
+11. Concurrent Entra sign-ins were mostly built in M1b. M1c adds a Settings list of every stored sign-in (whose it is, which profiles use it) with sign-out. "Sign in again" uses M1b's "Sign in to {tenant}".
+12. Overview live counts refresh every 10 s while the Overview is visible, and on F5.
+13. Deviation from §4.2: there is no transfer count kind in the tree's count choice or highlight rules. Transfer messages are in flight and not browsable in M1c. Transfer counts show on Overview and the Dashboard.
+14. Deviation from §4.2: a subscription's rules are a Rules sub-tab, not tree nodes. The tree keeps entities only.
+
+Recorded after the build and the live check:
+
+15. The "matches nothing" filter state is neutral, not amber (R22).
+16. Entity kind resolution in Rust for pinned and `EntityPath` entities is deferred to M2 (R23). Until then the limited view shows them as queue rows.
+17. The grid row limit is 100,000 (R14).
+18. An export writes only to the path picked in the Rust-opened save dialog, through a one-time pick id. The webview never supplies a path (R8).
+19. Without a data-plane role a peek fails `forbidden` while the control-plane listing works. The error advice depends on the sign-in: Entra without Listen points to "Azure Service Bus Data Receiver", without Manage to "Azure Service Bus Data Owner"; SAS points to a key whose policy includes Listen or Manage; an unknown sign-in gets neutral wording. The action is "Edit connection", not retry.
+20. The emulator answers session listing with an empty list. The app then shows sessions found by peeking and says so. Whole-entity peeks on session entities were not run on a cloud namespace.

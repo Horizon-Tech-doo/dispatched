@@ -1,34 +1,115 @@
-import { CircleAlert } from "lucide-react";
-import { useMemo, useState, type ReactNode } from "react";
+import { CircleAlert, SlidersHorizontal } from "lucide-react";
+import { useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useEntities, useProfiles, useSubscriptionsFor } from "@/engine";
 import {
   Button, ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger,
-  CountBadge, EmptyState, EntityGlyph, Input, Problem, Skeleton, SkeletonRows, Tree, formatNumber, rowHeight,
+  CountBadge, EmptyState, EntityGlyph, Hint, IconButton, Input, LabelSwatch, Problem, Skeleton, SkeletonRows, Tree, cn, formatCount, formatNumber, rowHeight,
 } from "@/ui";
 import { shortHost } from "../ConnectionSelector";
 import { useShell } from "../context";
+import { deadLetterUrl, entityUrl } from "../entityUrls";
+import { displayName } from "../entityId";
 import { keepTogether } from "../text";
+import { DASHBOARD_ID, MAX_FILTER_LENGTH, type CountKind } from "../state";
+import { compileRules, highlightOf, type Highlight } from "./highlight";
+import { marksTier, type MarksTier } from "./marksLayout";
+import { accessAdvice, useAuthKind } from "../access";
 import { describeListError } from "./listError";
 import { buildNodes, type NsNode, type SubsState } from "./model";
+import type { EntityCounts } from "@/engine";
 
 const errorKind = (e: Error) => (e as { kind?: string }).kind ?? "";
 
 const glyphOf = { namespace: "namespace", queue: "queue", topic: "topic", subscription: "subscription" } as const;
 
+/** A pinned entity is known by name only: unless it is a subscription (the id says so), its kind is not known. */
+const glyphKind = (n: NsNode) => (n.kind === "known" && n.entity?.kind !== "subscription" ? "unknown" : (n.entity?.kind ?? glyphOf[n.kind as keyof typeof glyphOf]));
+
 /** Unlaid-out panes measure 0x0; the tree renders a screenful until it is measured. */
 const FLOOR = { width: 280, height: 640 };
 
-function Counts({ n }: { n: NsNode }) {
+const SLOTS: CountKind[] = ["active", "scheduled", "transfer-dlq", "dead-letter"];
+const COUNT_WORD: Record<CountKind, string> = { active: "active", scheduled: "scheduled", "transfer-dlq": "transfer DLQ", "dead-letter": "dead-letter" };
+const COUNT_TITLE: Record<CountKind, string> = { active: "Active", scheduled: "Scheduled", "transfer-dlq": "Transfer dead-letter", "dead-letter": "Dead-letter" };
+const countOf = (c: EntityCounts, k: CountKind) => (k === "active" ? c.active : k === "scheduled" ? c.scheduled : k === "transfer-dlq" ? c.transfer_dead_letter : c.dead_letter);
+/** Active always shows (a zero is data); the other counts only above zero, like dead letters. */
+const showsValue = (k: CountKind, c: EntityCounts | null | undefined) => (k === "active" ? true : !!c && countOf(c, k) > 0);
+const capital = (w: string) => w[0].toUpperCase() + w.slice(1);
+
+/** A row in the tree: the node and what the connection's rules say about it. */
+type TreeRow = NsNode & { highlight: Highlight | null };
+
+/** How wide, in characters, each count's slot is: as wide as its widest value among the loaded entities, so a count's
+ *  place in the row tells which count it is. */
+function slotWidths(all: (EntityCounts | null | undefined)[]): Record<CountKind, number> {
+  const w: Record<CountKind, number> = { active: 1, scheduled: 1, "transfer-dlq": 1, "dead-letter": 1 };
+  for (const c of all) {
+    if (!c) continue;
+    for (const k of SLOTS) if (showsValue(k, c) && (k === "active" || countOf(c, k) > 0)) w[k] = Math.max(w[k], formatCount(countOf(c, k), c).length);
+  }
+  return w;
+}
+
+/** A count as it is spoken: `~48` is "about 48", `~48+` is "at least 48". */
+const spoken = (n: number, c: EntityCounts) => (c.truncated ? `at least ${formatCount(n)}` : c.approximate ? `about ${formatCount(n)}` : formatCount(n));
+
+/** The row said in words, for a screen reader: its name (a subscription with its topic) and the counts it shows, then
+ *  that it is highlighted; the rule behind the highlight is the description. */
+function rowLabel(n: NsNode, counts: CountKind[], highlight: Highlight | null): { label?: string; description?: string } {
+  const parts: string[] = [];
+  if (n.kind !== "topic" && n.counts) for (const k of SLOTS) if (counts.includes(k) && showsValue(k, n.counts)) parts.push(`${spoken(countOf(n.counts, k), n.counts)} ${COUNT_WORD[k]}`);
+  if (highlight) parts.push("highlighted");
+  const name = n.topic ? `${n.label} (${n.topic})` : n.label;
+  return {
+    label: parts.length || name !== n.label ? [name, ...parts].join(", ") : undefined,
+    description: highlight ? `${highlight.color}: ${highlight.description}` : undefined,
+  };
+}
+
+interface RowMarks extends MarksTier { counts: CountKind[]; widths: Record<CountKind, number>; swatchSlot: boolean }
+
+const OPTIONAL_KINDS: CountKind[] = ["scheduled", "transfer-dlq"];
+
+/** A row's marks, right-aligned and never truncated: a slot for each chosen count (active, scheduled, transfer DLQ,
+ *  dead-letter; blank when there is nothing to show), then the highlight swatch in a slot of its own at the edge. The
+ *  slots are as wide as the widest value while the pane has room for that; in a narrow pane scheduled and transfer DLQ
+ *  give way first, and below that each count takes only what its value needs. */
+function Marks({ n, highlight, marks }: { n: TreeRow; highlight: Highlight | null; marks: RowMarks }) {
   const c = n.counts;
+  const kinds = n.kind === "topic" ? [] : SLOTS.filter((k) => marks.counts.includes(k) && (marks.optional || !OPTIONAL_KINDS.includes(k)));
+  if (!kinds.length && !marks.swatchSlot) return null;
   return (
-    <span className="ml-auto flex shrink-0 items-baseline gap-1.5">
-      <CountBadge value={c?.active} quality={c ?? undefined} className="text-12" />
-      {c && c.dead_letter > 0 && <CountBadge value={c.dead_letter} quality={c} attention className="text-12" />}
+    <span className={cn("ml-auto flex shrink-0 items-baseline justify-end pl-1", marks.fixed ? "gap-2" : "gap-1")}>
+      {kinds.map((k) => {
+        const slot = (children: ReactNode) => (
+          <span key={k} data-count-slot={k} style={marks.fixed ? { minWidth: `${marks.widths[k]}ch` } : undefined} className="inline-block text-right">
+            {children}
+          </span>
+        );
+        if (!showsValue(k, c)) return slot(null);
+        const badge = <CountBadge value={c ? countOf(c, k) : undefined} quality={c ?? undefined} attention={k === "dead-letter"} className="text-12" />;
+        return (
+          <Hint key={k} label={COUNT_TITLE[k]}>
+            {slot(badge)}
+          </Hint>
+        );
+      })}
+      {marks.swatchSlot &&
+        (highlight ? (
+          <Hint label={`${capital(highlight.color)}: ${highlight.description}`}>
+            <span data-swatch-slot className="flex size-2 shrink-0 items-center self-center">
+              <LabelSwatch color={highlight.color} />
+              <span className="sr-only">highlighted</span>
+            </span>
+          </Hint>
+        ) : (
+          <span data-swatch-slot className="size-2 shrink-0 self-center" />
+        ))}
     </span>
   );
 }
 
-function Row({ n, production, onRetry }: { n: NsNode; production: boolean; onRetry: (topic: string) => void }) {
+function Row({ n, production, onRetry, marks }: { n: TreeRow; production: boolean; onRetry: (topic: string) => void; marks: RowMarks }) {
   switch (n.kind) {
     case "loading":
       return <Skeleton className="w-32" />;
@@ -59,27 +140,30 @@ function Row({ n, production, onRetry }: { n: NsNode; production: boolean; onRet
           {production && <span className="ml-auto shrink-0 pl-2 text-11 font-semibold tracking-[0.04em] text-accent">PROD</span>}
         </>
       );
-    default:
+    default: {
+      // A name keeps six characters while every count has its slot; once the pane is tighter the counts come first.
+      const nameMin = marks.optional && marks.fixed ? "min-w-[6ch]" : "min-w-[2ch]";
       return (
         <>
-          <EntityGlyph kind={n.entity?.kind ?? glyphOf[n.kind as keyof typeof glyphOf]} className="shrink-0 text-icon" />
+          <EntityGlyph kind={glyphKind(n)} className="shrink-0 text-icon" />
           {n.kind === "known" && n.topic ? (
-            // Name first, topic after it as secondary text: only the topic gives way when the row is narrow.
+            // Name first, topic after it as secondary text: the topic gives way first when the row is narrow, then the name.
             <>
-              <span className="shrink-0" title={`${n.topic}/${n.label}`}>{n.label}</span>
-              <span className="min-w-0 truncate text-muted">{n.topic}</span>
+              <span className={cn("truncate", nameMin)} title={`${n.topic}/${n.label}`}>{n.label}</span>
+              <span className="min-w-0 truncate text-muted [flex-shrink:3]">{n.topic}</span>
             </>
           ) : (
-            <span className="truncate" title={n.label}>{n.label}</span>
+            <span className={cn("truncate", nameMin)} title={n.label}>{n.label}</span>
           )}
-          {n.kind !== "topic" && <Counts n={n} />}
+          <Marks n={n} highlight={n.highlight} marks={marks} />
         </>
       );
+    }
   }
 }
 
 export function NamespaceTree() {
-  const { conn, shell, dispatch, prefs, openSheet } = useShell();
+  const { conn, shell, dispatch, prefs, openSheet, copyConnectionString, copyText } = useShell();
   const profileId = conn.profileId;
   const refetchMs = prefs.autoRefresh * 1000;
   const profile = useProfiles().data?.find((p) => p.id === profileId);
@@ -92,7 +176,9 @@ export function NamespaceTree() {
     [listing, shell.expanded],
   );
   const subQueries = useSubscriptionsFor(profileId, expandedTopics, refetchMs);
-  const [filter, setFilter] = useState("");
+  const filter = shell.treeFilter;
+  const setFilter = (value: string) => dispatch({ type: "treeFilter", value });
+  const rules = useMemo(() => compileRules(shell.explorer.rules), [shell.explorer.rules]);
   const [menuId, setMenuId] = useState<string | null>(null);
 
   const subs: Record<string, SubsState> = {};
@@ -103,7 +189,12 @@ export function NamespaceTree() {
   // useQueries returns a fresh array each render; key the memo on what the rows actually show.
   const subsKey = JSON.stringify(Object.entries(subs).map(([t, s]) => [t, s.pending, s.data, s.error?.message]));
 
-  const host = shortHost(profile?.host ?? conn.view?.host ?? "");
+  const fullHost = profile?.host ?? conn.view?.host ?? "";
+  const host = shortHost(fullHost);
+  const entra = profile?.auth.kind === "entra";
+  const auth = useAuthKind();
+  // Like the Overview's button: until the profile list is known an Entra profile can't be told from the others.
+  const canCopyString = profile !== undefined && !entra;
   const nodes = useMemo(
     () => (listing ? buildNodes({ host, listing, subs, expanded: new Set(shell.expanded), filter }) : []),
     // `subs` is covered by `subsKey`.
@@ -111,24 +202,61 @@ export function NamespaceTree() {
     [listing, subsKey, shell.expanded, filter, host],
   );
   const byId = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
+  const chosen = shell.explorer.counts;
+  // The rows with what the rules say about them and how a screen reader names them.
+  const rows = useMemo<TreeRow[]>(
+    () =>
+      nodes.map((n) => {
+        const entityRow = n.kind === "queue" || n.kind === "topic" || n.kind === "subscription" || n.kind === "known";
+        const highlight = entityRow ? highlightOf(n.label, n.counts, rules) : null;
+        const said = entityRow ? rowLabel(n, chosen, highlight) : {};
+        return { ...n, highlight, ariaLabel: said.label, ariaDescription: said.description };
+      }),
+    [nodes, rules, chosen],
+  );
+  // The loaded entities' counts, for the width of each count's slot (not only the rows in view or unfiltered).
+  const widths = useMemo(
+    () => slotWidths([...(listing?.queues.map((q) => q.counts) ?? []), ...Object.values(subs).flatMap((s) => s.data?.map((x) => x.counts) ?? [])]),
+    // `subs` is covered by `subsKey`.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [listing, subsKey],
+  );
+  // How much of each row's marks the pane can hold, planned for the deepest entity row shown.
+  const navRef = useRef<HTMLElement>(null);
+  const [paneWidth, setPaneWidth] = useState(0);
+  useLayoutEffect(() => {
+    const el = navRef.current;
+    if (!el) return;
+    setPaneWidth(Math.round(el.getBoundingClientRect().width));
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => setPaneWidth(Math.round(el.getBoundingClientRect().width)));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const deepest = rows.reduce((d, n) => (n.entity || n.kind === "known" ? Math.max(d, n.depth) : d), 2);
+  const tier = marksTier(paneWidth, deepest, chosen, widths, rules.length > 0);
+  const marks: RowMarks = { counts: chosen, widths, swatchSlot: rules.length > 0, ...tier };
 
   const retryTopic = (topic: string) => void subQueries[expandedTopics.indexOf(topic)]?.refetch();
 
   function activate(id: string) {
     const n = byId.get(id);
     if (!n) return;
-    if (n.entity) dispatch({ type: "open", tab: n.entity });
+    if (n.kind === "namespace") dispatch({ type: "open", tab: { id: DASHBOARD_ID, kind: "dashboard" } });
+    else if (n.entity) dispatch({ type: "open", tab: n.entity });
     else if (n.kind === "error" && n.topic) retryTopic(n.topic);
     else if (n.expandable) dispatch({ type: "toggleExpanded", nodeId: n.id, expanded: !n.expanded });
   }
 
-  const copy = (text: string) => void navigator.clipboard?.writeText(text).catch(() => {});
+  const copy = (text: string, said: string) => void copyText(text, said);
   const menuNode = menuId ? byId.get(menuId) : undefined;
+  const menuEntity = menuNode?.entity;
+  const menuDlqUrl = menuEntity && fullHost ? deadLetterUrl(fullHost, menuEntity.id, menuEntity.kind) : null;
 
   const summary = listing && !listing.limited ? `${formatNumber(listing.queues.length)} queues, ${formatNumber(listing.topics.length)} topics` : "";
   const editConnection = profileId ? () => openSheet({ kind: "profile", profileId }) : undefined;
   const failure = entities.error
-    ? describeListError(errorKind(entities.error), { name: profile?.name ?? conn.view?.profile_name ?? host, host, entra: profile?.auth.kind === "entra" })
+    ? describeListError(errorKind(entities.error), { name: profile?.name ?? conn.view?.profile_name ?? host, host, auth })
     : null;
   // A listing that needs the connection fixed offers to edit it; anything else runs the listing again.
   const recover =
@@ -139,10 +267,14 @@ export function NamespaceTree() {
     );
   const banner = (children: ReactNode) => <div className="shrink-0 border-y border-line px-3 py-2.5">{children}</div>;
   return (
-    <nav aria-label="Namespace" className="flex h-full min-h-0 flex-col">
-      <div className="flex h-[30px] shrink-0 items-center justify-between border-b border-line px-3">
+    <nav ref={navRef} aria-label="Namespace" className="@container flex h-full min-h-0 flex-col">
+      <div className="flex h-[30px] shrink-0 items-center gap-1.5 border-b border-line pl-3 pr-1.5">
         <span className="font-semibold text-muted">Explorer</span>
-        <span className="text-11 tabular-nums text-faint">{summary}</span>
+        {/* Left out when the pane is too narrow to hold it beside the title. */}
+        <span className="ml-auto hidden whitespace-nowrap text-11 tabular-nums text-faint @[230px]:inline">{summary}</span>
+        <IconButton label="Explorer options" className="ml-auto shrink-0 @[230px]:ml-0" onClick={() => openSheet({ kind: "explorer-options" })}>
+          <SlidersHorizontal />
+        </IconButton>
       </div>
       <div className="shrink-0 px-2 py-1.5">
         <Input
@@ -152,6 +284,7 @@ export function NamespaceTree() {
           placeholder="Filter"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
+          maxLength={MAX_FILTER_LENGTH}
           onKeyDown={(e) => e.key === "Escape" && setFilter("")}
           className="[&::-webkit-search-cancel-button]:appearance-none"
         />
@@ -169,7 +302,7 @@ export function NamespaceTree() {
         banner(
           <Problem
             title="Showing pinned entities only"
-            body={keepTogether(`This identity can't list entities in ${host}. Grant it Manage rights to see everything, or edit this connection to pin more.`, host)}
+            body={keepTogether(`${accessAdvice(["Manage"], auth)} Or edit this connection to pin more.`, host)}
             action={editConnection && <Button onClick={editConnection}>Edit connection</Button>}
           />,
         )}
@@ -181,7 +314,7 @@ export function NamespaceTree() {
         ) : listing?.limited && listing.known.length === 0 ? (
           <EmptyState
             title="No pinned entities"
-            body={keepTogether(`This identity can't list entities in ${host} and none are pinned. Edit this connection to pin the queues or subscriptions you use, or grant it Manage rights.`, host)}
+            body={keepTogether(`${accessAdvice(["Manage"], auth)} Or edit this connection to pin the queues or subscriptions you use.`, host)}
             action={editConnection && <Button onClick={editConnection}>Edit connection</Button>}
           />
         ) : nodes.length === 1 && filter.trim() ? (
@@ -201,12 +334,12 @@ export function NamespaceTree() {
               >
                 <Tree
                   label="Namespace"
-                  nodes={nodes}
+                  nodes={rows}
                   selectedId={shell.selected}
                   onSelect={(id) => dispatch({ type: "select", nodeId: id })}
                   onActivate={activate}
                   onToggle={(id, expanded) => dispatch({ type: "toggleExpanded", nodeId: id, expanded })}
-                  renderRow={(n) => <Row n={n} production={profile?.production ?? conn.view?.production ?? false} onRetry={retryTopic} />}
+                  renderRow={(n) => <Row n={n} production={profile?.production ?? conn.view?.production ?? false} onRetry={retryTopic} marks={marks} />}
                   rowHeight={rowHeight[prefs.density]}
                   initialRect={FLOOR}
                 />
@@ -214,8 +347,19 @@ export function NamespaceTree() {
             </ContextMenuTrigger>
             <ContextMenuContent>
               <ContextMenuItem disabled={!menuNode?.entity} onSelect={() => menuNode && activate(menuNode.id)}>Open</ContextMenuItem>
-              <ContextMenuItem disabled={!menuNode?.entity} onSelect={() => menuNode && copy(menuNode.label)}>Copy name</ContextMenuItem>
-              <ContextMenuItem disabled={!menuNode?.entity} onSelect={() => menuNode?.entity && copy(menuNode.entity.id)}>Copy entity path</ContextMenuItem>
+              <ContextMenuItem onSelect={() => dispatch({ type: "open", tab: { id: DASHBOARD_ID, kind: "dashboard" } })}>Open dashboard</ContextMenuItem>
+              <ContextMenuSeparator />
+              <ContextMenuItem disabled={!menuNode?.entity} onSelect={() => menuNode && copy(menuNode.label, `Copied the name ${menuNode.label}`)}>Copy name</ContextMenuItem>
+              <ContextMenuItem disabled={!menuNode?.entity} onSelect={() => menuEntity && copy(menuEntity.id, `Copied the entity path for ${displayName(menuEntity.id)}`)}>Copy entity path</ContextMenuItem>
+              <ContextMenuItem disabled={!menuEntity || !fullHost} onSelect={() => menuEntity && menuNode && copy(entityUrl(fullHost, menuEntity.id, menuEntity.kind), `Copied the URL for ${displayName(menuEntity.id)}`)}>Copy URL</ContextMenuItem>
+              <ContextMenuItem disabled={!menuDlqUrl} onSelect={() => menuDlqUrl && menuEntity && copy(menuDlqUrl, `Copied the dead-letter URL for ${displayName(menuEntity.id)}`)}>Copy dead-letter URL</ContextMenuItem>
+              <ContextMenuItem
+                disabled={!menuEntity || !canCopyString}
+                title={entra ? "Entra ID connections have no connection string. Copy the URL instead." : undefined}
+                onSelect={() => menuEntity && void copyConnectionString(menuEntity.id)}
+              >
+                Copy connection string
+              </ContextMenuItem>
               <ContextMenuSeparator />
               <ContextMenuItem onSelect={() => void entities.refetch()}>Refresh</ContextMenuItem>
             </ContextMenuContent>

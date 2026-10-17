@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { formatCount, formatDuration, formatNumber } from "./format";
-import { shortcutLabel } from "./platform";
+import { formatBytes, formatCount, formatDuration, formatNumber } from "./format";
+import { fileManagerName, shortcutLabel } from "./platform";
 
 describe("format", () => {
   it("formats counts like the CLI", () => {
@@ -10,6 +10,14 @@ describe("format", () => {
     expect(formatCount(3417)).toBe("3,417");
     expect(formatCount(120, { approximate: true })).toBe("~120");
     expect(formatCount(10000, { approximate: true, truncated: true })).toBe("~10,000+");
+  });
+
+  it("formats byte sizes in binary units with one decimal above a KiB", () => {
+    expect(formatBytes(0)).toBe("0 B");
+    expect(formatBytes(812)).toBe("812 B");
+    expect(formatBytes(1229)).toBe("1.2 KiB");
+    expect(formatBytes(4 * 1024 * 1024)).toBe("4.0 MiB");
+    expect(formatBytes(1.1 * 1024 ** 3)).toBe("1.1 GiB");
   });
 
   it("formats durations", () => {
@@ -23,5 +31,13 @@ describe("format", () => {
     expect(shortcutLabel("mod+k", false)).toBe("Ctrl+K");
     expect(shortcutLabel("mod+shift+p", true)).toBe("⇧⌘P");
     expect(shortcutLabel("f5", false)).toBe("F5");
+  });
+});
+
+describe("fileManagerName", () => {
+  it("names the platform's file manager", () => {
+    expect(fileManagerName(true, false)).toBe("Finder");
+    expect(fileManagerName(false, true)).toBe("Explorer");
+    expect(fileManagerName(false, false)).toBe("folder");
   });
 });

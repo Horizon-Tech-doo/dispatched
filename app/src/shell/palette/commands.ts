@@ -1,11 +1,12 @@
 import type { EntityListing, Profile, SubscriptionInfo } from "@/engine";
 import type { SheetState } from "../context";
-import type { EntityKind, Prefs } from "../state";
-import { entityIdOf } from "../entityId";
+import { DASHBOARD_ID, type EntityKind, type Prefs } from "../state";
+import { displayName, entityIdOf } from "../entityId";
+import { entityUrl } from "../entityUrls";
 
 export interface PaletteCommand {
   id: string;
-  group: "Go to" | "Connections" | "App";
+  group: "Go to" | "Connections" | "App" | "This entity";
   label: string;
   /** Secondary text after the label: the kind of an entity, the topic of a subscription. */
   detail?: string;
@@ -25,7 +26,16 @@ export interface PaletteContext {
   subs: Record<string, SubscriptionInfo[] | undefined>;
   profiles: Profile[];
   activeProfileId: string | null;
-  open(tab: { id: string; kind: EntityKind }): void;
+  /** The entity the active tab shows, if it shows one (not the dashboard). */
+  activeTab: { id: string; kind: EntityKind } | null;
+  /** The connected namespace's full host, for entity URLs. */
+  host: string;
+  /** The active connection signs in with Entra ID, so it has no connection string to copy. */
+  entra: boolean;
+  /** Copies `text` and says `message` in the status bar. */
+  copy(text: string, message: string): void;
+  copyConnectionString(entityId: string): void;
+  open(tab: { id: string; kind: EntityKind } | { id: string; kind: "dashboard" }): void;
   connect(profileId: string): void;
   openSheet(s: Exclude<SheetState, null>): void;
   refresh(): void;
@@ -60,6 +70,8 @@ export function buildCommands(c: PaletteContext): PaletteCommand[] {
   out.push({ id: "conn:add", group: "Connections", label: "Add connection", run: () => c.openSheet({ kind: "profile", profileId: null }) });
   out.push({ id: "conn:manage", group: "Connections", label: "Manage connections", run: () => c.openSheet({ kind: "profiles" }) });
   const app: Omit<PaletteCommand, "group">[] = [
+    ...(c.activeProfileId !== null ? [{ id: "app:dashboard", label: "Open dashboard", shortcut: "mod+shift+d", keywords: ["counts", "overview", "dead letters"], run: () => c.open({ id: DASHBOARD_ID, kind: "dashboard" as const }) }] : []),
+    ...(c.activeProfileId !== null ? [{ id: "app:explorer-options", label: "Explorer options", keywords: ["tree", "counts", "highlight", "rules", "open on"], run: () => c.openSheet({ kind: "explorer-options" }) }] : []),
     { id: "app:refresh", label: "Refresh", shortcut: "f5", run: c.refresh },
     { id: "app:drawer", label: "Toggle Jobs and Activity", shortcut: "mod+j", run: c.toggleDrawer },
     { id: "app:theme-system", label: "Theme: follow system", keywords: ["appearance"], run: () => c.setPrefs({ theme: "system" }) },
@@ -71,5 +83,10 @@ export function buildCommands(c: PaletteContext): PaletteCommand[] {
     { id: "app:update", label: "Check for updates", run: () => c.openSheet({ kind: "update" }) },
   ];
   for (const a of app) out.push({ ...a, group: "App" });
+  const tab = c.activeTab;
+  if (tab && c.activeProfileId !== null) {
+    if (c.host) out.push({ id: "entity:url", group: "This entity", label: `Copy URL of ${displayName(tab.id)}`, keywords: ["address", "sb://"], run: () => c.copy(entityUrl(c.host, tab.id, tab.kind), `Copied the URL for ${displayName(tab.id)}`) });
+    if (!c.entra) out.push({ id: "entity:string", group: "This entity", label: `Copy connection string of ${displayName(tab.id)}`, keywords: ["key", "secret"], run: () => c.copyConnectionString(tab.id) });
+  }
   return out;
 }

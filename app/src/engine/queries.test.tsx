@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { setTransport } from "./ipc";
 import { createMockTransport } from "./mock/transport";
 import * as commands from "./commands";
-import { createQueryClient, keys, useDeleteProfile, useEntities, useProfiles, useSaveProfile, useTenants } from "./queries";
+import { checkFilterNow, createQueryClient, keys, normalizeFilter, useDeleteProfile, useEntities, useEntityDetails, useFilterCheck, useProfiles, useSaveProfile, useSignOut, useTenants } from "./queries";
 import { EngineError } from "./ipc";
 
 function wrapper() {
@@ -77,5 +77,66 @@ describe("queries", () => {
     expect(result.current.data).toBeUndefined();
     expect(result.current.isPlaceholderData).toBe(false);
     await waitFor(() => expect(result.current.data?.queues.length).toBe(4));
+  });
+
+  it("checks a filter only when a checkable field is set", async () => {
+    const mock = createMockTransport("default");
+    setTransport(mock);
+    const { result, rerender } = renderHook(({ f }) => useFilterCheck(f), { wrapper: wrapper(), initialProps: { f: { property: "  ", body_contains: "x" } as Record<string, string> } });
+    expect(result.current.fetchStatus).toBe("idle");
+    expect(mock.calls.some((c) => c.cmd === "check_filter")).toBe(false);
+    rerender({ f: { property: "a ==" } });
+    await waitFor(() => expect(result.current.data?.map((i) => i.field)).toEqual(["property"]));
+  });
+
+  it("keys a filter by what it means: nulls, blanks and an empty filter are one filter", () => {
+    expect(normalizeFilter({ property: null, body_contains: "  ", session_id: undefined })).toEqual({});
+    expect(keys.peek("p", "q", "active", { kind: "start" }, { body_regex: null }, null)).toEqual(keys.peek("p", "q", "active", { kind: "start" }, {}, null));
+    // Text keeps its spaces: it is sent as typed.
+    expect(normalizeFilter({ body_regex: " a b ", property: "x" })).toEqual({ property: "x", body_regex: " a b " });
+    // A check looks at the checked fields only.
+    expect(keys.filterCheck({ property: "a", body_contains: "x" })).toEqual(keys.filterCheck({ property: "a", body_contains: "y" }));
+  });
+
+  it("checks a filter now: the cached or running answer, else one call; nothing to check is no call", async () => {
+    const mock = createMockTransport("default");
+    setTransport(mock);
+    const client = createQueryClient();
+    expect(await checkFilterNow(client, { body_contains: "x" })).toEqual([]);
+    expect(mock.calls.filter((c) => c.cmd === "check_filter")).toHaveLength(0);
+    const [a, b] = await Promise.all([checkFilterNow(client, { property: "a ==" }), checkFilterNow(client, { property: "a ==" })]);
+    expect(a.map((i) => i.field)).toEqual(["property"]);
+    expect(b).toEqual(a);
+    expect(mock.calls.filter((c) => c.cmd === "check_filter")).toHaveLength(1);
+  });
+
+  it("refreshes sign-ins, the account, profiles, tenants and discovery after a sign-out", async () => {
+    setTransport(createMockTransport("default"));
+    await commands.signIn(null, false);
+    const client = createQueryClient();
+    const w = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+    const seeded = [keys.signIns, keys.account, keys.profiles, keys.tenants("oid-1"), keys.discovery("oid-1", null), keys.entities("p-partner")];
+    seeded.forEach((k) => client.setQueryData(k, []));
+    const { result } = renderHook(() => useSignOut(), { wrapper: w });
+    expect(await result.current.mutateAsync("oid-1")).toEqual({ closed_profile_id: null });
+    expect(seeded.slice(0, 5).map((k) => client.getQueryState(k)?.isInvalidated)).toEqual([true, true, true, true, true]);
+    expect(client.getQueryState(keys.entities("p-partner"))?.isInvalidated).toBe(false);
+  });
+
+  it("never shows another entity's details while the next one loads", async () => {
+    const mock = createMockTransport("default", 20);
+    setTransport(mock);
+    await commands.connect("p-logistics");
+    type P = { kind: "queue" | "subscription"; entity: string };
+    const { result, rerender } = renderHook(({ kind, entity }: P) => useEntityDetails("p-logistics", kind, entity), {
+      wrapper: wrapper(),
+      initialProps: { kind: "queue", entity: "invoice-generate" } as P,
+    });
+    await waitFor(() => expect(result.current.data?.name).toBe("invoice-generate"));
+    rerender({ kind: "queue", entity: "label-print" });
+    expect(result.current.data).toBeUndefined();
+    await waitFor(() => expect(result.current.data?.name).toBe("label-print"));
+    rerender({ kind: "subscription", entity: "shipment-events/subscriptions/tracking-sync" });
+    expect(result.current.data).toBeUndefined();
   });
 });

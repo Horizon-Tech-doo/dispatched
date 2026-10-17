@@ -1,17 +1,17 @@
-import { ChevronRight, CircleAlert, CircleCheck } from "lucide-react";
+import { ChevronRight, CircleAlert, CircleCheck, CircleMinus } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import {
-  useAccount, useDeleteProfile, useProfiles, useSaveProfile, useTenants, useTestProfile,
-  type Check, type DiscoveredNamespace, type EngineError, type Profile, type ProfileDraft, type Transport,
+  useAccount, useDeleteProfile, useProfiles, useSaveProfile, useTenants, useTestDraft,
+  type Check, type ConnectionReport, type DiscoveredNamespace, type EngineError, type Profile, type ProfileDraft, type Transport,
 } from "@/engine";
 import {
-  Button, Field, Input, LabelSwatch, Segmented, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Sheet, Textarea,
+  Button, Field, Input, LabelSwatch, Problem, Segmented, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Sheet, Textarea,
   cn, labelColors,
 } from "@/ui";
 import { useShell } from "../context";
-import { placeError, sentence, type Errors } from "./profileErrors";
+import { checkAdvice, placeError, sentence, skippedReason, type Errors } from "./profileErrors";
 import { NamespacePicker } from "./NamespacePicker";
-import { SignInPanel, TenantSignInAction } from "./SignInPanel";
+import { SignInPanel, TenantSignInAction, useSigningIn } from "./SignInPanel";
 
 type AuthKind = "connection-string" | "entra";
 
@@ -61,26 +61,30 @@ function initial(p: Profile | undefined, auth: AuthKind | undefined): Form {
   };
 }
 
-function CheckLine({ label, c }: { label: string; c: Check }) {
-  const headline = c.status === "ok" ? `${label} works` : c.status === "failed" ? `${label} failed: ${sentence(c.message)}` : `${label} not tested`;
-  const detail = c.status === "ok" ? c.detail : c.status === "skipped" ? sentence(c.reason) : null;
+function CheckLine({ label, c, auth }: { label: "Management" | "Messaging"; c: Check; auth: AuthKind }) {
+  if (c.status === "failed")
+    return (
+      <li>
+        <Problem role="alert" title={`${label} failed`} body={checkAdvice(label, c.kind, auth)} detail={c.message} />
+      </li>
+    );
+  const skipped = c.status === "skipped";
   return (
     <li className="flex items-start gap-1.5 text-12">
-      {c.status === "failed" ? (
-        <CircleAlert aria-hidden="true" className="mt-px size-3.5 shrink-0 text-accent" />
+      {skipped ? (
+        <CircleMinus aria-hidden="true" className="mt-px size-3.5 shrink-0 text-icon" />
       ) : (
         <CircleCheck aria-hidden="true" className="mt-px size-3.5 shrink-0 text-icon" />
       )}
       <span className="flex min-w-0 flex-col">
-        <span className="font-semibold">{headline}</span>
-        {detail && <span className="text-muted">{detail}</span>}
+        <span className="font-semibold">{skipped ? `${label} not tested` : `${label} works`}</span>
+        <span className="text-muted">{skipped ? skippedReason(c.reason) : c.detail}</span>
       </span>
     </li>
   );
 }
 
-/** The fields a test would not see: anything that differs from the saved profile. */
-const changed = (a: Form, b: Form) => (Object.keys(a) as (keyof Form)[]).some((k) => k !== "replaceSecret" && a[k] !== b[k]);
+const TRANSPORT_NAME: Record<Transport, string> = { amqp: "AMQP", websockets: "AMQP over WebSockets" };
 
 /** Add or edit a connection. An edit waits for the saved list so it never starts from an empty form. */
 export function ProfileSheet({ profileId, initialAuth }: { profileId: string | null; initialAuth?: AuthKind }) {
@@ -99,13 +103,23 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
   const { closeSheet, conn } = useShell();
   const editing = !!profile;
   const formId = useId();
-  const [saved] = useState<Form>(() => initial(profile, initialAuth));
-  const [f, setF] = useState<Form>(saved);
+  const [f, setF] = useState<Form>(() => initial(profile, initialAuth));
   const [errors, setErrors] = useState<Errors>({});
   const [confirmDelete, setConfirmDelete] = useState(false);
   const save = useSaveProfile();
   const del = useDeleteProfile();
-  const test = useTestProfile();
+  const test = useTestDraft();
+  // The result lives here, not in the mutation: the mutation is reset as soon as it settles, so the draft (and a
+  // typed connection string in it) does not stay in its `variables`.
+  const [tested, setTested] = useState<{ report: ConnectionReport } | { error: EngineError } | null>(null);
+  // Bumped by every edit: a result that arrives for an older form is dropped.
+  const formVersion = useRef(0);
+  const signingIn = useSigningIn();
+  const resultBox = useRef<HTMLDivElement>(null);
+  // A result that has just arrived is brought into view, as little as it takes.
+  useEffect(() => {
+    if (tested) resultBox.current?.scrollIntoView({ block: "nearest" });
+  }, [tested]);
   const account = useAccount();
   // Signed in, a new Entra connection picks its namespace from a list; the typed fields stay one click away.
   const picker = !editing && f.auth === "entra" && !!account.data;
@@ -131,6 +145,10 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
     // The list puts its keyboard position on the picked row when it gains focus.
     else if (target === "list") pickerBox.current?.querySelector<HTMLElement>('[role="listbox"]')?.focus();
   }, [picked, choosing]);
+  useEffect(() => {
+    formVersion.current++;
+    setTested(null); // a result never describes settings the form no longer has
+  }, [f]);
   const set = <K extends keyof Form>(k: K, v: Form[K]) => setF((x) => ({ ...x, [k]: v }));
   // Typing in the Namespace or Tenant field makes the values typed ones: they are no longer "what was picked".
   const typed = (k: "namespace" | "tenant", v: string) => {
@@ -160,6 +178,9 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
   useEffect(() => {
     if (lastAccount.current === accountId) return;
     lastAccount.current = accountId;
+    // A test result is about the account it ran with; one still running is dropped too.
+    formVersion.current++;
+    setTested(null);
     setBrowsedTenant(null);
     setChoosing(true);
     if (hasPick.current) dropPick();
@@ -167,7 +188,6 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
     // (Editing keeps the profile's own tenant.)
     else if (!editing && !tenantTypedNow.current) setF((x) => ({ ...x, tenant: "" }));
   }, [accountId, editing]);
-  const dirty = editing && changed(f, saved);
   const hasProxy = f.proxy.trim() !== "";
   const transport: Transport = hasProxy ? "websockets" : f.transport; // a proxy carries AMQP over WebSockets
   const secretMissing =
@@ -186,6 +206,17 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
           : !bound.same_account
             ? `This connection uses a different account, ${bound.user_principal}. Sign in with that account to use it.`
             : null;
+  // Signing in again with the same account flips the bound sign-in's `live` flag: a result from before it is stale.
+  const boundLive = bound?.live;
+  const lastLive = useRef(boundLive);
+  useEffect(() => {
+    if (lastLive.current === boundLive) return;
+    lastLive.current = boundLive;
+    formVersion.current++;
+    setTested(null);
+  }, [boundLive]);
+  // An edited Entra profile whose sign-in record is gone: a test has no sign-in to use until it is saved.
+  const signInGone = editing && profile.auth.kind === "entra" && profile.bound_sign_in == null;
   // The tenant an edited Entra profile lives in, and its name when the tenant list has it.
   const savedTenant = editing ? profileTenant(profile) : null;
   const tenants = useTenants(savedTenant !== null);
@@ -213,11 +244,9 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
     focusNext.current = "change";
   }
 
-  async function onSave() {
-    const e = validate();
-    setErrors(e);
-    if (Object.keys(e).length) return;
-    const draft: ProfileDraft = {
+  /** What the form says now: Save and Test send the same draft. A stored connection string stays `null`. */
+  function toDraft(): ProfileDraft {
+    return {
       id: profile?.id ?? null,
       name: f.name.trim(),
       auth:
@@ -230,8 +259,30 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
       proxy: f.proxy.trim() || null,
       pinned_entities: f.pins.split("\n").map((s) => s.trim()).filter(Boolean),
     };
+  }
+
+  function runTest() {
+    // As Save: a form that can't make a draft says why, under the fields.
+    const e = validate();
+    setErrors(e);
+    if (Object.keys(e).length) return;
+    const version = formVersion.current;
+    const settle = (r: { report: ConnectionReport } | { error: EngineError }) => {
+      if (version === formVersion.current) setTested(r);
+    };
+    test.mutate(toDraft(), {
+      onSuccess: (report) => settle({ report }),
+      onError: (error) => settle({ error: error as EngineError }),
+      onSettled: () => test.reset(),
+    });
+  }
+
+  async function onSave() {
+    const e = validate();
+    setErrors(e);
+    if (Object.keys(e).length) return;
     try {
-      const result = await save.mutateAsync(draft);
+      const result = await save.mutateAsync(toDraft());
       setF((x) => ({ ...x, connectionString: "" }));
       save.reset(); // drops the draft, and the connection string in it, from the mutation state
       closeSheet();
@@ -277,18 +328,12 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
             </>
           ) : (
             <>
-              {dirty && <p id={`${formId}-test-hint`} className="m-0 text-11 text-muted">Save to test these changes.</p>}
+              {signingIn && <p id={`${formId}-test-hint`} className="m-0 text-11 text-muted">Finish signing in to test.</p>}
               <div className="flex gap-2">
                 {editing && <Button variant="quiet" onClick={() => setConfirmDelete(true)}>Delete…</Button>}
-                {editing && (
-                  <Button
-                    onClick={() => test.mutate(profile.id)}
-                    disabled={test.isPending || dirty}
-                    aria-describedby={dirty ? `${formId}-test-hint` : undefined}
-                  >
-                    {test.isPending ? "Testing…" : "Test connection"}
-                  </Button>
-                )}
+                <Button onClick={runTest} disabled={test.isPending || signingIn} aria-describedby={signingIn ? `${formId}-test-hint` : undefined}>
+                  {test.isPending ? "Testing…" : "Test connection"}
+                </Button>
                 <div className="flex-1" />
                 <Button variant="quiet" onClick={closeSheet}>Cancel</Button>
                 <Button variant="primary" type="submit" form={formId} disabled={save.isPending}>{save.isPending ? "Saving…" : "Save"}</Button>
@@ -515,21 +560,32 @@ function ProfileForm({ profile, initialAuth }: { profile: Profile | undefined; i
           {(ids) => <Textarea {...ids} mono value={f.pins} onChange={(e) => set("pins", e.target.value)} />}
         </Field>
 
-        {test.data && (
-          <div className="flex flex-col gap-1.5 border-t border-line pt-3">
-            <p className="m-0 text-11 text-muted">Tested with saved settings.</p>
-            <ul aria-label="Connection test" className="m-0 flex list-none flex-col gap-1 p-0">
-              <CheckLine label="Management" c={test.data.management} />
-              <CheckLine label="Messaging" c={test.data.messaging} />
-            </ul>
-          </div>
-        )}
-        {test.error && (
-          <p className="m-0 flex items-start gap-1.5 border-t border-line pt-3 text-12">
-            <CircleAlert aria-hidden="true" className="mt-px size-3.5 shrink-0 text-accent" />
-            <span>{sentence(test.error.message)}</span>
-          </p>
-        )}
+        {/* Always there, so a result that lands in it is announced; empty it takes no room (it cancels the form's gap). */}
+        <div ref={resultBox} role="status" className={tested ? "flex flex-col gap-2 border-t border-line pt-3" : "-mt-4"}>
+          {tested &&
+            ("report" in tested ? (
+              <>
+                <p className="m-0 text-11 text-muted">
+                  Tested <span className="font-mono" data-selectable>{tested.report.host}</span> as {tested.report.auth}, {TRANSPORT_NAME[tested.report.transport]}.
+                </p>
+                <ul aria-label="Connection test" className="m-0 flex list-none flex-col gap-2 p-0">
+                  <CheckLine label="Management" c={tested.report.management} auth={f.auth} />
+                  <CheckLine label="Messaging" c={tested.report.messaging} auth={f.auth} />
+                </ul>
+              </>
+            ) : (
+              <Problem
+                role="alert"
+                title="Couldn't test the connection"
+                body={
+                  <>
+                    {sentence(tested.error.message)}
+                    {signInGone && account.data != null && tested.error.kind === "not_signed_in" && " Save the connection to use your current sign-in, then test again."}
+                  </>
+                }
+              />
+            ))}
+        </div>
       </form>
     </Sheet>
   );

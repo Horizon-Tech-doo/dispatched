@@ -1,8 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
-import { commands, keys, useEntities, type EntityCounts } from "@/engine";
+import { commands, keys, useEntities, type EntityCounts, type PeekView } from "@/engine";
+import { formatNumber } from "@/ui";
 import { useShell } from "../context";
 import { splitSubscriptionId } from "../entityId";
-import type { EntityKind, OpenTab, SubTabId } from "../state";
+import { formatIsoDuration } from "../duration";
+import type { EntityKind, EntityTab, SubTabId } from "../state";
 
 export interface SubTabDef {
   id: SubTabId;
@@ -18,7 +20,7 @@ const DEFS: Record<SubTabId, SubTabDef> = {
   "transfer-dlq": { id: "transfer-dlq", label: "Transfer DLQ", description: "Messages that failed to forward to another entity.", count: (c) => ({ value: c.transfer_dead_letter, attention: true }) },
   scheduled: { id: "scheduled", label: "Scheduled", description: "Messages waiting for their scheduled enqueue time.", count: (c) => ({ value: c.scheduled }) },
   deferred: { id: "deferred", label: "Deferred", description: "Messages a receiver set aside to process later." },
-  sessions: { id: "sessions", label: "Sessions", description: "Sessions and their state, for session-enabled entities." },
+  sessions: { id: "sessions", label: "Sessions", description: "Sessions and their message counts, for session-enabled entities." },
   rules: { id: "rules", label: "Rules", description: "Filter rules that decide which messages reach this subscription." },
   listener: { id: "listener", label: "Listener", description: "New messages as they arrive." },
 };
@@ -31,19 +33,47 @@ export function subTabsFor(kind: EntityKind): SubTabDef[] {
   return ids.map((id) => DEFS[id]);
 }
 
+/** The peek view a sub-tab shows; null for sub-tabs that are not message lists. */
+export const VIEW_OF: Partial<Record<SubTabId, PeekView>> = {
+  messages: "active",
+  "dead-letter": "dead-letter",
+  "transfer-dlq": "transfer-dead-letter",
+  scheduled: "scheduled",
+  deferred: "deferred",
+};
+export const viewOf = (sub: SubTabId): PeekView | null => VIEW_OF[sub] ?? null;
+
+/** A view's name inside a sentence ("End of the dead-letter queue", "Can't read the scheduled messages"). */
+export const VIEW_LABEL: Record<PeekView, string> = {
+  active: "active messages",
+  "dead-letter": "dead-letter queue",
+  "transfer-dead-letter": "transfer dead-letter queue",
+  scheduled: "scheduled messages",
+  deferred: "deferred messages",
+};
+
 /** A subscription's tab id is `${topic}/subscriptions/${name}`. */
 export const splitSubscription = splitSubscriptionId;
 
-const iso = (d: string | null) => {
-  const m = d?.match(/^PT(?:(\d+)M)?(?:(\d+)S)?$/);
-  if (!m) return d;
-  const min = Number(m[1] ?? 0), sec = Number(m[2] ?? 0);
-  return min && !sec ? `${min} min` : min ? `${min} min ${sec} s` : `${sec} s`;
-};
+const iso = (d: string | null) => (d ? (formatIsoDuration(d) ?? d) : d);
 
 /** The sub-tab to show: a persisted one that does not apply to this kind of entity falls back to Overview. */
 export function validSubTab(kind: EntityKind, subTab: SubTabId): SubTabId {
   return subTabsFor(kind).some((d) => d.id === subTab) ? subTab : "overview";
+}
+
+/** The last counts seen for each entity this session, so a tab that is loading its counts again holds the room they
+ *  took last time. (Kept here, not in the query cache: that is empty exactly when a count is loading.) */
+const seenCounts = new Map<string, EntityCounts>();
+export const countsKey = (profileId: string | null, entity: string) => `${profileId ?? ""}|${entity}`;
+export const rememberCounts = (key: string, counts: EntityCounts) => void seenCounts.set(key, counts);
+export const recallCounts = (key: string): EntityCounts | null => seenCounts.get(key) ?? null;
+export const forgetCounts = () => seenCounts.clear();
+
+/** Room (in digit widths) a sub-tab's loading count holds: what its last count took, else three. */
+export function countPlaceholderCh(def: SubTabDef, last: EntityCounts | null): number {
+  const c = last && def.count ? def.count(last) : null;
+  return c ? formatNumber(c.value).length : 3;
 }
 
 export interface EntityInfo {
@@ -53,7 +83,7 @@ export interface EntityInfo {
   parent?: string;
 }
 
-export function useEntityInfo(tab: OpenTab): EntityInfo {
+export function useEntityInfo(tab: EntityTab): EntityInfo {
   const { conn } = useShell();
   const entities = useEntities(conn.profileId);
   const sub = tab.kind === "subscription" ? splitSubscription(tab.id) : null;

@@ -10,7 +10,20 @@ const onScreen = async (page: Page, el: Locator) => {
   return box != null && vp != null && box.y >= 0 && box.x >= 0 && box.y + box.height <= vp.height && box.x + box.width <= vp.width;
 };
 
-export const shots: {
+/** A connected logistics workbench with one entity tab open on `subTab` (drawer closed, so the view has the room). */
+const seedTab = (id: string, kind: "queue" | "topic" | "subscription", subTab: string, scenario = "default", extra: Record<string, unknown> = {}, profile = "p-logistics") =>
+  `/?scenario=${scenario}&autoconnect=${profile}&seed=${encodeURIComponent(
+    JSON.stringify({
+      ...extra,
+      [`shell:${profile}`]: {
+        tabs: [{ id, kind, subTab }], activeTab: id, expanded: ["group:queues", "group:topics"], selected: null,
+        layout: { treeSize: 18, drawerOpen: false, drawerSize: 18, drawerTab: "activity" },
+      },
+    }),
+  )}`;
+const peekStatus = (p: Page) => p.getByRole("status", { name: "Peek status" });
+
+type Shot = {
   name: string;
   path: string;
   scroll?: boolean;
@@ -21,7 +34,511 @@ export const shots: {
   holds?: (page: Page) => Locator;
   /** Capture the viewport only; for entries whose transient UI a full-page resize could dismiss. */
   viewportOnly?: boolean;
-}[] = [
+};
+
+const TRACKING = "shipment-events/subscriptions/tracking-sync";
+const DETAIL_VIEW = () => seedTab(TRACKING, "subscription", "dead-letter");
+/** Select the grid's `row`-th data row (0-based) and open the detail pane with Enter, then wait for its body. */
+const openRow = async (page: Page, row: number, body: string | RegExp = "Body") => {
+  await peekStatus(page).getByText(/100 messages/).waitFor();
+  await page.locator("[data-row-id]").nth(row).click();
+  await page.getByRole("grid").press("Enter");
+  await page.getByRole("region", { name: body }).first().waitFor();
+};
+
+/** Read from the end, select the row `up` rows above the newest and open the pane on it. */
+const openFromEnd = async (page: Page, up: number) => {
+  await peekStatus(page).getByText(/100 messages/).waitFor();
+  await page.getByRole("radio", { name: "End" }).click();
+  await peekStatus(page).getByText("Last 100 messages").waitFor();
+  await page.getByRole("grid").focus();
+  await page.keyboard.press("End");
+  for (let i = 0; i < up; i++) await page.keyboard.press("ArrowUp");
+  await page.keyboard.press("Enter");
+};
+
+/** The message detail pane. The mock's bodies by position: row 0 is binary (not UTF-8), 1 JSON, 2 XML, 3 text. */
+function detailShots(): Shot[] {
+  const pane = (p: Page) => p.getByRole("region", { name: /^Message \d+$/ });
+  return [
+    { name: "message-detail-json", path: DETAIL_VIEW(), prepare: (p) => openRow(p, 1) },
+    { name: "message-detail-xml", path: DETAIL_VIEW(), prepare: (p) => openRow(p, 2) },
+    { name: "message-detail-hex", path: DETAIL_VIEW(), prepare: (p) => openRow(p, 0, "Hex") },
+    {
+      name: "message-detail-properties",
+      path: DETAIL_VIEW(),
+      prepare: async (p) => {
+        await openRow(p, 1);
+        await pane(p).getByRole("tab", { name: "Properties" }).click();
+        await pane(p).getByRole("table", { name: "Custom properties" }).waitFor();
+      },
+    },
+    {
+      // The newest dead letters of tracking-sync: 48213 is a 5 MiB binary cut to a few thousand rows, 48212 a 6 MiB log cut the
+      // same way, 48211 has no body.
+      name: "message-detail-truncated",
+      path: DETAIL_VIEW(),
+      prepare: async (p) => {
+        await openFromEnd(p, 0);
+        await p.getByText(/^Showing the first .* of 5\.0 MiB/).waitFor();
+      },
+    },
+    {
+      name: "message-detail-text-truncated",
+      path: DETAIL_VIEW(),
+      prepare: async (p) => {
+        await openFromEnd(p, 1);
+        await p.getByText(/^Showing the first .* of 6\.0 MiB/).waitFor();
+      },
+    },
+    {
+      name: "message-detail-empty",
+      path: DETAIL_VIEW(),
+      prepare: async (p) => {
+        await openFromEnd(p, 2);
+        await p.getByText("Empty body (0 bytes)").waitFor();
+      },
+    },
+    {
+      name: "message-detail-none",
+      path: DETAIL_VIEW(),
+      prepare: async (p) => {
+        await peekStatus(p).getByText(/100 messages/).waitFor();
+        // The pane is open (Enter on a row did it) but nothing is selected: Peek again reads the view anew and drops the selection.
+        await p.locator("[data-row-id]").nth(1).click();
+        await p.getByRole("grid").press("Enter");
+        await p.getByRole("region", { name: "Body" }).first().waitFor();
+        await p.getByRole("button", { name: "Peek again" }).click();
+        await p.getByRole("heading", { name: "No message selected" }).waitFor();
+      },
+    },
+    {
+      // An active view: the Body preview column is on, and the pane sits beside it.
+      name: "message-detail-active",
+      path: seedTab("customs-docs", "queue", "messages"),
+      prepare: (p) => openRow(p, 1),
+    },
+    {
+      name: "message-detail-gone",
+      path: seedTab(TRACKING, "subscription", "dead-letter", "message-gone"),
+      prepare: async (p) => {
+        await openRow(p, 1, /^Message \d+$/);
+        await p.getByRole("heading", { name: "This message is no longer in the dead-letter queue" }).waitFor();
+      },
+    },
+  ];
+}
+
+/** The export sheet and the Jobs tab. */
+function exportShots(): Shot[] {
+  const INVOICES = (scenario = "default") => seedTab("invoice-generate", "queue", "dead-letter", scenario);
+  const sheet = (p: Page) => p.getByRole("dialog", { name: "Export messages" });
+  const openExport = async (page: Page, item: string | RegExp) => {
+    await page.getByRole("button", { name: "Export", exact: true }).click();
+    await page.getByRole("menuitem", { name: item }).click();
+    await sheet(page).waitFor();
+  };
+  const jobs = (p: Page) => p.getByRole("region", { name: "Jobs and activity" });
+  /** Export the whole view and wait for the job's row. */
+  const exportAll = async (page: Page) => {
+    await openExport(page, "Export all…");
+    await sheet(page).getByRole("button", { name: /^Export 37 messages…/ }).click();
+    await jobs(page).getByRole("listitem").waitFor();
+  };
+  /** Apply a "Body contains" filter through the filter bar. */
+  const filterBody = async (page: Page, text: string) => {
+    await page.getByRole("button", { name: "Filter" }).click();
+    const bar = page.getByRole("search", { name: "Message filter" });
+    await bar.getByLabel("Body contains").fill(text);
+    await bar.getByLabel("Body contains").press("Enter");
+    await peekStatus(page).getByText(/matching messages? · scanned/).waitFor();
+  };
+  const selectRows = async (page: Page, n: number) => {
+    await page.getByRole("grid").focus();
+    await page.keyboard.press("Home");
+    for (let i = 1; i < n; i++) await page.keyboard.press("Shift+ArrowDown");
+  };
+  return [
+    {
+      // Three rows selected, so both scopes are offered.
+      name: "export-sheet",
+      path: INVOICES(),
+      ready: (p) => peekStatus(p).getByText(/37 messages/),
+      prepare: async (page) => {
+        await selectRows(page, 3);
+        await openExport(page, /^Export 3 selected/);
+      },
+      holds: sheet,
+      viewportOnly: true,
+    },
+    {
+      // A file chosen, then the request refused by the engine: the file is kept and named.
+      name: "export-sheet-file-chosen",
+      path: INVOICES("export-refused"),
+      ready: (p) => peekStatus(p).getByText(/37 messages/),
+      prepare: async (page) => {
+        await openExport(page, "Export all…");
+        await sheet(page).getByRole("button", { name: /^Export 37 messages…/ }).click();
+        await sheet(page).getByRole("alert").waitFor();
+        await sheet(page).getByRole("button", { name: "Choose another file" }).waitFor();
+      },
+      holds: sheet,
+      viewportOnly: true,
+    },
+    {
+      name: "jobs-running",
+      path: INVOICES("export-slow"),
+      ready: (p) => peekStatus(p).getByText(/37 messages/),
+      prepare: async (page) => {
+        await exportAll(page);
+        // Let a few messages through so the bar and the count show progress.
+        await jobs(page).getByText(/^([3-9]|\d\d) of 37$/).waitFor();
+      },
+    },
+    {
+      name: "jobs-done",
+      path: INVOICES(),
+      ready: (p) => peekStatus(p).getByText(/37 messages/),
+      prepare: async (page) => {
+        await exportAll(page);
+        await jobs(page).getByText("37 messages written", { exact: true }).waitFor();
+        await jobs(page).getByRole("button", { name: /^Show in/ }).waitFor();
+      },
+    },
+    {
+      // Four selected, two of them gone by the time the export reads them again.
+      name: "jobs-missing",
+      path: INVOICES("export-missing"),
+      ready: (p) => peekStatus(p).getByText(/37 messages/),
+      prepare: async (page) => {
+        await selectRows(page, 4);
+        await openExport(page, /^Export 4 selected/);
+        await sheet(page).getByRole("button", { name: "Export 4 messages…" }).click();
+        await jobs(page).getByText("2 selected messages were no longer there").waitFor();
+      },
+    },
+    {
+      // A filter, so no total: no bar fill, what was written and how many were examined.
+      name: "jobs-unknown-total",
+      path: INVOICES("export-slow"),
+      ready: (p) => peekStatus(p).getByText(/37 messages/),
+      prepare: async (page) => {
+        await filterBody(page, "SHP");
+        await openExport(page, "Export all…");
+        await sheet(page).getByRole("button", { name: "Export messages…" }).click();
+        await jobs(page).getByText(/ written · .* scanned$/).waitFor();
+      },
+    },
+    {
+      name: "jobs-cancelled",
+      path: INVOICES("export-slow"),
+      ready: (p) => peekStatus(p).getByText(/37 messages/),
+      prepare: async (page) => {
+        await exportAll(page);
+        await jobs(page).getByText(/^([3-9]|\d\d) of 37$/).waitFor();
+        await jobs(page).getByRole("button", { name: /^Cancel Export/ }).click();
+        await jobs(page).getByText(/^Cancelled after \d+ of 37\. No file was written\.$/).waitFor();
+      },
+    },
+    {
+      name: "jobs-failed",
+      path: INVOICES("export-fails"),
+      ready: (p) => peekStatus(p).getByText(/37 messages/),
+      prepare: async (page) => {
+        await exportAll(page);
+        await jobs(page).getByText("Export failed").waitFor();
+        await jobs(page).getByRole("button", { name: "Try again" }).waitFor();
+      },
+    },
+    {
+      // The drawer at a narrow window: the row stacks (title, bar, numbers and action).
+      name: "jobs-narrow",
+      path: INVOICES("export-slow"),
+      ready: (p) => peekStatus(p).getByText(/37 messages/),
+      prepare: async (page) => {
+        await page.setViewportSize({ width: 640, height: 800 });
+        await exportAll(page);
+        await jobs(page).getByText(/^([3-9]|\d\d) of 37$/).waitFor();
+      },
+    },
+  ];
+}
+
+/** The Overview sub-tab: counts, addresses and every property the service reports. */
+function overviewShots(): Shot[] {
+  const counts = (p: Page) => p.getByRole("region", { name: "Counts" });
+  return [
+    { name: "overview-queue", path: seedTab("invoice-generate", "queue", "overview"), ready: (p) => counts(p).getByText("1,284") },
+    {
+      name: "overview-subscription",
+      path: seedTab("shipment-events/subscriptions/tracking-sync", "subscription", "overview"),
+      ready: (p) => counts(p).getByText("3,417"),
+    },
+    { name: "overview-topic", path: seedTab("shipment-events", "topic", "overview"), ready: (p) => p.getByRole("table", { name: "Subscriptions" }).getByText("tracking-sync") },
+    {
+      // Entra: no connection string, and the button says why.
+      name: "overview-entra",
+      path: seedTab("invoice-generate", "queue", "overview", "default", {}, "p-logistics-dev"),
+      ready: (p) => p.getByText(/Entra ID connections have no connection string/),
+    },
+    {
+      // Counts the service could only give by peeking: `~N`.
+      name: "overview-counts-approx",
+      path: seedTab("invoice-generate", "queue", "overview", "counts-approx"),
+      ready: (p) => counts(p).getByText("~1,284"),
+    },
+    {
+      // Peeking stopped at its cap: `~N+`.
+      name: "overview-counts-capped",
+      path: seedTab("invoice-generate", "queue", "overview", "counts-capped"),
+      ready: (p) => counts(p).getByText("~1,284+"),
+    },
+    {
+      // The service reported no counts: `?`, and the note says so.
+      name: "overview-unknown-counts",
+      path: seedTab("invoice-generate", "queue", "overview", "counts-unknown"),
+      ready: (p) => p.getByText(/The service didn't report counts/),
+    },
+    {
+      // The stored connection string belongs to another entity: the failure is explained next to the button.
+      name: "overview-copy-failed",
+      path: seedTab("invoice-generate", "queue", "overview", "copy-scoped"),
+      ready: (p) => counts(p).getByText("1,284"),
+      prepare: async (page) => {
+        const button = page.getByRole("button", { name: "Copy connection string" });
+        await expect(button).toBeEnabled();
+        await button.click();
+        await page.getByRole("alert").filter({ hasText: "Couldn't copy the connection string" }).waitFor();
+      },
+    },
+    {
+      // A narrow window: the addresses and the properties stack.
+      name: "overview-narrow",
+      path: seedTab("invoice-generate", "queue", "overview"),
+      ready: (p) => counts(p).getByText("1,284"),
+      prepare: async (page) => {
+        await page.setViewportSize({ width: 640, height: 800 });
+        await counts(page).waitFor();
+      },
+    },
+  ];
+}
+
+/** The Sessions and Rules sub-tabs. */
+function sessionsAndRulesShots(): Shot[] {
+  return [
+    {
+      name: "sessions",
+      path: seedTab("returns-intake", "queue", "sessions"),
+      ready: (p) => p.getByRole("row", { name: "RMA-1004" }),
+      prepare: async (p) => {
+        await p.getByRole("row", { name: "RMA-1004" }).click();
+        await p.getByRole("grid", { name: "Sessions" }).focus();
+      },
+    },
+    {
+      // The service listed no sessions: they come from the tally alone, and none is marked as listed.
+      name: "sessions-broker-empty",
+      path: seedTab("returns-intake", "queue", "sessions", "sessions-empty"),
+      ready: (p) => p.getByRole("row", { name: "RMA-1004" }),
+    },
+    {
+      // The service call failed and the tally was cut short: counts are lower bounds and sessions may be missing.
+      name: "sessions-tally-cut",
+      path: seedTab("returns-intake", "queue", "sessions", "sessions-cut"),
+      ready: (p) => p.getByRole("row", { name: "RMA-1004" }),
+    },
+    {
+      name: "sessions-none",
+      path: seedTab("invoice-generate", "queue", "sessions"),
+      ready: (p) => p.getByRole("heading", { name: "This queue doesn't use sessions" }),
+    },
+    {
+      name: "rules",
+      path: seedTab(TRACKING, "subscription", "rules"),
+      ready: (p) => p.getByRole("listitem", { name: "priority" }),
+    },
+    {
+      // An unknown filter and a correlation filter that sets nothing.
+      name: "rules-odd",
+      path: seedTab("carrier-updates/subscriptions/eta-recalc", "subscription", "rules"),
+      ready: (p) => p.getByRole("listitem", { name: "unset" }),
+    },
+  ];
+}
+
+/** The Dashboard tab. */
+function dashboardShots(): Shot[] {
+  const path = (scenario = "default") =>
+    `/?scenario=${scenario}&autoconnect=p-logistics&seed=${encodeURIComponent(
+      JSON.stringify({
+        "shell:p-logistics": {
+          tabs: [{ id: "::dashboard", kind: "dashboard", subTab: "overview" }], activeTab: "::dashboard", expanded: ["group:queues", "group:topics"], selected: null,
+          layout: { treeSize: 18, drawerOpen: false, drawerSize: 18, drawerTab: "activity" },
+        },
+      }),
+    )}`;
+  const grid = (p: Page) => p.getByRole("grid", { name: "Dashboard" });
+  return [
+    {
+      // Sorted by dead letters, the default: the amber numbers lead.
+      name: "dashboard",
+      path: path(),
+      ready: (p) => grid(p).getByText("tracking-sync"),
+      prepare: async (p) => {
+        await p.keyboard.press("Shift"); // keyboard modality so :focus-visible matches
+        await grid(p).getByText("invoice-generate").click();
+      },
+    },
+    {
+      name: "dashboard-dlq-only",
+      path: path(),
+      ready: (p) => grid(p).getByText("tracking-sync"),
+      prepare: async (p) => {
+        await p.getByRole("radio", { name: /^With dead letters/ }).click();
+        await expect(grid(p).getByText("customs-docs")).toHaveCount(0);
+      },
+    },
+    {
+      // The identity can't list the namespace: pinned entities only, no counts, and no kind claimed for them (dashed glyph).
+      name: "dashboard-limited",
+      path: path("forbidden"),
+      ready: (p) => p.getByText(/pinned entities · Counts are unavailable/),
+    },
+    {
+      // The service reported no counts: `?` cells, and the status line counts the entities.
+      name: "dashboard-unknown-counts",
+      path: path("counts-unknown"),
+      ready: (p) => p.getByText(/entities with unknown counts/),
+    },
+    {
+      // Counts read by peeking: `~N`, and the status line says so.
+      name: "dashboard-counts-approx",
+      path: path("counts-approx"),
+      ready: (p) => grid(p).getByText("~1,284"),
+    },
+  ];
+}
+
+/** Tree counts, highlight swatches, copy actions and the per-connection explorer options. */
+function explorerShots(): Shot[] {
+  const rules = [
+    { id: "r1", color: "rose", match: { kind: "count", count: "dead-letter", atLeast: 200 } },
+    { id: "r2", color: "blue", match: { kind: "name", pattern: "^invoice-" } },
+  ];
+  const path = (explorer: Record<string, unknown>, treeSize = 18) =>
+    `/?scenario=default&autoconnect=p-logistics&seed=${encodeURIComponent(
+      JSON.stringify({
+        "shell:p-logistics": {
+          tabs: [], activeTab: null, expanded: ["group:queues", "group:topics", "t:shipment-events"], selected: null,
+          layout: { treeSize, drawerOpen: false, drawerSize: 18, drawerTab: "activity" },
+          explorer,
+        },
+      }),
+    )}`;
+  const tree = (p: Page) => p.getByRole("tree", { name: "Namespace" });
+  const ready = (p: Page) => tree(p).getByRole("treeitem", { name: "tracking-sync" });
+  /** No row's content (name, counts, swatch) reaches past the tree's right edge (the tree is hidden from role queries while
+   *  a sheet is open, so it is found by its attributes). */
+  const fitsTheTree = async (page: Page) => {
+    const over = await page.locator('[role=tree][aria-label="Namespace"]').evaluate((t) => {
+      const edge = t.getBoundingClientRect().right - (t.offsetWidth - t.clientWidth); // minus a scrollbar
+      const out: string[] = [];
+      for (const row of t.querySelectorAll<HTMLElement>("[role=treeitem]"))
+        for (const el of row.querySelectorAll<HTMLElement>("*")) {
+          const r = el.getBoundingClientRect();
+          if (r.width > 0 && r.right > edge + 0.5) out.push(`${row.getAttribute("aria-label")}: ${Math.round((r.right - edge) * 10) / 10}px past the edge (${el.tagName.toLowerCase()})`);
+        }
+      return out;
+    });
+    expect(over, "row content past the tree's right edge").toEqual([]);
+  };
+  return [
+    {
+      // Rules mark returns-intake and tracking-sync (dead letters at 200 or more) and invoice-generate (by name); counts are
+      // active, scheduled and dead-letter. The swatch is the only colour apart from the amber dead-letter numbers.
+      name: "tree-highlights",
+      path: path({ counts: ["active", "scheduled", "dead-letter"], rules, openOn: "overview" }),
+      ready,
+      prepare: fitsTheTree,
+    },
+    {
+      name: "tree-menu-copy",
+      path: path({ counts: ["active", "dead-letter"], rules: [], openOn: "overview" }),
+      ready,
+      prepare: async (page) => {
+        await tree(page).getByRole("treeitem", { name: "invoice-generate" }).click({ button: "right" });
+      },
+      holds: (p) => p.getByRole("menu"),
+      viewportOnly: true,
+    },
+    {
+      // Two rules, the second with a pattern that does not parse: the sheet says why and Save waits.
+      name: "explorer-options",
+      path: path({
+        counts: ["active", "scheduled", "dead-letter"],
+        rules: [rules[0], { id: "r3", color: "violet", match: { kind: "name", pattern: "^(returns" } }],
+        openOn: "dead-letter",
+      }),
+      ready,
+      prepare: async (page) => {
+        await page.getByRole("button", { name: "Explorer options" }).click();
+        const sheet = page.getByRole("dialog", { name: "Explorer options for Logistics" });
+        await sheet.getByText(/Not a valid pattern/).waitFor();
+        await fitsTheTree(page);
+      },
+      holds: (p) => p.getByRole("dialog", { name: "Explorer options for Logistics" }),
+      viewportOnly: true,
+    },
+    {
+      // Valid rules: each says how many loaded entities it would mark; the checks show which counts are on.
+      name: "explorer-options-preview",
+      path: path({
+        counts: ["active", "scheduled", "dead-letter"],
+        rules: [rules[0], rules[1], { id: "r4", color: "green", match: { kind: "name", pattern: "-sync$" } }],
+        openOn: "overview",
+      }),
+      ready,
+      prepare: async (page) => {
+        await page.getByRole("button", { name: "Explorer options" }).click();
+        const sheet = page.getByRole("dialog", { name: "Explorer options for Logistics" });
+        await sheet.getByText("Matches 1 loaded entity").first().waitFor();
+      },
+      holds: (p) => p.getByRole("dialog", { name: "Explorer options for Logistics" }),
+      viewportOnly: true,
+    },
+    {
+      // The connection string went to the clipboard from Rust: the status bar says so, and nothing in the tree moved.
+      name: "copy-feedback",
+      path: path({ counts: ["active", "dead-letter"], rules: [], openOn: "overview" }),
+      ready,
+      prepare: async (page) => {
+        await tree(page).getByRole("treeitem", { name: /^invoice-generate/ }).click({ button: "right" });
+        await page.getByRole("menuitem", { name: "Copy connection string" }).click();
+        await page.getByRole("contentinfo").getByText(/^Copied the connection string for invoice-generate/).waitFor();
+      },
+    },
+    {
+      name: "copy-feedback-failed",
+      path: path({ counts: ["active", "dead-letter"], rules: [], openOn: "overview" }).replace("scenario=default", "scenario=copy-scoped"),
+      ready,
+      prepare: async (page) => {
+        await tree(page).getByRole("treeitem", { name: /^invoice-generate/ }).click({ button: "right" });
+        await page.getByRole("menuitem", { name: "Copy connection string" }).click();
+        await page.getByRole("contentinfo").getByRole("button", { name: "Details" }).waitFor();
+      },
+    },
+    {
+      // A narrow tree: counts never truncate, the names give way.
+      name: "tree-highlights-narrow",
+      path: path({ counts: ["active", "scheduled", "transfer-dlq", "dead-letter"], rules, openOn: "overview" }, 11),
+      ready,
+      prepare: fitsTheTree,
+    },
+  ];
+}
+
+export const shots: Shot[] = [
   { name: "catalogue", path: "/#catalogue", scroll: true },
   {
     name: "catalogue-tree",
@@ -38,7 +555,43 @@ export const shots: {
     prepare: async (page) => {
       await page.getByRole("heading", { name: "Grid" }).first().evaluate((el) => el.scrollIntoView({ block: "start" }));
       await page.keyboard.press("Shift"); // keyboard modality so :focus-visible matches
-      await page.getByRole("grid", { name: "Dead-lettered messages" }).first().focus();
+      // The light column's grid, so the focus ring shows in light here and in dark in catalogue-grid-sorted.
+      await page.getByRole("grid", { name: "Dead-lettered messages", exact: true }).last().focus();
+    },
+  },
+  {
+    name: "catalogue-grid-sorted",
+    path: "/#catalogue",
+    prepare: async (page) => {
+      await page.getByRole("heading", { name: "Grid" }).first().evaluate((el) => el.scrollIntoView({ block: "start" }));
+      // The catalogue renders a dark and a light copy side by side: sort both.
+      for (const grid of await page.getByRole("grid", { name: "Dead-lettered messages", exact: true }).all()) {
+        const seq = grid.getByRole("button", { name: "Seq" });
+        // By keyboard, so the pointer never hovers a header and :focus-visible still matches at the end.
+        await seq.focus();
+        await page.keyboard.press("Enter");
+        await page.keyboard.press("Enter");
+      }
+      await page.keyboard.press("Shift"); // keyboard modality so :focus-visible matches
+      await page.getByRole("grid", { name: "Dead-lettered messages", exact: true }).first().focus();
+    },
+  },
+  {
+    name: "catalogue-viewer",
+    path: "/#catalogue",
+    prepare: async (page) => {
+      await page.getByRole("heading", { name: "Viewer", exact: true }).first().evaluate((el) => el.scrollIntoView({ block: "start" }));
+      await page.keyboard.press("Shift"); // keyboard modality so :focus-visible matches
+      await page.getByRole("region", { name: "JSON body" }).first().focus();
+    },
+  },
+  {
+    name: "catalogue-viewer-states",
+    path: "/#catalogue",
+    prepare: async (page) => {
+      await page.getByRole("heading", { name: "Viewer states", exact: true }).first().evaluate((el) => el.scrollIntoView({ block: "start" }));
+      await page.keyboard.press("Shift"); // keyboard modality so :focus-visible matches
+      await page.getByRole("region", { name: "Long line" }).first().focus();
     },
   },
   {
@@ -134,7 +687,7 @@ export const shots: {
       await page.keyboard.press("Enter");
       await page.getByRole("tablist", { name: "Open entities" }).getByRole("tab", { name: /tracking-sync/ }).waitFor();
       await page.getByRole("tablist", { name: "Entity views" }).getByRole("tab", { name: /Dead-letter/ }).click();
-      await page.getByRole("heading", { name: "Dead-letter isn't available yet" }).waitFor();
+      await page.getByRole("status", { name: "Peek status" }).getByText(/100 messages/).waitFor();
     },
   },
   {
@@ -143,6 +696,42 @@ export const shots: {
       JSON.stringify({ "shell:p-logistics": { tabs: [{ id: "deleted-queue", kind: "queue", subTab: "overview" }], activeTab: "deleted-queue" } }),
     )}`,
     ready: (p) => p.getByRole("heading", { name: "This entity wasn't found" }),
+  },
+  {
+    // A narrow window: the entity's sub-tabs do not fit, so they scroll with the active one in view and a soft edge says there are more.
+    name: "subtabs-narrow",
+    path: seedTab("returns-intake", "queue", "listener"),
+    ready: (p) => p.getByRole("tablist", { name: "Entity views" }).getByRole("tab", { name: "Listener", selected: true }),
+    prepare: async (page) => {
+      await page.setViewportSize({ width: 640, height: 800 });
+      const views = page.getByRole("tablist", { name: "Entity views" });
+      await expect.poll(() => views.evaluate((l) => l.scrollLeft > 0 && l.hasAttribute("data-overflow-start"))).toBe(true);
+    },
+  },
+  {
+    // A middle tab: clear of the fade on both edges.
+    name: "subtabs-narrow-middle",
+    path: seedTab("returns-intake", "queue", "overview"),
+    ready: (p) => p.getByRole("tablist", { name: "Entity views" }).getByRole("tab", { name: "Overview", selected: true }),
+    prepare: async (page) => {
+      await page.setViewportSize({ width: 640, height: 800 });
+      const views = page.getByRole("tablist", { name: "Entity views" });
+      await views.getByRole("tab", { name: "Scheduled" }).click();
+      await expect(views.getByRole("tab", { name: "Scheduled", selected: true })).toBeVisible();
+      await expect.poll(() => views.evaluate((l) => l.hasAttribute("data-overflow-start") && l.hasAttribute("data-overflow-end"))).toBe(true);
+      // Let the strip finish scrolling to its place.
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+    },
+  },
+  {
+    name: "subtabs-narrow-start",
+    path: seedTab("returns-intake", "queue", "overview"),
+    ready: (p) => p.getByRole("tablist", { name: "Entity views" }).getByRole("tab", { name: "Overview", selected: true }),
+    prepare: async (page) => {
+      await page.setViewportSize({ width: 640, height: 800 });
+      const views = page.getByRole("tablist", { name: "Entity views" });
+      await expect.poll(() => views.evaluate((l) => l.hasAttribute("data-overflow-end"))).toBe(true);
+    },
   },
   ...(["palette", "palette-all", "palette-commands", "palette-empty"] as const).map((name) => ({
     name,
@@ -223,6 +812,19 @@ export const shots: {
     viewportOnly: true,
   },
   {
+    name: "sign-in-device-code",
+    path: "/?scenario=empty",
+    ready: (p) => p.getByRole("heading", { name: "Add a connection" }),
+    prepare: async (page) => {
+      await page.getByRole("button", { name: "Sign in with Entra ID" }).click();
+      const sheet = page.getByRole("dialog", { name: "Add connection" });
+      await sheet.getByRole("button", { name: "Use a device code instead" }).click();
+      await sheet.getByRole("button", { name: "Open sign-in page" }).waitFor();
+    },
+    holds: (p) => p.getByRole("dialog", { name: "Add connection" }),
+    viewportOnly: true,
+  },
+  {
     name: "profile-entra-signed-in",
     path: "/?scenario=empty",
     ready: (p) => p.getByRole("heading", { name: "Add a connection" }),
@@ -288,6 +890,37 @@ export const shots: {
     viewportOnly: true,
   },
   {
+    name: "profile-test-draft",
+    path: "/?scenario=empty",
+    ready: (p) => p.getByRole("heading", { name: "Add a connection" }),
+    prepare: async (page) => {
+      await page.getByRole("button", { name: "Add connection string" }).click();
+      const sheet = page.getByRole("dialog", { name: "Add connection" });
+      await sheet.getByLabel("Name", { exact: true }).fill("Orders production");
+      await sheet.getByLabel("Connection string").fill("Endpoint=sb://orders.servicebus.windows.net/;SharedAccessKeyName=reader;SharedAccessKey=c2VjcmV0");
+      await sheet.getByRole("button", { name: "Test connection" }).click();
+      await sheet.getByRole("status").getByText(/^Tested /).waitFor();
+    },
+    holds: (p) => p.getByRole("dialog", { name: "Add connection" }),
+    viewportOnly: true,
+  },
+  {
+    name: "profile-test-failed",
+    // One check failed (Management), so the other was skipped.
+    path: "/?scenario=forbidden",
+    ready: (p) => p.getByRole("list", { name: "Saved connections" }),
+    prepare: async (page) => {
+      await page.getByRole("button", { name: "Connection: Choose a connection" }).click();
+      await page.getByRole("menuitem", { name: "Manage connections…" }).click();
+      await page.getByRole("dialog", { name: "Connections" }).getByRole("button", { name: "Edit Logistics", exact: true }).click();
+      const sheet = page.getByRole("dialog", { name: "Edit Logistics", exact: true });
+      await sheet.getByRole("button", { name: "Test connection" }).click();
+      await sheet.getByText("Messaging not tested").waitFor();
+    },
+    holds: (p) => p.getByRole("dialog", { name: "Edit Logistics", exact: true }),
+    viewportOnly: true,
+  },
+  {
     name: "profile-edit-tenant",
     path: "/?scenario=tenant-sign-in",
     ready: (p) => p.getByRole("list", { name: "Saved connections" }),
@@ -344,7 +977,8 @@ export const shots: {
       await page.getByRole("dialog", { name: "Connections" }).getByRole("button", { name: "Edit Logistics", exact: true }).click();
       const sheet = page.getByRole("dialog", { name: "Edit Logistics", exact: true });
       await sheet.getByLabel("Proxy").fill("http://proxy.corp:8080");
-      await sheet.getByText("Save to test these changes.").waitFor();
+      await sheet.getByRole("button", { name: "Test connection" }).click();
+      await sheet.getByRole("status").getByText(/^Tested /).waitFor();
     },
     holds: (p) => p.getByRole("dialog", { name: "Edit Logistics", exact: true }),
     viewportOnly: true,
@@ -385,6 +1019,24 @@ export const shots: {
       await page.keyboard.press("Shift"); // keyboard modality so :focus-visible matches
       await page.keyboard.press("ControlOrMeta+,");
       await page.getByRole("dialog", { name: "Settings" }).getByText("Row height in the tree and grids.").waitFor();
+    },
+    holds: (p) => p.getByRole("dialog", { name: "Settings" }),
+    viewportOnly: true,
+  },
+  {
+    name: "settings-accounts",
+    // Two kept sign-ins: the current account's (used by two connections, one of them connected) and another
+    // account's whose token is gone.
+    path: "/?scenario=tenant-sign-in&autoconnect=p-logistics-dev",
+    ready: (p) => p.getByRole("button", { name: /^Connection: Logistics dev/ }),
+    prepare: async (page) => {
+      await page.keyboard.press("Shift"); // keyboard modality so :focus-visible matches
+      await page.keyboard.press("ControlOrMeta+,");
+      const sheet = page.getByRole("dialog", { name: "Settings" });
+      const row = sheet.getByRole("listitem", { name: "ops@contoso.example" });
+      await row.getByText(/Used by/).waitFor();
+      await row.getByRole("button", { name: "Sign out" }).click();
+      await row.getByText(/is connected and will disconnect/).waitFor();
     },
     holds: (p) => p.getByRole("dialog", { name: "Settings" }),
     viewportOnly: true,
@@ -463,6 +1115,145 @@ export const shots: {
     holds: (p) => p.getByRole("dialog", { name: "Updates" }),
     viewportOnly: true,
   },
+  {
+    name: "messages-dlq",
+    path: seedTab("shipment-events/subscriptions/tracking-sync", "subscription", "dead-letter"),
+    ready: (p) => peekStatus(p).getByText(/100 messages/),
+  },
+  {
+    name: "messages-active-sessions",
+    path: seedTab("returns-intake", "queue", "messages"),
+    ready: (p) => peekStatus(p).getByText(/48 messages/),
+  },
+  {
+    name: "messages-empty",
+    path: seedTab("label-print", "queue", "dead-letter"),
+    ready: (p) => p.getByRole("heading", { name: "No dead letters" }),
+  },
+  {
+    name: "messages-error",
+    path: seedTab("invoice-generate", "queue", "dead-letter", "peek-error"),
+    ready: (p) => p.getByRole("heading", { name: "Can't read the dead-letter queue" }),
+  },
+  {
+    name: "messages-from-end",
+    path: seedTab("shipment-events/subscriptions/tracking-sync", "subscription", "dead-letter"),
+    ready: (p) => peekStatus(p).getByText(/100 messages/),
+    prepare: async (page) => {
+      await page.getByRole("radio", { name: "End" }).click();
+      await peekStatus(page).getByText("Last 100 messages").waitFor();
+    },
+  },
+  {
+    name: "messages-sorted",
+    path: seedTab("invoice-generate", "queue", "dead-letter"),
+    ready: (p) => peekStatus(p).getByText(/37 messages/),
+    prepare: async (page) => {
+      // By keyboard, so the pointer never hovers a header.
+      await page.getByRole("grid").getByRole("button", { name: "Seq" }).focus();
+      await page.keyboard.press("Enter");
+      await page.keyboard.press("Enter");
+      await page.getByRole("columnheader", { name: /Seq/ }).and(page.locator('[aria-sort="descending"]')).waitFor();
+      await page.getByRole("grid").focus();
+    },
+  },
+  {
+    name: "messages-streaming",
+    path: seedTab("shipment-events/subscriptions/tracking-sync", "subscription", "dead-letter", "peek-slow", { ui: { peekSize: 1000 } }),
+    ready: (p) => peekStatus(p).getByText("500 of 1,000 · reading…"),
+  },
+  {
+    name: "messages-columns-menu",
+    path: seedTab("invoice-generate", "queue", "dead-letter"),
+    ready: (p) => peekStatus(p).getByText(/37 messages/),
+    prepare: async (page) => {
+      await page.getByRole("button", { name: "Columns" }).click();
+      await page.getByRole("menuitemcheckbox", { name: "Description" }).waitFor();
+    },
+    holds: (p) => p.getByRole("menu"),
+    viewportOnly: true,
+  },
+  {
+    name: "messages-filter",
+    path: seedTab("invoice-generate", "queue", "dead-letter"),
+    ready: (p) => peekStatus(p).getByText(/37 messages/),
+    prepare: async (page) => {
+      await page.getByRole("button", { name: "Filter" }).click();
+      const bar = page.getByRole("search", { name: "Message filter" });
+      await bar.getByLabel("Properties").fill("attempt >= 2");
+      await bar.getByLabel("Body contains").fill("held");
+      await bar.getByLabel("Body contains").press("Enter");
+      await peekStatus(page).getByText(/matching messages? · scanned 37/).waitFor();
+      // The pointer rests on nothing, and focus is in the grid, not on a field.
+      await page.getByRole("grid").focus();
+    },
+  },
+  {
+    name: "messages-filter-collapsed",
+    path: seedTab("invoice-generate", "queue", "dead-letter"),
+    ready: (p) => peekStatus(p).getByText(/37 messages/),
+    prepare: async (page) => {
+      await page.getByRole("button", { name: "Filter" }).click();
+      const bar = page.getByRole("search", { name: "Message filter" });
+      await bar.getByLabel("Properties").fill("attempt >= 2");
+      await bar.getByLabel("Body contains").fill("held");
+      await bar.getByLabel("Body contains").press("Enter");
+      await peekStatus(page).getByText(/matching messages? · scanned 37/).waitFor();
+      await bar.getByLabel("Body contains").press("Escape");
+      await page.getByRole("search", { name: "Message filter" }).waitFor({ state: "detached" });
+      await page.getByRole("grid").focus();
+    },
+  },
+  {
+    name: "messages-filter-json-session",
+    path: seedTab("returns-intake", "queue", "messages"),
+    ready: (p) => peekStatus(p).getByText(/48 messages/),
+    prepare: async (page) => {
+      // The session condition is set the way a user sets it: peek one session from the Sessions sub-tab.
+      await page.getByRole("tab", { name: "Sessions" }).click();
+      await page.getByRole("row", { name: "RMA-1010" }).click();
+      await page.getByRole("button", { name: "Peek messages" }).click();
+      await page.getByRole("button", { name: "Remove session RMA-1010" }).waitFor();
+      const bar = page.getByRole("search", { name: "Message filter" });
+      await bar.getByRole("radio", { name: "JSONPath" }).click();
+      await bar.getByLabel("JSONPath").fill("$.status");
+      await bar.getByLabel("Equals").fill("in_transit");
+      await bar.getByLabel("Equals").press("Enter");
+      await page.getByRole("button", { name: "Filter 2", exact: true }).waitFor();
+      await peekStatus(page).getByText(/matching messages? · scanned/).waitFor();
+      await page.getByRole("grid").focus();
+    },
+  },
+  {
+    name: "messages-filter-error",
+    path: seedTab("invoice-generate", "queue", "dead-letter"),
+    ready: (p) => peekStatus(p).getByText(/37 messages/),
+    prepare: async (page) => {
+      await page.getByRole("button", { name: "Filter" }).click();
+      const bar = page.getByRole("search", { name: "Message filter" });
+      await bar.getByLabel("Properties").fill("sys.Subject == 'x'");
+      await bar.getByText("Use = to compare.", { exact: true }).first().waitFor();
+    },
+  },
+  {
+    name: "messages-filter-empty",
+    path: seedTab("invoice-generate", "queue", "dead-letter"),
+    ready: (p) => peekStatus(p).getByText(/37 messages/),
+    prepare: async (page) => {
+      await page.getByRole("button", { name: "Filter" }).click();
+      const bar = page.getByRole("search", { name: "Message filter" });
+      await bar.getByLabel("Body contains").fill("no-such-text");
+      await bar.getByLabel("Body contains").press("Enter");
+      await page.getByRole("heading", { name: "No messages match this filter" }).waitFor();
+      await page.getByRole("grid").focus();
+    },
+  },
+  ...detailShots(),
+  ...exportShots(),
+  ...overviewShots(),
+  ...sessionsAndRulesShots(),
+  ...dashboardShots(),
+  ...explorerShots(),
 ];
 
 for (const colorScheme of ["dark", "light"] as const) {

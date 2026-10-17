@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { EngineError, type Profile } from "@/engine";
 import { renderShell } from "../test-utils";
 import { namespaceField } from "./ProfileSheet";
@@ -12,6 +12,13 @@ async function chooseMenuItem(user: ReturnType<typeof userEvent.setup>, trigger:
   await user.keyboard("{Enter}");
   await user.click(await screen.findByRole("menuitem", { name: item }));
 }
+
+/** The test result region once something has landed in it (it is always in the sheet, so it can announce). */
+const testResult = async (sheet: HTMLElement) => {
+  const status = within(sheet).getByRole("status");
+  await waitFor(() => expect(status).not.toBeEmptyDOMElement());
+  return status;
+};
 
 const CS = "Endpoint=sb://orders.servicebus.windows.net/;SharedAccessKeyName=reader;SharedAccessKey=c2VjcmV0";
 
@@ -92,7 +99,7 @@ describe("ProfileSheet", () => {
     expect(await within(sheet).findByText("Management works")).toBeInTheDocument();
     expect(within(sheet).getByText("Messaging works")).toBeInTheDocument();
     expect(within(sheet).getByText(/listed 4 queues/)).toBeInTheDocument();
-    expect(within(sheet).getByText("Tested with saved settings.")).toBeInTheDocument();
+    expect(within(sheet).getByRole("status")).toHaveTextContent("Tested sb-logistics-prod.servicebus.windows.net as SAS key reader, AMQP.");
     await user.click(within(sheet).getByRole("button", { name: "Delete…" }));
     await user.click(within(sheet).getByRole("button", { name: "Delete Logistics" }));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Edit Logistics" })).not.toBeInTheDocument());
@@ -158,6 +165,46 @@ describe("ProfileSheet", () => {
     expect(error.compareDocumentPosition(within(sheet).getByLabelText("Namespace")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(within(sheet).getByLabelText("Name").compareDocumentPosition(error) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
+  it("tests a new connection before it is saved and never shows the string again", async () => {
+    const user = userEvent.setup();
+    const { mock } = renderShell("empty");
+    await user.click(await screen.findByRole("button", { name: "Add connection string" }));
+    const sheet = await screen.findByRole("dialog", { name: "Add connection" });
+    await user.type(within(sheet).getByLabelText("Name"), "Orders");
+    await user.type(within(sheet).getByLabelText("Connection string"), CS);
+    await user.click(within(sheet).getByRole("button", { name: "Test connection" }));
+    expect(await testResult(sheet)).toHaveTextContent("Tested orders.servicebus.windows.net as SAS key reader, AMQP.");
+    expect(within(sheet).getByText(/Management works/)).toBeInTheDocument();
+    expect(mock.calls.some((c) => c.cmd === "profile_test_draft")).toBe(true);
+    expect(mock.calls.some((c) => c.cmd === "profile_save")).toBe(false);
+    expect(within(sheet).queryByText(/Save to test/)).toBeNull();
+    expect(document.body.textContent).not.toContain("c2VjcmV0");
+  });
+
+  it("says so when the sign-in page could not be opened", async () => {
+    const user = userEvent.setup();
+    const { mock } = renderShell("empty");
+    const invoke = mock.invoke.bind(mock);
+    mock.invoke = (async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "open_sign_in_page") throw new EngineError("invalid", "The sign-in page is not an https address, so it was not opened.");
+      return invoke(cmd, args);
+    }) as typeof mock.invoke;
+    await user.click(await screen.findByRole("button", { name: "Sign in with Entra ID" }));
+    const sheet = await screen.findByRole("dialog", { name: "Add connection" });
+    await user.click(within(sheet).getByRole("button", { name: "Use a device code instead" }));
+    await user.click(await within(sheet).findByRole("button", { name: "Open sign-in page" }));
+    expect(await within(sheet).findByText("Couldn't open the page. Open the address above.")).toBeInTheDocument();
+  });
+
+  it("device-code sign-in can open the sign-in page", async () => {
+    const user = userEvent.setup();
+    const { mock } = renderShell("empty");
+    await user.click(await screen.findByRole("button", { name: "Sign in with Entra ID" }));
+    const sheet = await screen.findByRole("dialog", { name: "Add connection" });
+    await user.click(within(sheet).getByRole("button", { name: "Use a device code instead" }));
+    await user.click(await within(sheet).findByRole("button", { name: "Open sign-in page" }));
+    expect(mock.calls.some((c) => c.cmd === "open_sign_in_page")).toBe(true);
+  });
 });
 
 describe("ProfileSheet details", () => {
@@ -186,18 +233,182 @@ describe("ProfileSheet details", () => {
     expect(within(sheet).queryByText("Stored in the system keychain.")).not.toBeInTheDocument();
   });
 
-  it("disables Test connection while the form differs from the saved profile", async () => {
+  it("tests an edit as edited, without saving it, and drops a result the form no longer matches", async () => {
     const user = userEvent.setup();
-    renderShell("default");
+    const { mock } = renderShell("default");
     const sheet = await openEdit(user, "Logistics");
     const test = within(sheet).getByRole("button", { name: "Test connection" });
     expect(test).toBeEnabled();
-    expect(within(sheet).queryByText("Save to test these changes.")).not.toBeInTheDocument();
+    await user.clear(within(sheet).getByLabelText("Name"));
+    await user.type(within(sheet).getByLabelText("Name"), "Logistics EU");
     await user.type(within(sheet).getByLabelText("Proxy"), "http://p:1");
-    expect(test).toBeDisabled();
-    expect(within(sheet).getByText("Save to test these changes.")).toBeInTheDocument();
-    await user.clear(within(sheet).getByLabelText("Proxy"));
     expect(test).toBeEnabled();
+    expect(within(sheet).queryByText(/Save to test/)).not.toBeInTheDocument();
+    await user.click(test);
+    expect(await testResult(sheet)).toHaveTextContent("AMQP over WebSockets");
+    const sent = mock.calls.find((c) => c.cmd === "profile_test_draft")!.args as { draft: { id: string; name: string; proxy: string; auth: { connection_string: string | null } } };
+    expect(sent.draft).toMatchObject({ id: "p-logistics", name: "Logistics EU", proxy: "http://p:1" });
+    expect(sent.draft.auth.connection_string).toBeNull(); // the engine uses the stored string
+    expect(mock.calls.some((c) => c.cmd === "profile_save")).toBe(false);
+    await user.type(within(sheet).getByLabelText("Proxy"), "0");
+    expect(within(sheet).getByRole("status")).toBeEmptyDOMElement();
+  });
+
+  it("tests an incomplete form by showing what is missing, like Save", async () => {
+    const user = userEvent.setup();
+    const { mock } = renderShell("empty");
+    await user.click(await screen.findByRole("button", { name: "Add connection string" }));
+    const sheet = await screen.findByRole("dialog", { name: "Add connection" });
+    const test = within(sheet).getByRole("button", { name: "Test connection" });
+    expect(test).toBeEnabled();
+    await user.click(test);
+    expect(within(sheet).getByText("Enter a name for this connection.")).toBeInTheDocument();
+    expect(within(sheet).getByText("Paste the namespace's connection string.")).toBeInTheDocument();
+    expect(mock.calls.some((c) => c.cmd === "profile_test_draft")).toBe(false);
+  });
+
+  it("shows a failed check as a problem with a next step and the raw message, and a skipped one as not tested", async () => {
+    const user = userEvent.setup();
+    renderShell("forbidden");
+    const sheet = await openEdit(user, "Logistics");
+    await user.click(within(sheet).getByRole("button", { name: "Test connection" }));
+    const status = await testResult(sheet);
+    expect(status).toHaveTextContent("Tested sb-logistics-prod.servicebus.windows.net as SAS key reader, AMQP.");
+    const alert = within(status).getByRole("alert");
+    expect(within(alert).getByText("Management failed")).toBeInTheDocument();
+    expect(within(alert).getByText("This key has no Manage right. Use a key whose policy includes Manage.")).toBeInTheDocument();
+    expect(within(alert).getByText(/access denied \(needs Manage\)/)).toHaveClass("font-mono");
+    expect(within(status).getByText("Messaging not tested")).toBeInTheDocument();
+    expect(within(status).getByText(/the Management check failed/)).toBeInTheDocument();
+  });
+
+  it("words the skipped check for the app, and shows other reasons as they come", async () => {
+    const user = userEvent.setup();
+    const { mock } = renderShell("forbidden");
+    const sheet = await openEdit(user, "Logistics");
+    expect(within(sheet).getByRole("status")).toBeEmptyDOMElement(); // there before any result, so a result is announced
+    await user.click(within(sheet).getByRole("button", { name: "Test connection" }));
+    const status = await testResult(sheet);
+    expect(within(status).getByText("No queue could be listed because the Management check failed. Pin an entity to test receive rights.")).toBeInTheDocument();
+    expect(status).not.toHaveTextContent("pass an entity");
+    // The other pinned reason, and an unknown one.
+    for (const [reason, shown] of [
+      ["no entity to probe; pass one", "No entity to test. Pin one to test receive rights."],
+      ["the namespace is paused", "The namespace is paused."],
+    ]) {
+      const invoke = mock.invoke.bind(mock);
+      mock.invoke = (async (cmd: string, args?: Record<string, unknown>) => {
+        const r = await invoke(cmd, args);
+        return cmd === "profile_test_draft" ? { ...(r as object), management: { status: "ok", detail: "listed 4 queues (Manage)" }, messaging: { status: "skipped", reason } } : r;
+      }) as typeof mock.invoke;
+      await user.type(within(sheet).getByLabelText("Proxy"), "x"); // a changed form clears the old result
+      await user.clear(within(sheet).getByLabelText("Proxy"));
+      await user.click(within(sheet).getByRole("button", { name: "Test connection" }));
+      await waitFor(() => expect(within(sheet).getByRole("status")).toHaveTextContent(shown));
+    }
+  });
+
+  it("drops a result when the connection's sign-in is signed in again", async () => {
+    const user = userEvent.setup();
+    const { mock, client } = renderShell("default");
+    await mock.invoke("sign_in", { tenant: null, deviceCode: false });
+    const sheet = await openEdit(user, "Logistics dev");
+    await user.click(within(sheet).getByRole("button", { name: "Test connection" }));
+    await testResult(sheet);
+    // Same account, same sign-in, but its `live` flag flips as the engine reports it.
+    const invoke = mock.invoke.bind(mock);
+    mock.invoke = (async (cmd: string, args?: Record<string, unknown>) => {
+      const r = await invoke(cmd, args);
+      return cmd === "profiles_list"
+        ? (r as { id: string; bound_sign_in: { live: boolean } | null }[]).map((p) => (p.bound_sign_in ? { ...p, bound_sign_in: { ...p.bound_sign_in, live: false } } : p))
+        : r;
+    }) as typeof mock.invoke;
+    await client.invalidateQueries({ queryKey: ["profiles"] });
+    await waitFor(() => expect(within(sheet).getByRole("status")).toBeEmptyDOMElement());
+  });
+
+  it("brings a new result into view, and drops it when the account changes", async () => {
+    const user = userEvent.setup();
+    const scroll = vi.spyOn(Element.prototype, "scrollIntoView");
+    renderShell("default");
+    const sheet = await openEdit(user, "Logistics dev");
+    await within(sheet).findByText(/Signed in as|Sign in with Entra ID/);
+    if (!within(sheet).queryByText(/Signed in as/)) await user.click(within(sheet).getByRole("button", { name: "Sign in with Entra ID" }));
+    await within(sheet).findByText(/Signed in as ops@contoso.example/);
+    await user.click(within(sheet).getByRole("button", { name: "Test connection" }));
+    const status = await testResult(sheet);
+    expect(status).toHaveTextContent("Entra ID");
+    expect(scroll).toHaveBeenCalledWith({ block: "nearest" });
+    await user.click(within(sheet).getByRole("button", { name: "Use another account" }));
+    await within(sheet).findByText(/Signed in as dev@fabrikam.example/);
+    expect(within(sheet).getByRole("status")).toBeEmptyDOMElement();
+    scroll.mockRestore();
+  });
+
+  it("keeps a result while the account stays the same", async () => {
+    const user = userEvent.setup();
+    const { client } = renderShell("default");
+    const sheet = await openEdit(user, "Logistics");
+    await user.click(within(sheet).getByRole("button", { name: "Test connection" }));
+    await testResult(sheet);
+    await client.invalidateQueries({ queryKey: ["account"] });
+    await client.invalidateQueries({ queryKey: ["profiles"] });
+    expect(within(sheet).getByRole("status")).not.toBeEmptyDOMElement();
+  });
+
+  it("disables Test while a sign-in is waiting and says why", async () => {
+    const user = userEvent.setup();
+    renderShell("empty");
+    await user.click(await screen.findByRole("button", { name: "Sign in with Entra ID" }));
+    const sheet = await screen.findByRole("dialog", { name: "Add connection" });
+    await user.click(within(sheet).getByRole("button", { name: "Sign in with Entra ID" }));
+    const test = within(sheet).getByRole("button", { name: "Test connection" });
+    expect(test).toBeDisabled();
+    expect(within(sheet).getByText("Finish signing in to test.")).toBeInTheDocument();
+    expect(test).toHaveAccessibleDescription("Finish signing in to test.");
+    await within(sheet).findByText(/Signed in as/);
+    expect(test).toBeEnabled();
+    expect(within(sheet).queryByText("Finish signing in to test.")).not.toBeInTheDocument();
+  });
+
+  it("does not keep the typed connection string in the test mutation", async () => {
+    const user = userEvent.setup();
+    const { client } = renderShell("empty");
+    await user.click(await screen.findByRole("button", { name: "Add connection string" }));
+    const sheet = await screen.findByRole("dialog", { name: "Add connection" });
+    await user.type(within(sheet).getByLabelText("Name"), "Orders");
+    await user.type(within(sheet).getByLabelText("Connection string"), CS);
+    await user.click(within(sheet).getByRole("button", { name: "Test connection" }));
+    await testResult(sheet);
+    await waitFor(() => expect(JSON.stringify(client.getMutationCache().getAll().map((m) => m.state))).not.toContain("c2VjcmV0"));
+  });
+
+  it("tells an edited Entra connection whose sign-in is gone to save first, when another account is signed in", async () => {
+    const user = userEvent.setup();
+    const { mock, client } = renderShell("tenant-sign-in");
+    await screen.findByRole("button", { name: /Connection: Choose a connection/ });
+    await mock.invoke("sign_in", { tenant: null, deviceCode: false }); // the other account becomes current
+    await mock.invoke("sign_out", { id: "oid-1" });
+    await client.invalidateQueries();
+    const sheet = await openEdit(user, "Northwind orders");
+    await within(sheet).findByText(/Signed in as dev@fabrikam.example/);
+    await user.click(within(sheet).getByRole("button", { name: "Test connection" }));
+    const alert = await within(sheet).findByRole("alert");
+    expect(within(alert).getByText("Couldn't test the connection")).toBeInTheDocument();
+    expect(within(alert).getByText(/Save the connection to use your current sign-in/)).toBeInTheDocument();
+  });
+
+  it("does not say to save when nobody is signed in", async () => {
+    const user = userEvent.setup();
+    const { mock, client } = renderShell("tenant-sign-in");
+    await screen.findByRole("button", { name: /Connection: Choose a connection/ });
+    await mock.invoke("sign_out", { id: "oid-1" });
+    await client.invalidateQueries();
+    const sheet = await openEdit(user, "Northwind orders");
+    await user.click(within(sheet).getByRole("button", { name: "Test connection" }));
+    const alert = await within(sheet).findByRole("alert");
+    expect(within(alert).getByText("Couldn't test the connection")).toBeInTheDocument();
+    expect(within(alert).queryByText(/Save the connection/)).not.toBeInTheDocument();
   });
 
   it("forces WebSockets while a proxy is set", async () => {
@@ -229,6 +440,19 @@ describe("ProfileSheet details", () => {
     expect(await within(sheet).findByText("Waiting for you to finish signing in…")).toBeInTheDocument();
     await user.click(within(sheet).getByRole("button", { name: "Copy code" }));
     expect(within(sheet).getByRole("button", { name: "Copied" })).toBeInTheDocument();
+  });
+
+  it("says Copied only after the clipboard took the code", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(navigator.clipboard, "writeText").mockRejectedValueOnce(new Error("denied"));
+    renderShell("empty");
+    await user.click(await screen.findByRole("button", { name: "Sign in with Entra ID" }));
+    const sheet = await screen.findByRole("dialog", { name: "Add connection" });
+    await user.click(within(sheet).getByRole("button", { name: "Use a device code instead" }));
+    await user.click(await within(sheet).findByRole("button", { name: "Copy code" }));
+    expect(within(sheet).getByRole("button", { name: "Copy code" })).toBeInTheDocument();
+    await user.click(within(sheet).getByRole("button", { name: "Copy code" }));
+    expect(await within(sheet).findByRole("button", { name: "Copied" })).toBeInTheDocument();
   });
 
   it("offers sign-in when editing an Entra connection and warns when the account is a different one", async () => {
@@ -555,7 +779,7 @@ describe("Entra discovery in the Add connection sheet", () => {
     await user.click(within(sheet).getByRole("button", { name: "Save" }));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Add connection" })).not.toBeInTheDocument());
     // It connects with the tenant's own sign-in; wait for the workbench before using the menu.
-    await within(await screen.findByRole("tree", { name: "Namespace" })).findByRole("treeitem", { name: /customs-docs/ });
+    await within(await screen.findByRole("tree", { name: /^Namespace(,| \(|$)/ })).findByRole("treeitem", { name: /customs-docs/ });
     await chooseMenuItem(user, /Connection: nw-orders NW/, "Manage connections…");
     await user.click(within(await screen.findByRole("dialog", { name: "Connections" })).getByRole("button", { name: "Edit nw-orders NW" }));
     const edit = await screen.findByRole("dialog", { name: "Edit nw-orders NW" });

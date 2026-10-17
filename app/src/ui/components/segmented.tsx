@@ -1,4 +1,5 @@
 import { ToggleGroup } from "radix-ui";
+import type { ReactNode } from "react";
 import { cn } from "../lib/cn";
 
 export function Segmented<T extends string>({
@@ -10,7 +11,7 @@ export function Segmented<T extends string>({
   label: string;
   value: T;
   onChange: (v: T) => void;
-  options: { value: T; label: string }[];
+  options: { value: T; label: ReactNode }[];
 }) {
   return (
     <ToggleGroup.Root

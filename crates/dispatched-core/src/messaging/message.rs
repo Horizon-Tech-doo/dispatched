@@ -57,6 +57,13 @@ pub struct PeekedMessage {
     pub to: Option<String>,
     /// `ReplyTo`.
     pub reply_to: Option<String>,
+    /// `ReplyToSessionId` (AMQP reply-to-group-id).
+    pub reply_to_session_id: Option<String>,
+    /// `PartitionKey` (`x-opt-partition-key`).
+    pub partition_key: Option<String>,
+    /// When the message expires: the broker's absolute-expiry-time, else enqueued time plus time to live.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub expires_at: Option<OffsetDateTime>,
     /// When the broker accepted the message.
     #[serde(with = "time::serde::rfc3339::option")]
     pub enqueued_time: Option<OffsetDateTime>,
@@ -366,6 +373,17 @@ pub fn decode_message(m: Message<Body<Value>>) -> PeekedMessage {
             .map(|s| s.0.clone()),
         to: props.and_then(|p| p.to.clone()),
         reply_to: props.and_then(|p| p.reply_to.clone()),
+        reply_to_session_id: props.and_then(|p| p.reply_to_group_id.clone()),
+        partition_key: annotation_string(&m, "x-opt-partition-key"),
+        expires_at: props
+            .and_then(|p| p.absolute_expiry_time.as_ref())
+            .and_then(timestamp_to_datetime)
+            .or_else(|| {
+                // No absolute-expiry-time: enqueued time plus time to live, when both are known.
+                let ttl = header.and_then(|h| h.ttl)?;
+                annotation_time(&m, "x-opt-enqueued-time")?
+                    .checked_add(time::Duration::milliseconds(i64::from(ttl)))
+            }),
         enqueued_time: annotation_time(&m, "x-opt-enqueued-time"),
         scheduled_enqueue_time: annotation_time(&m, "x-opt-scheduled-enqueue-time"),
         locked_until: annotation_time(&m, "x-opt-locked-until"),
@@ -398,6 +416,9 @@ pub(crate) fn test_message(seq: i64) -> PeekedMessage {
         content_type: None,
         to: None,
         reply_to: None,
+        reply_to_session_id: None,
+        partition_key: None,
+        expires_at: None,
         enqueued_time: None,
         scheduled_enqueue_time: None,
         locked_until: None,
@@ -708,6 +729,33 @@ mod tests {
     }
 
     #[test]
+    fn expires_at_falls_back_to_enqueued_time_plus_time_to_live() {
+        let enq = 1_700_000_000_000_i64;
+        let build = |ttl: Option<u32>, enqueued: bool| {
+            let mut ann = MessageAnnotations::builder().insert("x-opt-sequence-number", 1i64);
+            if enqueued {
+                ann = ann.insert("x-opt-enqueued-time", Timestamp::from(enq));
+            }
+            decode_message(Message::<Body<Value>> {
+                header: Some(Header {
+                    ttl,
+                    ..Default::default()
+                }),
+                delivery_annotations: None,
+                message_annotations: Some(ann.build()),
+                properties: None,
+                application_properties: None,
+                body: Body::Empty,
+                footer: None,
+            })
+        };
+        let at = |ms: i64| OffsetDateTime::from_unix_timestamp(ms / 1000).unwrap();
+        assert_eq!(build(Some(90_000), true).expires_at, Some(at(enq + 90_000)));
+        assert_eq!(build(None, true).expires_at, None, "no time to live");
+        assert_eq!(build(Some(90_000), false).expires_at, None, "not enqueued");
+    }
+
+    #[test]
     fn wire_roundtrip_extracts_every_field() {
         let enq = 1_700_000_000_000_i64;
         let ts = |ms: i64| Timestamp::from(ms);
@@ -742,6 +790,7 @@ mod tests {
                     .insert("x-opt-scheduled-enqueue-time", ts(enq + 1000))
                     .insert("x-opt-locked-until", ts(enq + 2000))
                     .insert("x-opt-deadletter-source", "orders")
+                    .insert("x-opt-partition-key", "pk-7")
                     .build(),
             ),
             properties: Some(
@@ -753,6 +802,8 @@ mod tests {
                     .content_type("text/plain")
                     .to("to-addr")
                     .reply_to("reply-addr")
+                    .reply_to_group_id(Some("reply-sess".to_string()))
+                    .absolute_expiry_time(ts(enq + 61_000))
                     .build(),
             ),
             application_properties: Some(ApplicationProperties(app.clone())),
@@ -780,6 +831,10 @@ mod tests {
         assert_eq!(m.scheduled_enqueue_time, Some(at(enq + 1000)));
         assert_eq!(m.locked_until, Some(at(enq + 2000)));
         assert_eq!(m.dead_letter_source.as_deref(), Some("orders"));
+        assert_eq!(m.partition_key.as_deref(), Some("pk-7"));
+        assert_eq!(m.reply_to_session_id.as_deref(), Some("reply-sess"));
+        // The broker's absolute-expiry-time wins over enqueued time plus the 60 s time to live.
+        assert_eq!(m.expires_at, Some(at(enq + 61_000)));
         assert_eq!(m.dead_letter_reason.as_deref(), Some("why"));
         assert_eq!(m.dead_letter_description.as_deref(), Some("desc"));
         assert_eq!(

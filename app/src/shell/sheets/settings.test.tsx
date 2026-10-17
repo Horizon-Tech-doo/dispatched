@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { setUpdater, type UpdateInfo } from "@/engine";
 import { jobStore } from "../drawer/activity";
+import { started } from "../drawer/jobEvents";
 import { renderShell } from "../test-utils";
 
 afterEach(() => vi.useRealTimers());
@@ -19,8 +20,145 @@ describe("SettingsSheet", () => {
     await user.click(within(sheet).getByRole("radio", { name: "Comfortable" }));
     await waitFor(() => expect(document.documentElement.style.getPropertyValue("--row")).toBe("26px"));
     await user.click(within(sheet).getByRole("radio", { name: "60 s" }));
-    expect(mock.calls).toContainEqual({ cmd: "settings_set", args: { key: "ui", value: { theme: "light", density: "comfortable", autoRefresh: 60 } } });
+    expect(mock.calls).toContainEqual({ cmd: "settings_set", args: { key: "ui", value: { theme: "light", density: "comfortable", autoRefresh: 60, peekSize: 100, dashboardRefresh: 0 } } });
     expect(await within(sheet).findByText("0.0.1-mock")).toBeInTheDocument();
+  });
+});
+
+describe("Accounts in Settings", () => {
+  async function openSettings(user: ReturnType<typeof userEvent.setup>) {
+    await screen.findByRole("button", { name: /Connection: / });
+    await user.keyboard("{Control>},{/Control}");
+    return screen.findByRole("dialog", { name: "Settings" });
+  }
+
+  it("lists sign-ins with their tenant and users, and signs one out after confirming in place", async () => {
+    const user = userEvent.setup();
+    const { mock } = renderShell("default");
+    await mock.invoke("sign_in", { tenant: null, deviceCode: false });
+    const sheet = await openSettings(user);
+    const accounts = await within(sheet).findByRole("list", { name: "Accounts" });
+    const row = await within(accounts).findByRole("listitem", { name: /ops@contoso.example/ });
+    expect(within(row).getByText("Current")).toBeInTheDocument();
+    expect(within(row).getByText("tenant-1")).toHaveClass("font-mono");
+    expect(within(row).getByText(/Used by Logistics dev/)).toBeInTheDocument();
+    // The mock remembers the second account too: kept, its token gone, and not the user's own.
+    const other = within(accounts).getByRole("listitem", { name: /dev@fabrikam.example/ });
+    expect(within(other).getByText("Sign-in expired")).toBeInTheDocument();
+    expect(within(other).getByText("Not used by any connection")).toBeInTheDocument();
+    expect(within(other).queryByText("Another account")).not.toBeInTheDocument();
+    expect(within(other).queryByRole("button", { name: "Sign out" })).not.toBeInTheDocument();
+    expect(within(other).queryByRole("button", { name: "Sign in again" })).not.toBeInTheDocument(); // it is not the user's own
+    expect(within(other).getByRole("button", { name: "Forget sign-in" })).toBeInTheDocument();
+    await user.click(within(row).getByRole("button", { name: "Sign out" }));
+    expect(mock.calls.some((c) => c.cmd === "sign_out")).toBe(false);
+    expect(within(row).getByText(/will need a new sign-in/)).toBeInTheDocument();
+    await user.click(within(row).getByRole("button", { name: "Sign out ops@contoso.example" }));
+    await waitFor(() => expect(mock.calls.some((c) => c.cmd === "sign_out")).toBe(true));
+    await waitFor(() => expect(within(accounts).queryByRole("listitem", { name: /ops@contoso.example/ })).not.toBeInTheDocument());
+  });
+
+  it("moves focus onto Cancel when asking and back onto the button when declined", async () => {
+    const user = userEvent.setup();
+    const { mock } = renderShell("default");
+    await mock.invoke("sign_in", { tenant: null, deviceCode: false });
+    const sheet = await openSettings(user);
+    const row = await within(sheet).findByRole("listitem", { name: /ops@contoso.example/ });
+    const signOut = within(row).getByRole("button", { name: "Sign out" });
+    expect(signOut).toHaveAccessibleDescription("ops@contoso.example");
+    await user.click(signOut);
+    expect(within(row).getByRole("button", { name: "Cancel" })).toHaveFocus();
+    await user.click(within(row).getByRole("button", { name: "Cancel" }));
+    expect(within(row).getByRole("button", { name: "Sign out" })).toHaveFocus();
+    expect(mock.calls.some((c) => c.cmd === "sign_out")).toBe(false);
+  });
+
+  it("forgets an expired sign-in after the same confirmation", async () => {
+    const user = userEvent.setup();
+    const { mock } = renderShell("default");
+    await mock.invoke("sign_in", { tenant: null, deviceCode: false });
+    const sheet = await openSettings(user);
+    const other = await within(sheet).findByRole("listitem", { name: /dev@fabrikam.example/ });
+    await user.click(within(other).getByRole("button", { name: "Forget sign-in" }));
+    expect(within(other).getByText("This sign-in will be forgotten.")).toBeInTheDocument();
+    await user.click(within(other).getByRole("button", { name: "Forget sign-in dev@fabrikam.example" }));
+    await waitFor(() => expect(mock.calls.some((c) => c.cmd === "sign_out" && (c.args as { id: string }).id === "oid-2")).toBe(true));
+  });
+
+  it("warns that the connected connection will disconnect, and the shell lets go of it", async () => {
+    const user = userEvent.setup();
+    const { mock } = renderShell("default", { last_profile: "p-logistics-dev" });
+    await mock.invoke("sign_in", { tenant: null, deviceCode: false });
+    await screen.findByRole("button", { name: /Connection: Logistics dev/ });
+    const sheet = await openSettings(user);
+    const row = await within(sheet).findByRole("listitem", { name: /ops@contoso.example/ });
+    await user.click(within(row).getByRole("button", { name: "Sign out" }));
+    expect(within(row).getByText(/Logistics dev is connected and will disconnect\./)).toBeInTheDocument();
+    await user.click(within(row).getByRole("button", { name: "Sign out ops@contoso.example" }));
+    await waitFor(() => expect(mock.calls.some((c) => c.cmd === "sign_out")).toBe(true));
+    await waitFor(() => expect(screen.queryByRole("button", { name: /Connection: Logistics dev/ })).not.toBeInTheDocument());
+    // The shell dropped its state without a second disconnect call to the engine.
+    expect(mock.calls.some((c) => c.cmd === "disconnect")).toBe(false);
+    expect(mock.calls).toContainEqual({ cmd: "settings_set", args: { key: "last_profile", value: null } });
+  });
+
+  it("still resets the connection when the sheet closes before the sign-out returns", async () => {
+    const user = userEvent.setup();
+    const { mock } = renderShell("default", { last_profile: "p-logistics-dev" });
+    await mock.invoke("sign_in", { tenant: null, deviceCode: false });
+    await screen.findByRole("button", { name: /Connection: Logistics dev/ });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const invoke = mock.invoke.bind(mock);
+    mock.invoke = (async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "sign_out") await gate;
+      return invoke(cmd, args);
+    }) as typeof mock.invoke;
+    const sheet = await openSettings(user);
+    const row = await within(sheet).findByRole("listitem", { name: /ops@contoso.example/ });
+    await user.click(within(row).getByRole("button", { name: "Sign out" }));
+    await user.click(within(row).getByRole("button", { name: "Sign out ops@contoso.example" }));
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Settings" })).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: /Connection: Logistics dev/ })).toBeInTheDocument();
+    release();
+    await waitFor(() => expect(screen.queryByRole("button", { name: /Connection: Logistics dev/ })).not.toBeInTheDocument());
+    expect(mock.calls.some((c) => c.cmd === "disconnect")).toBe(false);
+  });
+
+  it("signs in again to the tenant of the user's own expired sign-in, with the progress inside its row", async () => {
+    const user = userEvent.setup();
+    const { mock } = renderShell("default");
+    await mock.invoke("sign_in", { tenant: null, deviceCode: false });
+    const invoke = mock.invoke.bind(mock);
+    // The current account's own sign-in, its token gone.
+    mock.invoke = (async (cmd: string, args?: Record<string, unknown>) => {
+      const r = await invoke(cmd, args);
+      return cmd === "sign_ins_list" ? (r as { id: string }[]).map((s) => (s.id === "oid-1" ? { ...s, signed_in: false } : s)) : r;
+    }) as typeof mock.invoke;
+    const sheet = await openSettings(user);
+    const row = await within(sheet).findByRole("listitem", { name: /ops@contoso.example/ });
+    expect(within(row).getByText("Sign-in expired")).toBeInTheDocument();
+    expect(within(row).queryByText("Current")).not.toBeInTheDocument();
+    await user.click(within(row).getByRole("button", { name: "Sign in again" }));
+    expect(await within(row).findByText("Finish signing in in your browser.")).toBeInTheDocument();
+    expect(mock.calls.filter((c) => c.cmd === "sign_in").at(-1)?.args).toEqual({ tenant: "tenant-1", deviceCode: false });
+    const other = within(sheet).getByRole("listitem", { name: /dev@fabrikam.example/ });
+    expect(within(other).queryByText("Finish signing in in your browser.")).not.toBeInTheDocument();
+  });
+
+  it("says when the list is loading, and when it could not be read", async () => {
+    const user = userEvent.setup();
+    const { mock } = renderShell("default");
+    const invoke = mock.invoke.bind(mock);
+    mock.invoke = (async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "sign_ins_list") throw new Error("boom");
+      return invoke(cmd, args);
+    }) as typeof mock.invoke;
+    const sheet = await openSettings(user);
+    expect(await within(sheet).findByText("Couldn't list the sign-ins")).toBeInTheDocument();
+    expect(within(sheet).getByRole("button", { name: "Try again" })).toBeInTheDocument();
+    expect(within(sheet).queryByText(/No Entra ID sign-ins/)).not.toBeInTheDocument();
   });
 });
 
@@ -178,9 +316,9 @@ describe("update prompt", () => {
     setUpdater({ check: async () => INFO, install: async () => {} });
     const { sheet } = await openUpdateSheet();
     expect(within(sheet).queryByText(/running will stop/)).not.toBeInTheDocument();
-    jobStore.apply({ type: "started", id: "j1", title: "Export", total: 10 });
+    jobStore.apply(started("j1", "Export", 10));
     expect(await within(sheet).findByText("1 job running will stop when Dispatched restarts.")).toBeInTheDocument();
-    jobStore.apply({ type: "started", id: "j2", title: "Purge", total: null });
+    jobStore.apply(started("j2", "Purge", null));
     expect(await within(sheet).findByText("2 jobs running will stop when Dispatched restarts.")).toBeInTheDocument();
   });
 });

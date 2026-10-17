@@ -489,6 +489,16 @@ impl ProfileStore {
     /// The caller picks the one whose refresh token still exists. A record that can't be read is
     /// skipped, so one damaged row does not break every lookup.
     pub fn sign_ins_for_tenant(&self, tenant_id: &str) -> Result<Vec<SignIn>> {
+        Ok(self
+            .sign_ins()?
+            .into_iter()
+            .filter(|s| s.tenant_id.eq_ignore_ascii_case(tenant_id))
+            .collect())
+    }
+
+    /// Every remembered sign-in, ordered by id. A record that can't be read is skipped, so one
+    /// damaged row does not break the list (or any lookup built on it).
+    pub fn sign_ins(&self) -> Result<Vec<SignIn>> {
         let conn = self.conn.lock().expect("profile db poisoned");
         let mut stmt = conn
             .prepare("SELECT record FROM sign_ins ORDER BY id")
@@ -501,7 +511,6 @@ impl ProfileStore {
         Ok(records
             .iter()
             .filter_map(|r| serde_json::from_str::<SignIn>(r).ok())
-            .filter(|s| s.tenant_id.eq_ignore_ascii_case(tenant_id))
             .collect())
     }
 
@@ -1014,6 +1023,33 @@ mod tests {
         let found = store.sign_ins_for_tenant("tenant-x").unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id, "good-oid");
+    }
+
+    #[test]
+    fn listing_every_sign_in_skips_unreadable_rows() {
+        let store = ProfileStore::open_in_memory().unwrap();
+        store.save_sign_in(&sign_in("b-oid")).unwrap();
+        store.save_sign_in(&sign_in("a-oid")).unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO sign_ins (id, record) VALUES ('bad', 'not json')",
+                [],
+            )
+            .unwrap();
+        let ids: Vec<String> = store
+            .sign_ins()
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(
+            ids,
+            ["a-oid", "b-oid"],
+            "ordered by id, the damaged row skipped"
+        );
     }
 
     #[test]

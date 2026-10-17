@@ -1,5 +1,5 @@
 use crate::error::CommandError;
-use crate::events::{Events, tracked};
+use crate::events::{Events, tracked, tracked_failures};
 use crate::state::AppState;
 use dispatched_core::namespace::known_entities;
 use dispatched_core::{EntityPath, Error, QueueInfo, SubscriptionInfo, TopicInfo};
@@ -104,16 +104,11 @@ pub async fn list_subscriptions(
     topic: &str,
 ) -> Result<Vec<SubscriptionInfo>, CommandError> {
     let active = state.active_for(profile_id).await?;
-    tracked(
+    // Read on every expand and polled while a topic's Overview is open: only a failure is logged.
+    tracked_failures(
         ev,
         &format!("Listing subscriptions of {topic} failed"),
         async { Ok(active.explorer.list_subscriptions(topic).await?) },
-        |subs| {
-            format!(
-                "Listed {} of {topic}",
-                count(subs.len(), "subscription", "subscriptions")
-            )
-        },
     )
     .await
 }
