@@ -4,9 +4,14 @@
 //! how many messages it may touch and one exact sentence naming the effect; the gate that asks a
 //! policy to confirm it arrives with the operator.
 
+use crate::activity::{ActivityEntry, Audit, Outcome, Phase};
+use crate::error::{Error, Result};
+use crate::jobs::JobReport;
 use crate::namespace::{EntityPath, SubQueue};
-use horizon_azure_kit::safety::{ConfirmRequest, Origin};
+use horizon_azure_kit::safety::{ConfirmRequest, Origin, Policy, require};
 use serde::{Deserialize, Serialize};
+use std::future::Future;
+use std::sync::Arc;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -558,6 +563,168 @@ fn rfc3339(t: OffsetDateTime) -> String {
         .unwrap_or_else(|_| t.to_string())
 }
 
+/// What an operation's result tells the audit log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditFacts {
+    /// How the operation ended.
+    pub outcome: Outcome,
+    /// Messages that worked.
+    pub succeeded: Option<u64>,
+    /// Messages that failed.
+    pub failed: Option<u64>,
+    /// Messages skipped.
+    pub skipped: Option<u64>,
+    /// A remark for the finished entry (stored in its `error` field).
+    pub note: Option<String>,
+}
+
+/// A result the gate can write to the activity log.
+pub trait Audited {
+    /// The facts for the finished entry.
+    fn audit_outcome(&self) -> AuditFacts;
+
+    /// Receives the activity op id before the result is returned, so a report can name it.
+    fn set_op_id(&mut self, _op_id: String) {}
+}
+
+impl Audited for () {
+    fn audit_outcome(&self) -> AuditFacts {
+        AuditFacts {
+            outcome: Outcome::Succeeded,
+            succeeded: None,
+            failed: None,
+            skipped: None,
+            note: None,
+        }
+    }
+}
+
+impl Audited for JobReport {
+    fn audit_outcome(&self) -> AuditFacts {
+        AuditFacts {
+            outcome: self.outcome(),
+            succeeded: Some(self.succeeded()),
+            failed: Some(self.failed()),
+            skipped: Some(self.skipped()),
+            note: None,
+        }
+    }
+
+    fn set_op_id(&mut self, op_id: String) {
+        self.op_id = Some(op_id);
+    }
+}
+
+/// The only way to a mutating broker call: confirm, audit before, run, audit after.
+#[derive(Clone)]
+pub struct Gate {
+    policy: Arc<dyn Policy>,
+    audit: Arc<dyn Audit>,
+    actor: Actor,
+}
+
+impl Gate {
+    /// A gate that asks `policy`, writes to `audit` and acts as `actor`.
+    pub fn new(policy: Arc<dyn Policy>, audit: Arc<dyn Audit>, actor: Actor) -> Self {
+        Self {
+            policy,
+            audit,
+            actor,
+        }
+    }
+
+    /// Who this gate acts as.
+    pub fn actor(&self) -> &Actor {
+        &self.actor
+    }
+
+    fn entry(
+        &self,
+        op: &Operation,
+        op_id: &str,
+        phase: Phase,
+        outcome: Outcome,
+        summary: &str,
+    ) -> ActivityEntry {
+        ActivityEntry {
+            id: 0,
+            op_id: op_id.to_string(),
+            at: OffsetDateTime::now_utc(),
+            origin: self.actor.origin,
+            profile: self.actor.profile.name.clone(),
+            entity: Some(op.target.entity.base()),
+            action: op.verb().to_string(),
+            kind: OpKind::Mutating(op.mutation),
+            phase,
+            outcome,
+            count: op.count.bound(),
+            succeeded: None,
+            failed: None,
+            skipped: None,
+            summary: summary.to_string(),
+            error: None,
+        }
+    }
+
+    /// Confirm `op`, write the started entry, run `work` (given the op id), write the finished
+    /// entry. A refused confirmation or a failed started write means `work` never runs.
+    pub async fn run<T, F, Fut>(&self, op: &Operation, work: F) -> Result<T>
+    where
+        T: Audited,
+        F: FnOnce(String) -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        let op_id = format!("op-{}", uuid::Uuid::new_v4().simple());
+        let request = op.confirm_request(&self.actor);
+        let summary = request.summary.clone();
+
+        if let Err(denied) = require(self.policy.as_ref(), &request).await {
+            let error: Error = denied.into();
+            let mut entry = self.entry(op, &op_id, Phase::Finished, Outcome::Denied, &summary);
+            entry.error = Some(error.to_string());
+            if let Err(e) = self.audit.record(&entry) {
+                tracing::warn!("could not write the denial to the activity log: {e}");
+            }
+            return Err(error);
+        }
+
+        let started = self.entry(op, &op_id, Phase::Started, Outcome::Pending, &summary);
+        if let Err(e) = self.audit.record(&started) {
+            return Err(Error::Io(format!(
+                "cannot write the activity log ({e}); nothing was changed"
+            )));
+        }
+
+        let result = work(op_id.clone()).await;
+
+        let finished = match &result {
+            Ok(value) => {
+                let facts = value.audit_outcome();
+                let mut entry = self.entry(op, &op_id, Phase::Finished, facts.outcome, &summary);
+                entry.succeeded = facts.succeeded;
+                entry.failed = facts.failed;
+                entry.skipped = facts.skipped;
+                entry.error = facts.note;
+                entry
+            }
+            Err(e) => {
+                let outcome = if matches!(e, Error::Cancelled) {
+                    Outcome::Cancelled
+                } else {
+                    Outcome::Failed
+                };
+                let mut entry = self.entry(op, &op_id, Phase::Finished, outcome, &summary);
+                entry.error = Some(e.to_string());
+                entry
+            }
+        };
+        if let Err(e) = self.audit.record(&finished) {
+            tracing::warn!("could not write the finished entry to the activity log: {e}");
+        }
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -795,5 +962,216 @@ mod tests {
         assert_eq!(CountEstimate::Unknown.bound(), None);
         assert_eq!(CountEstimate::AtLeast(5).bound(), Some(5));
         assert_eq!(CountEstimate::Exact(1).text("message"), "1 message");
+    }
+
+    use crate::activity::MemoryAudit;
+    use crate::jobs::{ItemOutcome, ItemResult, JobKind};
+    use async_trait::async_trait;
+    use horizon_azure_kit::safety::Decision;
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+
+    struct Scripted(Decision);
+    #[async_trait]
+    impl Policy for Scripted {
+        async fn confirm(&self, _: &ConfirmRequest) -> Decision {
+            self.0.clone()
+        }
+    }
+
+    fn gate(decision: Decision, production: bool) -> (Gate, Arc<MemoryAudit>) {
+        let audit = Arc::new(MemoryAudit::new());
+        let g = Gate::new(
+            Arc::new(Scripted(decision)),
+            audit.clone(),
+            Actor {
+                origin: Origin::Cli,
+                profile: ProfileRef {
+                    name: "prod-weu".into(),
+                    production,
+                },
+            },
+        );
+        (g, audit)
+    }
+
+    fn purge_op() -> Operation {
+        Operation::purge(dlq("orders"), CountEstimate::Exact(3))
+    }
+
+    fn report_with(ok: usize, failed: usize, skipped: usize) -> JobReport {
+        let item = |seq: i64, outcome| ItemResult {
+            sequence_number: Some(seq),
+            message_id: None,
+            session_id: None,
+            entity: "orders/$DeadLetterQueue".into(),
+            new_sequence_number: None,
+            outcome,
+        };
+        let mut items = vec![];
+        for i in 0..ok {
+            items.push(item(i as i64, ItemOutcome::Succeeded { detail: None }));
+        }
+        for i in 0..failed {
+            items.push(item(
+                100 + i as i64,
+                ItemOutcome::Failed {
+                    kind: "failed",
+                    reason: "no".into(),
+                },
+            ));
+        }
+        for i in 0..skipped {
+            items.push(item(
+                200 + i as i64,
+                ItemOutcome::Skipped {
+                    reason: "skip".into(),
+                },
+            ));
+        }
+        JobReport {
+            op_id: None,
+            kind: JobKind::Purge,
+            entity: "orders/$DeadLetterQueue".into(),
+            target: None,
+            started_at: OffsetDateTime::now_utc(),
+            finished_at: OffsetDateTime::now_utc(),
+            cancelled: false,
+            items,
+            notes: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn allowed_work_is_audited_before_and_after() {
+        let (g, audit) = gate(Decision::Allow, false);
+        let calls = AtomicUsize::new(0);
+        g.run(&purge_op(), |_| async {
+            calls.fetch_add(1, SeqCst);
+            assert_eq!(audit.entries().len(), 1, "started is written first");
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let e = audit.entries();
+        assert_eq!(calls.load(SeqCst), 1);
+        assert_eq!(
+            (e[0].phase, e[0].outcome),
+            (Phase::Started, Outcome::Pending)
+        );
+        assert_eq!(
+            (e[1].phase, e[1].outcome),
+            (Phase::Finished, Outcome::Succeeded)
+        );
+        assert_eq!(e[0].op_id, e[1].op_id);
+        assert_eq!(
+            e[0].summary,
+            "Remove 3 messages from orders/$DeadLetterQueue on prod-weu"
+        );
+        assert_eq!(e[0].count, Some(3));
+    }
+
+    #[tokio::test]
+    async fn denied_operation_touches_nothing_and_is_logged() {
+        let (g, audit) = gate(Decision::Deny("not now".into()), false);
+        let e = g
+            .run(&purge_op(), |_| async {
+                panic!("work must not run");
+                #[allow(unreachable_code)]
+                Ok(())
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(e, Error::Denied(_)));
+        let log = audit.entries();
+        assert_eq!(log.len(), 1);
+        assert_eq!(
+            (log[0].phase, log[0].outcome),
+            (Phase::Finished, Outcome::Denied)
+        );
+        assert!(log[0].error.as_deref().unwrap().contains("not now"));
+    }
+
+    #[tokio::test]
+    async fn production_needs_the_typed_entity() {
+        let (g, _) = gate(Decision::Allow, true);
+        assert!(matches!(
+            g.run(&purge_op(), |_| async { Ok(()) }).await,
+            Err(Error::Denied(_))
+        ));
+        let (g, _) = gate(Decision::ConfirmedTyped("orders".into()), true);
+        g.run(&purge_op(), |_| async { Ok(()) }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failing_audit_start_stops_the_operation() {
+        let (g, audit) = gate(Decision::Allow, false);
+        audit.fail_next();
+        let e = g
+            .run(&purge_op(), |_| async {
+                panic!("must not run");
+                #[allow(unreachable_code)]
+                Ok(())
+            })
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("nothing was changed"));
+    }
+
+    #[tokio::test]
+    async fn cancelled_work_is_audited_as_cancelled() {
+        let (g, audit) = gate(Decision::Allow, false);
+        let _ = g
+            .run::<(), _, _>(&purge_op(), |_| async { Err(Error::Cancelled) })
+            .await;
+        assert_eq!(audit.entries()[1].outcome, Outcome::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn job_report_facts_reach_the_finished_entry() {
+        let (g, audit) = gate(Decision::Allow, false);
+        let r = g
+            .run(&purge_op(), |op_id| async move {
+                let mut r = report_with(2, 1, 0);
+                r.set_op_id(op_id);
+                Ok(r)
+            })
+            .await
+            .unwrap();
+        let fin = &audit.entries()[1];
+        assert_eq!(
+            (fin.outcome, fin.succeeded, fin.failed, fin.skipped),
+            (Outcome::PartlyFailed, Some(2), Some(1), Some(0))
+        );
+        assert_eq!(
+            r.op_id.as_deref(),
+            Some(fin.op_id.as_str()),
+            "the report names the activity op it belongs to"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_work_is_audited_as_failed_and_a_bad_finish_write_changes_nothing() {
+        let (g, audit) = gate(Decision::Allow, false);
+        let e = g
+            .run::<(), _, _>(&purge_op(), |_| async {
+                Err(Error::Network("down".into()))
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(e, Error::Network(_)));
+        let log = audit.entries();
+        assert_eq!(log[1].outcome, Outcome::Failed);
+        assert!(log[1].error.as_deref().unwrap().contains("down"));
+
+        let (g, audit) = gate(Decision::Allow, false);
+        let a2 = audit.clone();
+        let r = g
+            .run(&purge_op(), |_| async move {
+                a2.fail_next();
+                Ok(())
+            })
+            .await;
+        assert!(r.is_ok(), "the work result survives a failed finish write");
+        assert_eq!(audit.entries().len(), 1);
     }
 }
