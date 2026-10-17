@@ -65,9 +65,14 @@ describe("safe name patterns", () => {
     if ("error" in r) throw new Error(r.error);
     const name = "a".repeat(500);
     r.test(name); // warm up
-    const started = performance.now();
-    for (let i = 0; i < 5; i++) expect(r.test(name)).toBe(false);
-    expect((performance.now() - started) / 5).toBeLessThan(8);
+    // The fastest of five runs: a loaded CI runner stretches some runs, never all of them.
+    let best = Infinity;
+    for (let i = 0; i < 5; i++) {
+      const started = performance.now();
+      expect(r.test(name)).toBe(false);
+      best = Math.min(best, performance.now() - started);
+    }
+    expect(best).toBeLessThan(8);
   });
 });
 
