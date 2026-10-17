@@ -54,6 +54,15 @@ pub enum Error {
     /// Unexpected protocol response.
     #[error("protocol error: {0}")]
     Protocol(String),
+    /// A lock on a received message expired or was lost before it was settled.
+    #[error("{0}")]
+    LockLost(String),
+    /// The change clashes with the current state of the broker.
+    #[error("{0}")]
+    Conflict(String),
+    /// A policy refused the operation.
+    #[error("denied: {0}")]
+    Denied(String),
     /// Local input/output failure (writing an export file, ...).
     #[error("{0}")]
     Io(String),
@@ -78,7 +87,7 @@ impl From<KitError> for Error {
             KitError::SecretStore(m) => Error::Auth(format!(
                 "the OS keychain is unavailable ({m}); on Linux start a Secret Service such as gnome-keyring"
             )),
-            KitError::PolicyDenied(m) => Error::Invalid(format!("denied: {m}")),
+            KitError::PolicyDenied(m) => Error::Denied(m),
             KitError::Cancelled => Error::Cancelled,
             KitError::Invalid(m) => Error::Invalid(m),
             other => Error::Protocol(other.to_string()),
@@ -145,5 +154,22 @@ mod tests {
     fn kit_not_signed_in_is_preserved() {
         let e: Error = KitError::NotSignedIn("sign in again".into()).into();
         assert!(matches!(e, Error::NotSignedIn(_)));
+    }
+
+    #[test]
+    fn policy_denial_is_denied_not_invalid() {
+        let e: Error = KitError::PolicyDenied("no".into()).into();
+        assert!(matches!(e, Error::Denied(ref m) if m == "no"));
+        assert_eq!(crate::diagnostics::error_kind(&e), "denied");
+        assert_eq!(e.to_string(), "denied: no");
+    }
+
+    #[test]
+    fn lock_lost_says_what_to_do() {
+        let e = Error::LockLost(
+            "the lock on message 5 in orders expired or was lost; the message is available again, run the operation again".into(),
+        );
+        assert!(e.to_string().contains("run the operation again"));
+        assert_eq!(crate::diagnostics::error_kind(&e), "lock_lost");
     }
 }

@@ -17,6 +17,7 @@ pub mod mgmt;
 pub mod namespace;
 pub mod paths;
 pub mod profiles;
+pub mod safety;
 pub mod tokens;
 
 pub use connstr::ConnectionString;
@@ -37,5 +38,8 @@ pub use mgmt::{
 };
 pub use namespace::{
     EmulatorPorts, EntityPath, Namespace, PeekView, ProxyConfig, SubQueue, Transport,
+};
+pub use safety::{
+    Actor, CountEstimate, Mutation, OpKind, Operation, ProfileRef, SettleVerb, Target, count_text,
 };
 pub use tokens::{ServiceBusToken, TokenKind, TokenSource};

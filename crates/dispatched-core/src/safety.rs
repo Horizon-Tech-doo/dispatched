@@ -1,0 +1,776 @@
+//! The operation model: what a mutating call will do, in the exact words a human confirms.
+//!
+//! This module holds types and texts only. Every `Operation` knows its mutation kind, its target,
+//! how many messages it may touch and one exact sentence naming the effect; the gate that asks a
+//! policy to confirm it arrives with the operator.
+
+use crate::namespace::{EntityPath, SubQueue};
+use horizon_azure_kit::safety::{ConfirmRequest, Origin};
+use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
+
+/// What kind of change an operation makes to the broker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Mutation {
+    /// Messages are added (send, schedule, import, resubmit without removal).
+    Send,
+    /// Received messages are settled (complete, abandon, defer, dead-letter).
+    Settle,
+    /// Messages are removed (delete, receive-and-delete, cancel scheduled).
+    Delete,
+    /// Many messages are removed at once.
+    Purge,
+    /// A queue, topic, subscription or rule changes.
+    EntityChange,
+    /// A session's state is replaced or cleared.
+    SessionState,
+}
+
+/// Whether an operation reads or changes the broker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OpKind {
+    /// Read only.
+    Read,
+    /// Changes the broker.
+    Mutating(Mutation),
+}
+
+/// How many messages an operation may touch, and how sure we are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CountEstimate {
+    /// Exactly this many.
+    Exact(u64),
+    /// About this many (a broker counter that may lag).
+    About(u64),
+    /// At least this many exist; the operation touches at most this many in one run.
+    AtLeast(u64),
+    /// No more than this many.
+    UpTo(u64),
+    /// Not known.
+    Unknown,
+}
+
+impl CountEstimate {
+    /// The largest number of messages the operation may touch, if bounded.
+    pub fn bound(&self) -> Option<u64> {
+        match *self {
+            CountEstimate::Exact(n)
+            | CountEstimate::About(n)
+            | CountEstimate::AtLeast(n)
+            | CountEstimate::UpTo(n) => Some(n),
+            CountEstimate::Unknown => None,
+        }
+    }
+
+    /// The count as words, e.g. `1,284 messages`, `about 40 messages`, `up to 10 messages`.
+    pub fn text(&self, noun: &str) -> String {
+        let plural = |n: u64| {
+            if n == 1 {
+                format!("{} {noun}", count_text(n))
+            } else {
+                format!("{} {noun}s", count_text(n))
+            }
+        };
+        match *self {
+            CountEstimate::Exact(n) => plural(n),
+            CountEstimate::About(n) => format!("about {}", plural(n)),
+            CountEstimate::AtLeast(n) | CountEstimate::UpTo(n) => format!("up to {}", plural(n)),
+            CountEstimate::Unknown => format!("an unknown number of {noun}s"),
+        }
+    }
+}
+
+/// A number with thousands separators: `1284` becomes `1,284`.
+pub fn count_text(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// The connection profile an operation runs against.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileRef {
+    /// Profile name.
+    pub name: String,
+    /// Marked production: confirmations get stricter.
+    pub production: bool,
+}
+
+/// Who runs an operation, and against which profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Actor {
+    /// Which surface asked.
+    pub origin: Origin,
+    /// The profile it runs against.
+    pub profile: ProfileRef,
+}
+
+/// The queue an operation acts on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Target {
+    /// Queue or subscription.
+    pub entity: EntityPath,
+    /// Which sub-queue; `None` is the whole entity (purge `all`).
+    pub sub_queue: Option<SubQueue>,
+}
+
+impl Target {
+    /// One sub-queue of an entity.
+    pub fn new(entity: EntityPath, sub_queue: SubQueue) -> Self {
+        Self {
+            entity,
+            sub_queue: Some(sub_queue),
+        }
+    }
+
+    /// The whole entity.
+    pub fn all(entity: EntityPath) -> Self {
+        Self {
+            entity,
+            sub_queue: None,
+        }
+    }
+
+    /// `orders`, `orders/$DeadLetterQueue`, or the entity base for the whole entity.
+    pub fn address_text(&self) -> String {
+        match self.sub_queue {
+            Some(q) => self.entity.address(q),
+            None => self.entity.base(),
+        }
+    }
+}
+
+/// How a received message is settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SettleVerb {
+    /// Remove it.
+    Complete,
+    /// Release the lock.
+    Abandon,
+    /// Set it aside for receive-by-sequence-number.
+    Defer,
+    /// Move it to the dead-letter queue.
+    DeadLetter,
+}
+
+impl SettleVerb {
+    fn text(self) -> &'static str {
+        match self {
+            SettleVerb::Complete => "complete",
+            SettleVerb::Abandon => "abandon",
+            SettleVerb::Defer => "defer",
+            SettleVerb::DeadLetter => "dead-letter",
+        }
+    }
+
+    fn capitalised(self) -> &'static str {
+        match self {
+            SettleVerb::Complete => "Complete",
+            SettleVerb::Abandon => "Abandon",
+            SettleVerb::Defer => "Defer",
+            SettleVerb::DeadLetter => "Dead-letter",
+        }
+    }
+}
+
+/// One exact sentence per kind of operation.
+#[derive(Debug, Clone)]
+enum Effect {
+    Send {
+        n: u64,
+        schedule: Option<OffsetDateTime>,
+    },
+    CancelScheduled {
+        n: u64,
+    },
+    ReceiveAndDelete {
+        n: u64,
+    },
+    ReceiveAndSettle {
+        n: u64,
+        verb: SettleVerb,
+    },
+    SettleDeferred {
+        n: u64,
+        verb: SettleVerb,
+    },
+    Delete {
+        n: u64,
+        shown: Vec<i64>,
+    },
+    Move {
+        to: String,
+        n: u64,
+    },
+    Resubmit {
+        to: String,
+        n: u64,
+        remove_original: bool,
+    },
+    Purge,
+    Import {
+        n: u64,
+    },
+    SessionState {
+        session: String,
+        replace: bool,
+    },
+}
+
+/// How many sequence numbers a delete sentence lists before `and N more`.
+const SEQUENCES_SHOWN: usize = 10;
+
+/// A mutating call, before it runs: what, where, how many and the words that name the effect.
+#[derive(Debug, Clone)]
+pub struct Operation {
+    /// What kind of change it makes.
+    pub mutation: Mutation,
+    /// Where.
+    pub target: Target,
+    /// How many messages it may touch.
+    pub count: CountEstimate,
+    /// Always `false`: the field exists for the kit, and Dispatched cannot undo a broker operation.
+    pub reversible: bool,
+    effect: Effect,
+    lock_search: bool,
+}
+
+fn messages(n: u64) -> String {
+    CountEstimate::Exact(n).text("message")
+}
+
+impl Operation {
+    fn build(mutation: Mutation, target: Target, count: CountEstimate, effect: Effect) -> Self {
+        Self {
+            mutation,
+            target,
+            count,
+            reversible: false,
+            effect,
+            lock_search: false,
+        }
+    }
+
+    /// Send `n` messages, or schedule them for a time.
+    pub fn send(target: Target, n: u64, schedule: Option<OffsetDateTime>) -> Self {
+        Self::build(
+            Mutation::Send,
+            target,
+            CountEstimate::Exact(n),
+            Effect::Send { n, schedule },
+        )
+    }
+
+    /// Cancel `n` scheduled messages.
+    pub fn cancel_scheduled(target: Target, n: u64) -> Self {
+        Self::build(
+            Mutation::Delete,
+            target,
+            CountEstimate::Exact(n),
+            Effect::CancelScheduled { n },
+        )
+    }
+
+    /// Receive up to `n` messages and delete them.
+    pub fn receive_and_delete(target: Target, n: u64) -> Self {
+        Self::build(
+            Mutation::Delete,
+            target,
+            CountEstimate::UpTo(n),
+            Effect::ReceiveAndDelete { n },
+        )
+    }
+
+    /// Receive up to `n` messages and settle them with `verb`.
+    pub fn receive_and_settle(target: Target, n: u64, verb: SettleVerb) -> Self {
+        Self::build(
+            Mutation::Settle,
+            target,
+            CountEstimate::UpTo(n),
+            Effect::ReceiveAndSettle { n, verb },
+        )
+    }
+
+    /// Settle `n` deferred messages with `verb`.
+    pub fn settle_deferred(target: Target, n: u64, verb: SettleVerb) -> Self {
+        Self::build(
+            Mutation::Settle,
+            target,
+            CountEstimate::Exact(n),
+            Effect::SettleDeferred { n, verb },
+        )
+    }
+
+    /// Delete the messages with these sequence numbers.
+    pub fn delete(target: Target, sequence_numbers: &[i64]) -> Self {
+        Self::build(
+            Mutation::Delete,
+            target,
+            CountEstimate::Exact(sequence_numbers.len() as u64),
+            Effect::Delete {
+                n: sequence_numbers.len() as u64,
+                shown: sequence_numbers
+                    .iter()
+                    .copied()
+                    .take(SEQUENCES_SHOWN)
+                    .collect(),
+            },
+        )
+    }
+
+    /// Move `n` messages to the entity `target_name`: sent first, then removed.
+    pub fn move_to(target: Target, target_name: &str, n: u64) -> Self {
+        Self::build(
+            Mutation::Delete,
+            target,
+            CountEstimate::Exact(n),
+            Effect::Move {
+                to: target_name.to_string(),
+                n,
+            },
+        )
+    }
+
+    /// Resubmit `n` messages to the entity `target_name`, optionally removing the originals.
+    pub fn resubmit(target: Target, target_name: &str, n: u64, remove_original: bool) -> Self {
+        let mutation = if remove_original {
+            Mutation::Delete
+        } else {
+            Mutation::Send
+        };
+        Self::build(
+            mutation,
+            target,
+            CountEstimate::Exact(n),
+            Effect::Resubmit {
+                to: target_name.to_string(),
+                n,
+                remove_original,
+            },
+        )
+    }
+
+    /// Remove every message of the target.
+    pub fn purge(target: Target, count: CountEstimate) -> Self {
+        Self::build(Mutation::Purge, target, count, Effect::Purge)
+    }
+
+    /// Send `n` messages read from an import file.
+    pub fn import(target: Target, n: u64) -> Self {
+        Self::build(
+            Mutation::Send,
+            target,
+            CountEstimate::Exact(n),
+            Effect::Import { n },
+        )
+    }
+
+    /// Replace (`true`) or clear (`false`) the state of a session.
+    pub fn set_session_state(target: Target, session: &str, replace: bool) -> Self {
+        Self::build(
+            Mutation::SessionState,
+            target,
+            CountEstimate::Exact(1),
+            Effect::SessionState {
+                session: session.to_string(),
+                replace,
+            },
+        )
+    }
+
+    /// Mark the operation as finding its messages with a peek-lock search: the sentence then says
+    /// that examined messages stay locked while it runs.
+    pub fn searched(mut self) -> Self {
+        self.lock_search = true;
+        self
+    }
+
+    /// Short verb for confirmations and the audit log.
+    pub fn verb(&self) -> &'static str {
+        match &self.effect {
+            Effect::Send { schedule: None, .. } => "send",
+            Effect::Send { .. } => "schedule",
+            Effect::CancelScheduled { .. } => "cancel-scheduled",
+            Effect::ReceiveAndDelete { .. } => "receive-and-delete",
+            Effect::ReceiveAndSettle { verb, .. } | Effect::SettleDeferred { verb, .. } => {
+                verb.text()
+            }
+            Effect::Delete { .. } => "delete",
+            Effect::Move { .. } => "move",
+            Effect::Resubmit { .. } => "resubmit",
+            Effect::Purge => "purge",
+            Effect::Import { .. } => "import",
+            Effect::SessionState { replace: true, .. } => "set-session-state",
+            Effect::SessionState { .. } => "clear-session-state",
+        }
+    }
+
+    /// The exact sentence naming the effect.
+    pub fn summary(&self, profile: &ProfileRef) -> String {
+        let at = self.target.address_text();
+        let on = &profile.name;
+        let mut text = match &self.effect {
+            Effect::Send { n, schedule: None } => {
+                format!("Send {} to {at} on {on}", messages(*n))
+            }
+            Effect::Send {
+                n,
+                schedule: Some(when),
+            } => format!(
+                "Schedule {} to {at} for {} on {on}",
+                messages(*n),
+                rfc3339(*when)
+            ),
+            Effect::CancelScheduled { n } => {
+                format!("Cancel {n} scheduled {} in {at} on {on}", plural_word(*n))
+            }
+            Effect::ReceiveAndDelete { n } => format!(
+                "Remove up to {} from {at} on {on} (receive and delete)",
+                messages(*n)
+            ),
+            Effect::ReceiveAndSettle { n, verb } => {
+                let tail = match verb {
+                    SettleVerb::Complete => "complete them (removes them)",
+                    SettleVerb::Abandon => "abandon them",
+                    SettleVerb::Defer => "defer them",
+                    SettleVerb::DeadLetter => "dead-letter them",
+                };
+                format!(
+                    "Receive up to {} from {at} and {tail} on {on}",
+                    messages(*n)
+                )
+            }
+            Effect::SettleDeferred { n, verb } => format!(
+                "{} {n} deferred {} in {at} on {on}",
+                verb.capitalised(),
+                plural_word(*n)
+            ),
+            Effect::Delete { n, shown } => {
+                let mut list = shown
+                    .iter()
+                    .map(i64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let more = n.saturating_sub(shown.len() as u64);
+                if more > 0 {
+                    list = format!(
+                        "{} and {} more",
+                        shown
+                            .iter()
+                            .map(i64::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        count_text(more)
+                    );
+                }
+                let label = if *n == 1 {
+                    "sequence number"
+                } else {
+                    "sequence numbers"
+                };
+                format!("Delete {} ({label} {list}) from {at} on {on}", messages(*n))
+            }
+            Effect::Move { to, n } => format!(
+                "Move {} from {at} to {to} on {on} (sent first, then removed: a message may arrive twice)",
+                messages(*n)
+            ),
+            Effect::Resubmit {
+                to,
+                n,
+                remove_original,
+            } => format!(
+                "Resubmit {} from {at} to {to} on {on}{}",
+                messages(*n),
+                if *remove_original {
+                    ", removing the originals"
+                } else {
+                    ""
+                }
+            ),
+            Effect::Purge => {
+                let whole = self.target.sub_queue.is_none();
+                let place = if whole {
+                    format!("{at} (active, deferred and dead-lettered)")
+                } else {
+                    at.clone()
+                };
+                let mut s = format!("Remove {} from {place} on {on}", self.count.text("message"));
+                if let CountEstimate::AtLeast(n) = self.count {
+                    s.push_str(&format!(
+                        " (at least {} are there; run purge again for the rest)",
+                        count_text(n)
+                    ));
+                }
+                if whole {
+                    s.push_str(
+                        ". Scheduled messages are kept; cancel them with `scheduled cancel --all`",
+                    );
+                }
+                s
+            }
+            Effect::Import { n } => {
+                format!("Send {n} imported {} to {at} on {on}", plural_word(*n))
+            }
+            Effect::SessionState { session, replace } => format!(
+                "{} the state of session {session} in {at} on {on}",
+                if *replace { "Replace" } else { "Clear" }
+            ),
+        };
+        if self.lock_search {
+            text.push_str(". Messages examined during the search are locked while it runs");
+        }
+        text
+    }
+
+    /// The request a policy confirms: the entity base as target, the exact sentence as summary.
+    pub fn confirm_request(&self, actor: &Actor) -> ConfirmRequest {
+        ConfirmRequest {
+            verb: self.verb().to_string(),
+            target: self.target.entity.base(),
+            summary: self.summary(&actor.profile),
+            item_count: self.count.bound(),
+            reversible: self.reversible,
+            production: actor.profile.production,
+            origin: actor.origin,
+        }
+    }
+}
+
+fn plural_word(n: u64) -> &'static str {
+    if n == 1 { "message" } else { "messages" }
+}
+
+fn rfc3339(t: OffsetDateTime) -> String {
+    t.to_offset(time::UtcOffset::UTC)
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| t.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use time::macros::datetime;
+
+    fn prod() -> ProfileRef {
+        ProfileRef {
+            name: "prod-weu".into(),
+            production: true,
+        }
+    }
+    fn dlq(entity: &str) -> Target {
+        Target::new(EntityPath::queue(entity), SubQueue::DeadLetter)
+    }
+
+    #[test]
+    fn purge_text_matches_the_spec_example() {
+        let op = Operation::purge(dlq("orders"), CountEstimate::Exact(1284));
+        assert_eq!(
+            op.summary(&prod()),
+            "Remove 1,284 messages from orders/$DeadLetterQueue on prod-weu"
+        );
+        assert_eq!(op.verb(), "purge");
+        assert_eq!(op.mutation, Mutation::Purge);
+    }
+
+    #[test]
+    fn every_effect_names_count_entity_and_profile() {
+        let p = prod();
+        let q = || Target::new(EntityPath::queue("orders"), SubQueue::Active);
+        let cases = [
+            (
+                Operation::send(q(), 3, None),
+                "Send 3 messages to orders on prod-weu",
+            ),
+            (
+                Operation::send(q(), 1, Some(datetime!(2026-10-18 09:00 UTC))),
+                "Schedule 1 message to orders for 2026-10-18T09:00:00Z on prod-weu",
+            ),
+            (
+                Operation::cancel_scheduled(q(), 4),
+                "Cancel 4 scheduled messages in orders on prod-weu",
+            ),
+            (
+                Operation::receive_and_delete(q(), 10),
+                "Remove up to 10 messages from orders on prod-weu (receive and delete)",
+            ),
+            (
+                Operation::receive_and_settle(q(), 10, SettleVerb::Complete),
+                "Receive up to 10 messages from orders and complete them (removes them) on prod-weu",
+            ),
+            (
+                Operation::receive_and_settle(q(), 2, SettleVerb::DeadLetter),
+                "Receive up to 2 messages from orders and dead-letter them on prod-weu",
+            ),
+            (
+                Operation::delete(dlq("orders"), &[4, 9, 12]),
+                "Delete 3 messages (sequence numbers 4, 9, 12) from orders/$DeadLetterQueue on prod-weu",
+            ),
+            (
+                Operation::move_to(dlq("orders"), "orders", 3),
+                "Move 3 messages from orders/$DeadLetterQueue to orders on prod-weu (sent first, then removed: a message may arrive twice)",
+            ),
+            (
+                Operation::resubmit(dlq("orders"), "orders", 3, false),
+                "Resubmit 3 messages from orders/$DeadLetterQueue to orders on prod-weu",
+            ),
+            (
+                Operation::resubmit(dlq("orders"), "orders", 3, true),
+                "Resubmit 3 messages from orders/$DeadLetterQueue to orders on prod-weu, removing the originals",
+            ),
+            (
+                Operation::set_session_state(q(), "RMA-1", true),
+                "Replace the state of session RMA-1 in orders on prod-weu",
+            ),
+            (
+                Operation::set_session_state(q(), "RMA-1", false),
+                "Clear the state of session RMA-1 in orders on prod-weu",
+            ),
+            (
+                Operation::settle_deferred(q(), 2, SettleVerb::DeadLetter),
+                "Dead-letter 2 deferred messages in orders on prod-weu",
+            ),
+            (
+                Operation::import(q(), 12),
+                "Send 12 imported messages to orders on prod-weu",
+            ),
+        ];
+        for (op, text) in cases {
+            assert_eq!(op.summary(&p), text);
+        }
+    }
+
+    #[test]
+    fn estimated_counts_say_so() {
+        let t = || dlq("orders");
+        assert_eq!(
+            Operation::purge(t(), CountEstimate::About(40)).summary(&prod()),
+            "Remove about 40 messages from orders/$DeadLetterQueue on prod-weu"
+        );
+        assert_eq!(
+            Operation::purge(t(), CountEstimate::AtLeast(10_000)).summary(&prod()),
+            "Remove up to 10,000 messages from orders/$DeadLetterQueue on prod-weu (at least 10,000 are there; run purge again for the rest)"
+        );
+        assert_eq!(
+            Operation::delete(t(), &(1..=30).collect::<Vec<_>>()).summary(&prod()),
+            "Delete 30 messages (sequence numbers 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 and 20 more) from orders/$DeadLetterQueue on prod-weu"
+        );
+    }
+
+    #[test]
+    fn purge_all_mentions_scheduled_messages_are_kept() {
+        let op = Operation::purge(
+            Target::all(EntityPath::queue("orders")),
+            CountEstimate::Exact(7),
+        );
+        assert_eq!(
+            op.summary(&prod()),
+            "Remove 7 messages from orders (active, deferred and dead-lettered) on prod-weu. Scheduled messages are kept; cancel them with `scheduled cancel --all`"
+        );
+    }
+
+    #[test]
+    fn confirm_request_targets_the_entity_base_and_carries_production() {
+        let actor = Actor {
+            origin: Origin::Cli,
+            profile: prod(),
+        };
+        let op = Operation::purge(
+            Target::new(
+                EntityPath::subscription("events", "all"),
+                SubQueue::DeadLetter,
+            ),
+            CountEstimate::Exact(2),
+        );
+        let r = op.confirm_request(&actor);
+        assert_eq!(r.target, "events/Subscriptions/all");
+        assert_eq!(r.verb, "purge");
+        assert_eq!(r.item_count, Some(2));
+        assert!(r.production && !r.reversible && r.origin == Origin::Cli);
+        assert!(
+            r.summary
+                .contains("events/Subscriptions/all/$DeadLetterQueue")
+        );
+    }
+
+    #[test]
+    fn lock_searches_say_that_examined_messages_are_locked() {
+        let op = Operation::delete(dlq("orders"), &[4, 9]).searched();
+        assert_eq!(
+            op.summary(&prod()),
+            "Delete 2 messages (sequence numbers 4, 9) from orders/$DeadLetterQueue on prod-weu. Messages examined during the search are locked while it runs"
+        );
+        assert_eq!(
+            Operation::move_to(dlq("orders"), "orders", 3)
+                .searched()
+                .summary(&prod()),
+            "Move 3 messages from orders/$DeadLetterQueue to orders on prod-weu (sent first, then removed: a message may arrive twice). Messages examined during the search are locked while it runs"
+        );
+    }
+
+    #[test]
+    fn no_broker_operation_is_reversible() {
+        // The field exists for the kit; nothing a broker op does can be undone by Dispatched.
+        let q = Target::new(EntityPath::queue("q"), SubQueue::Active);
+        assert!(!Operation::send(q.clone(), 1, None).reversible);
+        assert!(!Operation::delete(q.clone(), &[1]).reversible);
+        assert!(
+            !Operation::purge(Target::all(EntityPath::queue("q")), CountEstimate::Exact(1))
+                .reversible
+        );
+        assert!(!Operation::set_session_state(q, "s", false).reversible);
+    }
+
+    #[test]
+    fn mutations_follow_the_spec() {
+        let q = || Target::new(EntityPath::queue("q"), SubQueue::Active);
+        assert_eq!(Operation::send(q(), 1, None).mutation, Mutation::Send);
+        assert_eq!(Operation::import(q(), 1).mutation, Mutation::Send);
+        assert_eq!(
+            Operation::cancel_scheduled(q(), 1).mutation,
+            Mutation::Delete
+        );
+        assert_eq!(
+            Operation::receive_and_delete(q(), 1).mutation,
+            Mutation::Delete
+        );
+        assert_eq!(
+            Operation::receive_and_settle(q(), 1, SettleVerb::Abandon).mutation,
+            Mutation::Settle
+        );
+        assert_eq!(
+            Operation::resubmit(q(), "x", 1, false).mutation,
+            Mutation::Send
+        );
+        assert_eq!(
+            Operation::resubmit(q(), "x", 1, true).mutation,
+            Mutation::Delete
+        );
+        assert_eq!(Operation::move_to(q(), "x", 1).mutation, Mutation::Delete);
+        assert_eq!(
+            serde_json::to_string(&Mutation::SessionState).unwrap(),
+            "\"session-state\""
+        );
+    }
+
+    #[test]
+    fn counts_are_grouped_and_bounded() {
+        assert_eq!(count_text(0), "0");
+        assert_eq!(count_text(999), "999");
+        assert_eq!(count_text(1284), "1,284");
+        assert_eq!(count_text(1_000_000), "1,000,000");
+        assert_eq!(CountEstimate::Unknown.bound(), None);
+        assert_eq!(CountEstimate::AtLeast(5).bound(), Some(5));
+        assert_eq!(CountEstimate::Exact(1).text("message"), "1 message");
+    }
+}
