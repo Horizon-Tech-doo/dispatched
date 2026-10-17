@@ -852,7 +852,7 @@ mod tests {
             scheduled_enqueue_time: None,
             locked_until: None,
             delivery_count: 1,
-            time_to_live_ms: None,
+            time_to_live: None,
             dead_letter_reason: None,
             dead_letter_description: None,
             dead_letter_source: None,

@@ -46,8 +46,9 @@ pub struct MessageSummary {
     pub scheduled_enqueue_time: Option<OffsetDateTime>,
     /// Delivery count.
     pub delivery_count: u32,
-    /// Time to live in milliseconds.
-    pub time_to_live_ms: Option<u32>,
+    /// Time to live; serialized as milliseconds.
+    #[serde(rename = "time_to_live_ms", with = "super::message::ttl_ms")]
+    pub time_to_live: Option<std::time::Duration>,
     /// Dead-letter reason.
     pub dead_letter_reason: Option<String>,
     /// Dead-letter description.
@@ -146,7 +147,7 @@ impl From<&PeekedMessage> for MessageSummary {
             enqueued_time: m.enqueued_time,
             scheduled_enqueue_time: m.scheduled_enqueue_time,
             delivery_count: m.delivery_count,
-            time_to_live_ms: m.time_to_live_ms,
+            time_to_live: m.time_to_live,
             dead_letter_reason: m.dead_letter_reason.clone(),
             dead_letter_description: m.dead_letter_description.clone(),
             dead_letter_source: m.dead_letter_source.clone(),

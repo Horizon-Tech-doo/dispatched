@@ -416,9 +416,9 @@ fn field_value(msg: &PeekedMessage, field: &Field) -> FieldValue {
             Some(PropValue::Int(n)) => FieldValue::Num(*n as f64),
             Some(PropValue::UInt(n)) => FieldValue::Num(*n as f64),
             Some(PropValue::Double(d)) => FieldValue::Num(*d),
-            Some(PropValue::String(s)) | Some(PropValue::Uuid(s)) | Some(PropValue::Other(s)) => {
-                FieldValue::Str(s.clone())
-            }
+            Some(PropValue::String(s)) | Some(PropValue::Other(s)) => FieldValue::Str(s.clone()),
+            Some(PropValue::Uuid(u)) => FieldValue::Str(u.to_string()),
+            Some(PropValue::TimeSpan(d)) => FieldValue::Num(d.as_seconds_f64()),
             Some(PropValue::Timestamp(t)) => FieldValue::Time(*t),
             Some(PropValue::Binary(b)) => {
                 FieldValue::Str(base64::engine::general_purpose::STANDARD.encode(b))
