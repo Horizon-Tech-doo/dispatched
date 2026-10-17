@@ -433,7 +433,11 @@ impl Operation {
                 rfc3339(*when)
             ),
             Effect::CancelScheduled { n } => {
-                format!("Cancel {n} scheduled {} in {at} on {on}", plural_word(*n))
+                format!(
+                    "Cancel {} scheduled {} in {at} on {on}",
+                    count_text(*n),
+                    plural_word(*n)
+                )
             }
             Effect::ReceiveAndDelete { n } => format!(
                 "Remove up to {} from {at} on {on} (receive and delete)",
@@ -452,8 +456,9 @@ impl Operation {
                 )
             }
             Effect::SettleDeferred { n, verb } => format!(
-                "{} {n} deferred {} in {at} on {on}",
+                "{} {} deferred {} in {at} on {on}",
                 verb.capitalised(),
+                count_text(*n),
                 plural_word(*n)
             ),
             Effect::Delete { n, shown } => {
@@ -464,15 +469,7 @@ impl Operation {
                     .join(", ");
                 let more = n.saturating_sub(shown.len() as u64);
                 if more > 0 {
-                    list = format!(
-                        "{} and {} more",
-                        shown
-                            .iter()
-                            .map(i64::to_string)
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                        count_text(more)
-                    );
+                    list = format!("{list} and {} more", count_text(more));
                 }
                 let label = if *n == 1 {
                     "sequence number"
@@ -520,7 +517,11 @@ impl Operation {
                 s
             }
             Effect::Import { n } => {
-                format!("Send {n} imported {} to {at} on {on}", plural_word(*n))
+                format!(
+                    "Send {} imported {} to {at} on {on}",
+                    count_text(*n),
+                    plural_word(*n)
+                )
             }
             Effect::SessionState { session, replace } => format!(
                 "{} the state of session {session} in {at} on {on}",
@@ -648,6 +649,28 @@ mod tests {
         for (op, text) in cases {
             assert_eq!(op.summary(&p), text);
         }
+    }
+
+    #[test]
+    fn large_counts_use_thousands_separators() {
+        let p = prod();
+        let q = || Target::new(EntityPath::queue("orders"), SubQueue::Active);
+        assert_eq!(
+            Operation::cancel_scheduled(q(), 1000).summary(&p),
+            "Cancel 1,000 scheduled messages in orders on prod-weu"
+        );
+        assert_eq!(
+            Operation::settle_deferred(q(), 1234, SettleVerb::Abandon).summary(&p),
+            "Abandon 1,234 deferred messages in orders on prod-weu"
+        );
+        assert_eq!(
+            Operation::import(q(), 2500).summary(&p),
+            "Send 2,500 imported messages to orders on prod-weu"
+        );
+        assert_eq!(
+            Operation::purge(dlq("orders"), CountEstimate::Unknown).summary(&p),
+            "Remove an unknown number of messages from orders/$DeadLetterQueue on prod-weu"
+        );
     }
 
     #[test]
