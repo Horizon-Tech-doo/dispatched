@@ -1,6 +1,6 @@
 //! Per-message job results, progress events and report files for bulk operations.
 
-use crate::activity::Outcome;
+use crate::activity::{Outcome, redact};
 use crate::export::{ExportFormat, FileExport};
 use crate::{Error, Result};
 use serde::ser::SerializeStruct;
@@ -168,8 +168,36 @@ impl JobReport {
         }
     }
 
+    /// A copy with secrets scrubbed from every free-text field (reasons, details, notes).
+    /// All output (`summary_line`, JSON, report files) goes through this, so hand-built
+    /// reports are covered too.
+    fn scrubbed(&self) -> JobReport {
+        let mut r = self.clone();
+        for item in &mut r.items {
+            match &mut item.outcome {
+                ItemOutcome::Succeeded { detail } => {
+                    if let Some(d) = detail {
+                        *d = redact(d);
+                    }
+                }
+                ItemOutcome::Failed { reason, .. } | ItemOutcome::Skipped { reason } => {
+                    *reason = redact(reason);
+                }
+                ItemOutcome::Missing | ItemOutcome::NotReached { .. } => {}
+            }
+        }
+        for n in &mut r.notes {
+            *n = redact(n);
+        }
+        r
+    }
+
     /// One sentence describing the result.
     pub fn summary_line(&self) -> String {
+        self.scrubbed().summary_line_inner()
+    }
+
+    fn summary_line_inner(&self) -> String {
         let verb = self.kind.verb();
         let place = match &self.target {
             Some(t) => format!("from {} to {t}", self.entity),
@@ -229,10 +257,15 @@ impl JobReport {
     /// JSON is one document with the summary and every item; NDJSON is one line per item
     /// followed by a summary line with `"type":"summary"`.
     pub fn write(&self, path: &Path, format: ExportFormat, overwrite: bool) -> Result<()> {
+        let report = self.scrubbed();
+        report.write_scrubbed(path, format, overwrite)
+    }
+
+    fn write_scrubbed(&self, path: &Path, format: ExportFormat, overwrite: bool) -> Result<()> {
         let mut out = FileExport::create(path, format, overwrite)?;
         let bytes = match format {
             ExportFormat::Json => {
-                let mut v = serde_json::to_vec_pretty(self).map_err(json_err)?;
+                let mut v = serde_json::to_vec_pretty(&self.serializable()).map_err(json_err)?;
                 v.push(b'\n');
                 v
             }
@@ -261,24 +294,40 @@ fn json_err(e: serde_json::Error) -> Error {
 
 fn rfc3339(t: OffsetDateTime) -> String {
     t.format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_default()
+        .unwrap_or_else(|_| "invalid-time".into())
 }
 
 impl Serialize for JobReport {
     fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
-        let mut st = s.serialize_struct("JobReport", 11)?;
-        st.serialize_field("op_id", &self.op_id)?;
-        st.serialize_field("kind", &self.kind)?;
-        st.serialize_field("entity", &self.entity)?;
-        st.serialize_field("target", &self.target)?;
-        st.serialize_field("started_at", &rfc3339(self.started_at))?;
-        st.serialize_field("finished_at", &rfc3339(self.finished_at))?;
-        st.serialize_field("cancelled", &self.cancelled)?;
-        st.serialize_field("succeeded", &self.succeeded())?;
-        st.serialize_field("failed", &self.failed_json())?;
-        st.serialize_field("skipped", &self.skipped())?;
-        st.serialize_field("items", &self.items)?;
-        st.serialize_field("notes", &self.notes)?;
+        self.scrubbed().serializable().serialize(s)
+    }
+}
+
+/// Wrapper that serializes an already scrubbed report.
+struct Scrubbed<'a>(&'a JobReport);
+
+impl JobReport {
+    fn serializable(&self) -> Scrubbed<'_> {
+        Scrubbed(self)
+    }
+}
+
+impl Serialize for Scrubbed<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        let this = self.0;
+        let mut st = s.serialize_struct("JobReport", 12)?;
+        st.serialize_field("op_id", &this.op_id)?;
+        st.serialize_field("kind", &this.kind)?;
+        st.serialize_field("entity", &this.entity)?;
+        st.serialize_field("target", &this.target)?;
+        st.serialize_field("started_at", &rfc3339(this.started_at))?;
+        st.serialize_field("finished_at", &rfc3339(this.finished_at))?;
+        st.serialize_field("cancelled", &this.cancelled)?;
+        st.serialize_field("succeeded", &this.succeeded())?;
+        st.serialize_field("failed", &this.failed_json())?;
+        st.serialize_field("skipped", &this.skipped())?;
+        st.serialize_field("items", &this.items)?;
+        st.serialize_field("notes", &this.notes)?;
         st.end()
     }
 }
@@ -567,6 +616,46 @@ mod tests {
                 .last()
                 .unwrap()
                 .contains("\"type\":\"summary\"")
+        );
+    }
+
+    #[test]
+    fn secrets_are_scrubbed_from_summary_files_and_json() {
+        use crate::export::ExportFormat;
+        let secret = "Endpoint=sb://x/;SharedAccessKey=abc123secret and ?sig=deadbeef&se=1";
+        let mut r = report(&[
+            failed(1, "network", secret),
+            item(
+                2,
+                ItemOutcome::Succeeded {
+                    detail: Some(secret.into()),
+                },
+            ),
+        ]);
+        r.notes.push(secret.into());
+        let dir = tempfile::tempdir().unwrap();
+        for (name, fmt) in [
+            ("r.json", ExportFormat::Json),
+            ("r.ndjson", ExportFormat::Ndjson),
+        ] {
+            r.write(&dir.path().join(name), fmt, false).unwrap();
+            let text = std::fs::read_to_string(dir.path().join(name)).unwrap();
+            assert!(text.contains("[redacted]"), "{text}");
+            assert!(
+                !text.contains("abc123secret") && !text.contains("deadbeef"),
+                "{text}"
+            );
+        }
+        let line = r.summary_line();
+        assert!(line.contains("[redacted]"), "{line}");
+        assert!(
+            !line.contains("abc123secret") && !line.contains("deadbeef"),
+            "{line}"
+        );
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(
+            !json.contains("abc123secret") && !json.contains("deadbeef"),
+            "{json}"
         );
     }
 

@@ -535,7 +535,7 @@ fn bounded(s: &str) -> String {
 
 /// Defense in depth: callers must never pass secrets, but if one slips in
 /// (a broker error echoing a connection string, say) it is not persisted.
-fn redact(s: &str) -> String {
+pub(crate) fn redact(s: &str) -> String {
     static PATTERNS: std::sync::OnceLock<Vec<regex::Regex>> = std::sync::OnceLock::new();
     let patterns = PATTERNS.get_or_init(|| {
         [
