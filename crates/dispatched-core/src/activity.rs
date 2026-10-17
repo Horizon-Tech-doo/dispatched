@@ -17,11 +17,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// Largest page a query may ask for.
 pub const MAX_QUERY_LIMIT: u32 = 10_000;
-/// Longest `summary` or `error` the log stores, in characters.
+/// Longest `summary`, `note` or `error` the log stores, in characters.
 pub const MAX_TEXT_CHARS: usize = 2_000;
 const EXPORT_PAGE_ROWS: u32 = 1_000;
 
@@ -90,8 +90,11 @@ pub struct ActivityEntry {
     pub skipped: Option<u64>,
     /// One sentence saying what happened.
     pub summary: String,
-    /// Error text, if it failed.
+    /// Error text; only set when the operation failed, was cancelled or was denied.
     pub error: Option<String>,
+    /// A remark about a finished operation that is not an error (for example that more messages
+    /// may have been removed than the result lists).
+    pub note: Option<String>,
 }
 
 /// Receives audit entries. The safety gate holds one of these.
@@ -235,6 +238,13 @@ impl ActivityLog {
             )
             .map_err(|e| self.err(e))?;
         }
+        if version < 2 {
+            tx.execute_batch(
+                "ALTER TABLE activity ADD COLUMN note TEXT;
+                PRAGMA user_version = 2;",
+            )
+            .map_err(|e| self.err(e))?;
+        }
         tx.commit().map_err(|e| self.err(e))
     }
 
@@ -271,7 +281,7 @@ impl ActivityLog {
         let mut stmt = conn
             .prepare(
                 "SELECT id, op_id, at, origin, profile, entity, action, kind, phase, outcome, \
-                        count, succeeded, failed, skipped, summary, error \
+                        count, succeeded, failed, skipped, summary, error, note \
                  FROM activity \
                  WHERE (?1 IS NULL OR origin = ?1) \
                    AND (?2 IS NULL OR profile = ?2) \
@@ -302,6 +312,7 @@ impl ActivityLog {
                         skipped: r.get(13)?,
                         summary: r.get(14)?,
                         error: r.get(15)?,
+                        note: r.get(16)?,
                     })
                 },
             )
@@ -367,8 +378,8 @@ impl Audit for ActivityLog {
         let conn = self.conn.lock().expect("activity db poisoned");
         conn.execute(
             "INSERT INTO activity (op_id, at, origin, profile, entity, action, kind, phase, \
-                outcome, count, succeeded, failed, skipped, summary, error) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                outcome, count, succeeded, failed, skipped, summary, error, note) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 plain(&entry.op_id),
                 at,
@@ -385,6 +396,7 @@ impl Audit for ActivityLog {
                 entry.skipped.map(to_i64),
                 bounded(&entry.summary),
                 entry.error.as_deref().map(bounded),
+                entry.note.as_deref().map(bounded),
             ],
         )
         .map_err(|e| self.err(e))?;
@@ -447,6 +459,7 @@ struct RawRow {
     skipped: Option<i64>,
     summary: String,
     error: Option<String>,
+    note: Option<String>,
 }
 
 impl RawRow {
@@ -470,6 +483,7 @@ impl RawRow {
             skipped: from_i64(self.skipped),
             summary: self.summary,
             error: self.error,
+            note: self.note,
         })
     }
 }
@@ -522,7 +536,7 @@ fn is_format(c: char) -> bool {
         | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{feff}')
 }
 
-/// Free text for `summary` and `error`: cleaned, scrubbed of secrets, capped.
+/// Free text for `summary`, `error` and `note`: cleaned, scrubbed of secrets, capped.
 fn bounded(s: &str) -> String {
     let clean = redact(&plain(s));
     if clean.chars().count() <= MAX_TEXT_CHARS {
@@ -595,6 +609,7 @@ mod tests {
             skipped: None,
             summary: "Remove 3 messages from orders on dev".into(),
             error: None,
+            note: None,
         }
     }
 
@@ -878,5 +893,50 @@ mod tests {
     #[test]
     fn bidi_and_zero_width_characters_are_replaced() {
         assert_eq!(plain("a\u{202e}b\u{200b}c"), "a b c");
+    }
+
+    #[test]
+    fn notes_are_stored_redacted_and_capped() {
+        let log = ActivityLog::open_in_memory().unwrap();
+        let mut e = entry("n", Phase::Finished, Outcome::Succeeded);
+        e.note = Some("more may be gone sig=abc123 \u{7}".into());
+        log.record(&e).unwrap();
+        let got = &log.list(&ActivityQuery::default()).unwrap()[0];
+        assert_eq!(got.note.as_deref(), Some("more may be gone [redacted]  "));
+        assert_eq!(got.error, None);
+        let mut e = entry("n2", Phase::Finished, Outcome::Succeeded);
+        e.note = Some("x".repeat(MAX_TEXT_CHARS + 50));
+        log.record(&e).unwrap();
+        let got = &log.list(&ActivityQuery::default()).unwrap()[0];
+        assert_eq!(got.note.as_ref().unwrap().chars().count(), MAX_TEXT_CHARS);
+    }
+
+    #[test]
+    fn a_version_1_log_gains_the_note_column() {
+        let dir = std::env::temp_dir().join(format!("dispatched-act-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("activity.db");
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE activity (id INTEGER PRIMARY KEY AUTOINCREMENT, op_id TEXT NOT NULL, \
+                 at TEXT NOT NULL, origin TEXT NOT NULL, profile TEXT NOT NULL, entity TEXT, \
+                 action TEXT NOT NULL, kind TEXT NOT NULL, phase TEXT NOT NULL, outcome TEXT NOT NULL, \
+                 count INTEGER, succeeded INTEGER, failed INTEGER, skipped INTEGER, \
+                 summary TEXT NOT NULL, error TEXT);
+                 INSERT INTO activity (op_id, at, origin, profile, action, kind, phase, outcome, summary) \
+                 VALUES ('old', '2099-01-01T00:00:00.000000Z', 'cli', 'dev', 'purge', '{\"mutating\":\"purge\"}', 'finished', 'succeeded', 's');
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        }
+        let log = ActivityLog::open(&path).unwrap();
+        let got = log.list(&ActivityQuery::default()).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].note, None);
+        log.record(&entry("new", Phase::Finished, Outcome::Succeeded))
+            .unwrap();
+        drop(log);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

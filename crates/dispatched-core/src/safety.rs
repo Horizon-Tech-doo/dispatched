@@ -1,8 +1,9 @@
 //! The operation model: what a mutating call will do, in the exact words a human confirms.
 //!
-//! This module holds types and texts only. Every `Operation` knows its mutation kind, its target,
-//! how many messages it may touch and one exact sentence naming the effect; the gate that asks a
-//! policy to confirm it arrives with the operator.
+//! Every `Operation` knows its mutation kind, its target, how many messages it may touch and one
+//! exact sentence naming the effect. The [`Gate`] asks a policy to confirm it, writes the activity
+//! entry before the work starts and another when it ends (also when the work panics or the future
+//! is dropped, unless the process is killed or exits without unwinding).
 
 use crate::activity::{ActivityEntry, Audit, Outcome, Phase};
 use crate::error::{Error, Result};
@@ -574,7 +575,7 @@ pub struct AuditFacts {
     pub failed: Option<u64>,
     /// Messages skipped.
     pub skipped: Option<u64>,
-    /// A remark for the finished entry (stored in its `error` field).
+    /// A remark for the finished entry (stored in its `note` field; never an error).
     pub note: Option<String>,
 }
 
@@ -584,6 +585,7 @@ pub trait Audited {
     fn audit_outcome(&self) -> AuditFacts;
 
     /// Receives the activity op id before the result is returned, so a report can name it.
+    /// Override this when the type carries a report; the default drops the id.
     fn set_op_id(&mut self, _op_id: String) {}
 }
 
@@ -606,12 +608,39 @@ impl Audited for JobReport {
             succeeded: Some(self.succeeded()),
             failed: Some(self.failed()),
             skipped: Some(self.skipped()),
-            note: None,
+            note: if self.notes.is_empty() {
+                None
+            } else {
+                Some(self.notes.join("; "))
+            },
         }
     }
 
     fn set_op_id(&mut self, op_id: String) {
         self.op_id = Some(op_id);
+    }
+}
+
+/// Writes a Finished entry if the gate's future is dropped or its work panics after Started.
+struct FinishGuard {
+    audit: Arc<dyn Audit>,
+    entry: ActivityEntry,
+    armed: bool,
+}
+
+impl Drop for FinishGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // Never panic in drop: a failing or panicking audit is only logged.
+        let audit = &self.audit;
+        let entry = &self.entry;
+        let written =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| audit.record(entry)));
+        if !matches!(written, Ok(Ok(_))) {
+            tracing::warn!("could not write the interrupted entry to the activity log");
+        }
     }
 }
 
@@ -663,6 +692,7 @@ impl Gate {
             skipped: None,
             summary: summary.to_string(),
             error: None,
+            note: None,
         }
     }
 
@@ -695,7 +725,17 @@ impl Gate {
             )));
         }
 
+        let mut guard = FinishGuard {
+            audit: self.audit.clone(),
+            entry: {
+                let mut e = self.entry(op, &op_id, Phase::Finished, Outcome::Cancelled, &summary);
+                e.error = Some("interrupted before it finished".into());
+                e
+            },
+            armed: true,
+        };
         let result = work(op_id.clone()).await;
+        guard.armed = false;
 
         let finished = match &result {
             Ok(value) => {
@@ -704,7 +744,7 @@ impl Gate {
                 entry.succeeded = facts.succeeded;
                 entry.failed = facts.failed;
                 entry.skipped = facts.skipped;
-                entry.error = facts.note;
+                entry.note = facts.note;
                 entry
             }
             Err(e) => {
@@ -1093,11 +1133,17 @@ mod tests {
 
     #[tokio::test]
     async fn production_needs_the_typed_entity() {
-        let (g, _) = gate(Decision::Allow, true);
+        let (g, audit) = gate(Decision::Allow, true);
         assert!(matches!(
             g.run(&purge_op(), |_| async { Ok(()) }).await,
             Err(Error::Denied(_))
         ));
+        let log = audit.entries();
+        assert_eq!(log.len(), 1, "no started entry for a refused operation");
+        assert_eq!(
+            (log[0].phase, log[0].outcome),
+            (Phase::Finished, Outcome::Denied)
+        );
         let (g, _) = gate(Decision::ConfirmedTyped("orders".into()), true);
         g.run(&purge_op(), |_| async { Ok(()) }).await.unwrap();
     }
@@ -1120,10 +1166,13 @@ mod tests {
     #[tokio::test]
     async fn cancelled_work_is_audited_as_cancelled() {
         let (g, audit) = gate(Decision::Allow, false);
-        let _ = g
+        let r = g
             .run::<(), _, _>(&purge_op(), |_| async { Err(Error::Cancelled) })
             .await;
-        assert_eq!(audit.entries()[1].outcome, Outcome::Cancelled);
+        assert!(matches!(r, Err(Error::Cancelled)));
+        let fin = &audit.entries()[1];
+        assert_eq!(fin.outcome, Outcome::Cancelled);
+        assert_eq!(fin.error.as_deref(), Some("cancelled"));
     }
 
     #[tokio::test]
@@ -1173,5 +1222,93 @@ mod tests {
             .await;
         assert!(r.is_ok(), "the work result survives a failed finish write");
         assert_eq!(audit.entries().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_job_report_is_audited_with_its_counts_and_notes() {
+        let (g, audit) = gate(Decision::Allow, false);
+        g.run(&purge_op(), |_| async {
+            let mut r = report_with(2, 0, 0);
+            r.cancelled = true;
+            r.notes
+                .push("up to 3 more messages may have been removed".into());
+            Ok(r)
+        })
+        .await
+        .unwrap();
+        let fin = &audit.entries()[1];
+        assert_eq!((fin.outcome, fin.succeeded), (Outcome::Cancelled, Some(2)));
+        assert_eq!(fin.error, None, "a note is not an error");
+        assert_eq!(
+            fin.note.as_deref(),
+            Some("up to 3 more messages may have been removed")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_panicking_work_still_gets_a_finished_entry() {
+        let (g, audit) = gate(Decision::Allow, false);
+        let a = audit.clone();
+        let joined = tokio::spawn(async move {
+            g.run::<(), _, _>(&purge_op(), |_| async {
+                panic!("boom");
+            })
+            .await
+        })
+        .await;
+        assert!(joined.is_err());
+        let e = a.entries();
+        assert_eq!(e.len(), 2);
+        assert_eq!(
+            (e[1].phase, e[1].outcome),
+            (Phase::Finished, Outcome::Cancelled)
+        );
+        assert_eq!(
+            e[1].error.as_deref(),
+            Some("interrupted before it finished")
+        );
+        assert_eq!(e[0].op_id, e[1].op_id);
+    }
+
+    #[tokio::test]
+    async fn a_dropped_run_future_still_gets_a_finished_entry() {
+        let (g, audit) = gate(Decision::Allow, false);
+        let r = tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            g.run::<(), _, _>(&purge_op(), |_| std::future::pending()),
+        )
+        .await;
+        assert!(r.is_err());
+        let e = audit.entries();
+        assert_eq!(e.len(), 2);
+        assert_eq!(
+            (e[1].phase, e[1].outcome),
+            (Phase::Finished, Outcome::Cancelled)
+        );
+        assert_eq!(
+            e[1].error.as_deref(),
+            Some("interrupted before it finished")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_success_with_a_note_has_no_error() {
+        struct Noted;
+        impl Audited for Noted {
+            fn audit_outcome(&self) -> AuditFacts {
+                AuditFacts {
+                    outcome: Outcome::Succeeded,
+                    succeeded: Some(1),
+                    failed: Some(0),
+                    skipped: Some(0),
+                    note: Some("more may remain".into()),
+                }
+            }
+        }
+        let (g, audit) = gate(Decision::Allow, false);
+        g.run(&purge_op(), |_| async { Ok(Noted) }).await.unwrap();
+        let fin = &audit.entries()[1];
+        assert_eq!(fin.error, None);
+        assert_eq!(fin.note.as_deref(), Some("more may remain"));
     }
 }
