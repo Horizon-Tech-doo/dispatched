@@ -137,7 +137,7 @@ impl TypedValue {
             TypedValue::Double(d) => SimpleValue::Double((*d).into()),
             TypedValue::Bool(b) => SimpleValue::Bool(*b),
             TypedValue::DateTime(t) => SimpleValue::Timestamp(Timestamp::from(
-                i64::try_from(t.unix_timestamp_nanos() / 1_000_000).unwrap_or(i64::MAX),
+                i64::try_from(t.unix_timestamp_nanos().div_euclid(1_000_000)).unwrap_or(i64::MAX),
             )),
             TypedValue::TimeSpan(d) => SimpleValue::Described(Box::new(Described {
                 descriptor: Descriptor::Name(Symbol::from(TIMESPAN_DESCRIPTOR)),

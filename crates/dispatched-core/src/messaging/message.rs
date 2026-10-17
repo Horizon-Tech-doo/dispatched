@@ -104,7 +104,7 @@ pub mod ttl_ms {
         }
     }
 
-    /// Deserialize `u64` milliseconds or null.
+    /// Deserialize `u64` milliseconds or null. Use with `#[serde(default)]` so a missing field is None.
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
         Ok(Option::<u64>::deserialize(d)?.map(Duration::from_millis))
     }
@@ -397,18 +397,24 @@ pub fn decode_message(m: Message<Body<Value>>) -> PeekedMessage {
         )),
         Body::Empty => MessageBody::Empty,
     };
-    let time_to_live = header
+    // The header ttl is a u32 of milliseconds (the SDKs clamp longer values to u32::MAX), so a
+    // longer real TTL survives only as absolute-expiry-time minus creation-time: take the larger.
+    let from_header = header
         .and_then(|h| h.ttl)
-        .map(|ms| Duration::from_millis(u64::from(ms)))
-        .or_else(|| {
-            let p = props?;
-            let created = timestamp_to_datetime(p.creation_time.as_ref()?)?;
-            let expires = timestamp_to_datetime(p.absolute_expiry_time.as_ref()?)?;
-            (expires - created)
-                .try_into()
-                .ok()
-                .filter(|d: &Duration| !d.is_zero())
-        });
+        .map(|ms| Duration::from_millis(u64::from(ms)));
+    let from_expiry = props.and_then(|p| {
+        let created = timestamp_to_datetime(p.creation_time.as_ref()?)?;
+        let expires = timestamp_to_datetime(p.absolute_expiry_time.as_ref()?)?;
+        (expires - created)
+            .try_into()
+            .ok()
+            .filter(|d: &Duration| !d.is_zero())
+    });
+    let time_to_live = match (from_header, from_expiry) {
+        (Some(h), Some(e)) if h.as_millis() == u128::from(u32::MAX) => Some(e.max(h)),
+        (Some(h), _) => Some(h),
+        (None, e) => e,
+    };
     PeekedMessage {
         sequence_number,
         state,
@@ -956,6 +962,22 @@ mod tests {
             Some(Duration::from_millis(hundred_days_ms as u64))
         );
         assert_eq!(decode_message(amqp_with(|_| {})).time_to_live, None);
+        // The SDKs clamp the header to u32::MAX and keep the true TTL in the expiry.
+        let m = amqp_with(|m| {
+            m.header = Some(Header {
+                ttl: Some(u32::MAX),
+                ..Default::default()
+            });
+            m.properties = Some(Properties {
+                creation_time: Some(created.clone()),
+                absolute_expiry_time: Some(Timestamp::from_milliseconds(1_000 + hundred_days_ms)),
+                ..Default::default()
+            });
+        });
+        assert_eq!(
+            decode_message(m).time_to_live,
+            Some(Duration::from_millis(hundred_days_ms as u64))
+        );
         // Expiry before creation is not a time to live.
         let m = amqp_with(|m| {
             m.properties = Some(Properties {

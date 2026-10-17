@@ -176,12 +176,12 @@ export interface AppInfo { version: string; startup_error: string | null }
 
 export type PeekView = "active" | "scheduled" | "deferred" | "dead-letter" | "transfer-dead-letter";
 export type MessageState = "active" | "deferred" | "scheduled";
-/** An application property; `binary` values are base64, `timestamp` RFC 3339. */
+/** An application property; `binary` values are base64, `timestamp` RFC 3339, `timespan` ISO 8601 duration. */
 export type PropValue =
   | { type: "null" }
   | { type: "bool"; value: boolean }
   | { type: "int" | "uint" | "double"; value: number }
-  | { type: "string" | "timestamp" | "uuid" | "binary" | "other"; value: string };
+  | { type: "string" | "timestamp" | "timespan" | "uuid" | "binary" | "other"; value: string };
 /** `binary` values are base64. `value` and `sequence` bodies are AMQP values rendered as JSON. */
 export type MessageBody =
   | { kind: "binary"; value: string }
