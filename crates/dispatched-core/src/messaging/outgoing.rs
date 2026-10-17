@@ -128,12 +128,17 @@ impl OutgoingMessage {
                 "PartitionKey must equal SessionId when both are set (SessionId '{s}', PartitionKey '{p}')"
             )));
         }
+        if self.time_to_live == Some(Duration::ZERO) {
+            return Err(Error::Invalid(
+                "Time to live must be more than zero.".into(),
+            ));
+        }
         Ok(())
     }
 
+    /// Encode as an AMQP message; `now` is the creation time.
     // Used by the send operation (a later M2a task); tested here.
     #[allow(dead_code)]
-    /// Encode as an AMQP message; `now` is the creation time.
     pub(crate) fn to_amqp(&self, now: OffsetDateTime) -> Result<Message<Body<Value>>> {
         self.validate()?;
         let mut props = Properties::builder();
@@ -168,9 +173,11 @@ impl OutgoingMessage {
                 ttl: Some(ms),
                 ..Default::default()
             });
-            let expiry = now
-                + time::Duration::try_from(ttl)
-                    .map_err(|_| Error::Invalid("time to live is too large".into()))?;
+            // Saturating: a TTL past the last representable date expires at that date.
+            let expiry = time::Duration::try_from(ttl)
+                .ok()
+                .and_then(|d| now.checked_add(d))
+                .unwrap_or(OffsetDateTime::new_utc(time::Date::MAX, time::Time::MAX));
             props = props
                 .creation_time(timestamp(now))
                 .absolute_expiry_time(timestamp(expiry));
@@ -356,7 +363,10 @@ impl Edits {
             m.message_id = Some(id.clone());
         }
         if let Some(new) = &self.session_id {
-            if self.partition_key.is_none() && m.partition_key == m.session_id {
+            if self.partition_key.is_none()
+                && m.session_id.is_some()
+                && m.partition_key == m.session_id
+            {
                 m.partition_key = new.clone();
             }
             m.session_id = new.clone();
@@ -533,6 +543,45 @@ mod tests {
             p.absolute_expiry_time.unwrap().milliseconds()
                 - p.creation_time.unwrap().milliseconds(),
             100 * 86_400_000
+        );
+    }
+
+    #[test]
+    fn a_huge_ttl_saturates_the_expiry_instead_of_panicking() {
+        let now = datetime!(2026-10-17 12:00 UTC);
+        for ttl in [Duration::from_secs(u64::MAX / 2), Duration::MAX] {
+            let m = OutgoingMessage {
+                time_to_live: Some(ttl),
+                ..OutgoingMessage::text("x")
+            };
+            let a = m.to_amqp(now).unwrap();
+            assert_eq!(a.header.unwrap().ttl, Some(u32::MAX));
+            assert!(a.properties.unwrap().absolute_expiry_time.is_some());
+        }
+    }
+
+    #[test]
+    fn a_zero_ttl_is_refused() {
+        let m = OutgoingMessage {
+            time_to_live: Some(Duration::ZERO),
+            ..OutgoingMessage::text("x")
+        };
+        assert!(
+            matches!(m.validate(), Err(Error::Invalid(e)) if e == "Time to live must be more than zero.")
+        );
+    }
+
+    #[test]
+    fn a_session_id_on_a_plain_message_adds_no_partition_key() {
+        let mut m = OutgoingMessage::text("b");
+        Edits {
+            session_id: Some(Some("x".into())),
+            ..Default::default()
+        }
+        .apply(&mut m);
+        assert_eq!(
+            (m.session_id.as_deref(), m.partition_key.as_deref()),
+            (Some("x"), None)
         );
     }
 
