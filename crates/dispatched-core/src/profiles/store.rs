@@ -709,7 +709,7 @@ fn validate_proxy(proxy: Option<&str>) -> Result<()> {
 }
 
 /// Create `dir` (and missing parents); new directories are private (0700) on Unix.
-fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+pub(crate) fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     if dir.exists() {
         return Ok(());
     }

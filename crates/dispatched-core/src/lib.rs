@@ -5,6 +5,7 @@
 #![deny(rust_2018_idioms, unsafe_code)]
 #![warn(clippy::all)]
 
+pub mod activity;
 pub mod connstr;
 pub mod diagnostics;
 pub mod discovery;
@@ -20,6 +21,9 @@ pub mod profiles;
 pub mod safety;
 pub mod tokens;
 
+pub use activity::{
+    ActivityEntry, ActivityLog, ActivityQuery, Audit, Limits, MemoryAudit, Outcome, Phase,
+};
 pub use connstr::ConnectionString;
 pub use error::{Error, Result};
 pub use explorer::Explorer;

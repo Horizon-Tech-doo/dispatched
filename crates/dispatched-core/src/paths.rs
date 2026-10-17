@@ -1,6 +1,7 @@
 //! Where Dispatched keeps its database and secrets. Shared by the CLI and the
 //! desktop app so both see the same profiles and sign-ins.
 
+use crate::activity::ActivityLog;
 use crate::profiles::ProfileStore;
 use crate::{Error, Result};
 use std::ffi::OsString;
@@ -12,6 +13,8 @@ pub const KEYCHAIN_SERVICE: &str = "io.horizon-tech.dispatched";
 pub const KEY_PREFIX: &str = "dispatched";
 /// Database file inside [`config_dir`].
 pub const DB_FILE: &str = "dispatched.db";
+/// Activity log file inside [`config_dir`].
+pub const ACTIVITY_DB: &str = "activity.db";
 /// M0's CLI state file, migrated into the database on first open.
 pub const LEGACY_CLI_STATE: &str = "cli-state.json";
 
@@ -45,6 +48,11 @@ pub fn open_store() -> Result<ProfileStore> {
     let store = ProfileStore::open(&dir.join(DB_FILE))?;
     store.migrate_cli_state(&dir.join(LEGACY_CLI_STATE))?;
     Ok(store)
+}
+
+/// Open the activity log at its standard location.
+pub fn open_activity_log() -> Result<ActivityLog> {
+    ActivityLog::open(&config_dir()?.join(ACTIVITY_DB))
 }
 
 #[cfg(test)]
