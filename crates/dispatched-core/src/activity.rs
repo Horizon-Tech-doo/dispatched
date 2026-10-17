@@ -21,6 +21,9 @@ const SCHEMA_VERSION: i64 = 1;
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// Largest page a query may ask for.
 pub const MAX_QUERY_LIMIT: u32 = 10_000;
+/// Longest `summary` or `error` the log stores, in characters.
+pub const MAX_TEXT_CHARS: usize = 2_000;
+const EXPORT_PAGE_ROWS: u32 = 1_000;
 
 /// Stored timestamp layout: RFC 3339, UTC, fixed width, so text order is time order.
 const STORED_AT: &str = "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:6]Z";
@@ -252,7 +255,17 @@ impl ActivityLog {
 
     /// Entries matching `q`, newest first.
     pub fn list(&self, q: &ActivityQuery) -> Result<Vec<ActivityEntry>> {
-        let limit = q.limit.clamp(1, MAX_QUERY_LIMIT);
+        self.page(q, q.limit.clamp(1, MAX_QUERY_LIMIT), None)
+    }
+
+    /// Up to `limit` entries matching `q` (its own `limit` ignored) with an id
+    /// below `before`, newest first.
+    fn page(
+        &self,
+        q: &ActivityQuery,
+        limit: u32,
+        before: Option<i64>,
+    ) -> Result<Vec<ActivityEntry>> {
         let origin = q.origin.map(enum_text).transpose()?;
         let conn = self.conn.lock().expect("activity db poisoned");
         let mut stmt = conn
@@ -264,12 +277,13 @@ impl ActivityLog {
                    AND (?2 IS NULL OR profile = ?2) \
                    AND (?3 IS NULL OR id > ?3) \
                    AND (?4 IS NULL OR op_id = ?4) \
+                   AND (?6 IS NULL OR id < ?6) \
                  ORDER BY id DESC LIMIT ?5",
             )
             .map_err(|e| self.err(e))?;
         let rows = stmt
             .query_map(
-                params![origin, q.profile, q.after_id, q.op_id, limit],
+                params![origin, q.profile, q.after_id, q.op_id, limit, before],
                 |r| {
                     Ok(RawRow {
                         id: r.get(0)?,
@@ -299,27 +313,50 @@ impl ActivityLog {
         Ok(out)
     }
 
-    /// Write the entries matching `q` to `path`; returns how many.
+    /// Write every retained entry matching `q` (its `limit` is ignored) to
+    /// `path`, newest first; returns how many.
     pub fn export(&self, q: &ActivityQuery, path: &Path, format: ExportFormat) -> Result<u64> {
-        let entries = self.list(q)?;
+        self.export_paged(q, path, format, EXPORT_PAGE_ROWS)
+    }
+
+    fn export_paged(
+        &self,
+        q: &ActivityQuery,
+        path: &Path,
+        format: ExportFormat,
+        page_rows: u32,
+    ) -> Result<u64> {
         let io = |e: std::io::Error| Error::Io(format!("cannot write {}: {e}", path.display()));
-        let mut file = std::fs::File::create(path).map_err(io)?;
-        match format {
-            ExportFormat::Json => {
-                let text = serde_json::to_string_pretty(&entries).expect("entries serialize");
-                file.write_all(text.as_bytes()).map_err(io)?;
-                file.write_all(b"\n").map_err(io)?;
-            }
-            ExportFormat::Ndjson => {
-                for e in &entries {
+        let mut file = create_private_file(path).map_err(io)?;
+        let json = format == ExportFormat::Json;
+        if json {
+            file.write_all(b"[").map_err(io)?;
+        }
+        let (mut total, mut before) = (0u64, None);
+        loop {
+            let rows = self.page(q, page_rows, before)?;
+            let Some(last) = rows.last() else { break };
+            before = Some(last.id);
+            for e in &rows {
+                if json {
+                    let sep: &[u8] = if total == 0 { b"\n" } else { b",\n" };
+                    file.write_all(sep).map_err(io)?;
+                    let text = serde_json::to_string_pretty(e).expect("entry serializes");
+                    file.write_all(text.as_bytes()).map_err(io)?;
+                } else {
                     let line = serde_json::to_string(e).expect("entry serializes");
                     file.write_all(line.as_bytes()).map_err(io)?;
                     file.write_all(b"\n").map_err(io)?;
                 }
+                total += 1;
             }
         }
+        if json {
+            file.write_all(if total == 0 { b"]\n" } else { b"\n]\n" })
+                .map_err(io)?;
+        }
         file.flush().map_err(io)?;
-        Ok(entries.len() as u64)
+        Ok(total)
     }
 }
 
@@ -333,7 +370,7 @@ impl Audit for ActivityLog {
                 outcome, count, succeeded, failed, skipped, summary, error) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
-                entry.op_id,
+                plain(&entry.op_id),
                 at,
                 enum_text(entry.origin)?,
                 plain(&entry.profile),
@@ -346,8 +383,8 @@ impl Audit for ActivityLog {
                 entry.succeeded.map(to_i64),
                 entry.failed.map(to_i64),
                 entry.skipped.map(to_i64),
-                plain(&entry.summary),
-                entry.error.as_deref().map(plain),
+                bounded(&entry.summary),
+                entry.error.as_deref().map(bounded),
             ],
         )
         .map_err(|e| self.err(e))?;
@@ -463,12 +500,72 @@ fn parse_enum<T: serde::de::DeserializeOwned>(
     serde_json::from_value(serde_json::Value::String(s.to_string()))
 }
 
-/// Replace control characters with a space so a hostile entity name or error
-/// text cannot move the cursor or inject escape sequences when printed later.
+/// Replace control and invisible formatting characters (bidi overrides,
+/// zero-width marks) with a space so a hostile entity name or error text
+/// cannot move the cursor, inject escape sequences or reorder text when
+/// printed later.
 fn plain(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| {
+            if c.is_control() || is_format(c) {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect()
+}
+
+fn is_format(c: char) -> bool {
+    matches!(c,
+        '\u{ad}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}'
+        | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{feff}')
+}
+
+/// Free text for `summary` and `error`: cleaned, scrubbed of secrets, capped.
+fn bounded(s: &str) -> String {
+    let clean = redact(&plain(s));
+    if clean.chars().count() <= MAX_TEXT_CHARS {
+        return clean;
+    }
+    let mut cut: String = clean.chars().take(MAX_TEXT_CHARS - 1).collect();
+    cut.push('\u{2026}');
+    cut
+}
+
+/// Defense in depth: callers must never pass secrets, but if one slips in
+/// (a broker error echoing a connection string, say) it is not persisted.
+fn redact(s: &str) -> String {
+    static PATTERNS: std::sync::OnceLock<Vec<regex::Regex>> = std::sync::OnceLock::new();
+    let patterns = PATTERNS.get_or_init(|| {
+        [
+            r#"(?i)SharedAccessSignature\s+[^\s"']+"#,
+            r#"(?i)SharedAccessKey\s*=\s*[^;\s"']+"#,
+            r#"(?i)AccountKey\s*=\s*[^;\s"']+"#,
+            r#"(?i)Authorization\s*[:=]\s*(?:(?:Bearer|Basic)\s+)?[^\s,;"']+"#,
+            r#"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+"#,
+            r#"(?i)\bsig=[^&\s;"']+"#,
+        ]
+        .iter()
+        .map(|p| regex::Regex::new(p).expect("static pattern"))
+        .collect()
+    });
+    let mut out = s.to_string();
+    for re in patterns {
+        out = re.replace_all(&out, "[redacted]").into_owned();
+    }
+    out
+}
+
+fn create_private_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path)
 }
 
 fn db_err(path: &Path, e: impl std::fmt::Display) -> Error {
@@ -688,5 +785,98 @@ mod tests {
             .unwrap();
         let ops: Vec<String> = audit.entries().into_iter().map(|e| e.op_id).collect();
         assert_eq!(ops, ["a", "c"]);
+    }
+
+    #[test]
+    fn export_covers_every_row_beyond_the_query_limit_and_page_size() {
+        let log = ActivityLog::open_in_memory().unwrap();
+        for i in 0..250 {
+            log.record(&entry(&format!("o{i}"), Phase::Started, Outcome::Pending))
+                .unwrap();
+        }
+        let dir = tempfile::tempdir().unwrap();
+        // Default query limit is 100; the export must still cover all 250.
+        let p = dir.path().join("all.ndjson");
+        let n = log
+            .export(&ActivityQuery::default(), &p, ExportFormat::Ndjson)
+            .unwrap();
+        assert_eq!(n, 250);
+        assert_eq!(std::fs::read_to_string(&p).unwrap().lines().count(), 250);
+        // A tiny page size exercises the paging seam, newest first, no gaps.
+        let p = dir.path().join("paged.json");
+        let n = log
+            .export_paged(&ActivityQuery::default(), &p, ExportFormat::Json, 7)
+            .unwrap();
+        assert_eq!(n, 250);
+        let v: Vec<ActivityEntry> =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        let ids: Vec<i64> = v.iter().map(|e| e.id).collect();
+        assert_eq!(ids, (1..=250).rev().collect::<Vec<_>>());
+        // Empty export is still valid JSON.
+        let p = dir.path().join("none.json");
+        let q = ActivityQuery {
+            profile: Some("nobody".into()),
+            ..Default::default()
+        };
+        assert_eq!(log.export(&q, &p, ExportFormat::Json).unwrap(), 0);
+        let v: Vec<ActivityEntry> =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn secret_patterns_are_scrubbed_from_summary_and_error() {
+        let cases = [
+            "Endpoint=sb://x.servicebus.windows.net/;SharedAccessKeyName=k;SharedAccessKey=abc123+/=;EntityPath=q",
+            "token SharedAccessSignature sr=sb%3A%2F%2Fx&sig=ZZZ%2Bsecret&se=1&skn=k used",
+            "url ?sr=x&sig=TOPSECRET&se=1",
+            "Authorization: Bearer eyJhbGciOi.payload.sigpart",
+            "header Authorization=Basic dXNlcjpwYXNz",
+            "got Bearer abc.def-ghi",
+            "DefaultEndpointsProtocol=https;AccountKey=Zm9vYmFy==;EndpointSuffix=x",
+        ];
+        let secrets = [
+            "abc123",
+            "ZZZ",
+            "TOPSECRET",
+            "eyJhbGciOi",
+            "dXNlcjpwYXNz",
+            "abc.def",
+            "Zm9vYmFy",
+        ];
+        let log = ActivityLog::open_in_memory().unwrap();
+        for c in cases {
+            let mut e = entry("op", Phase::Finished, Outcome::Failed);
+            e.summary = c.into();
+            e.error = Some(c.into());
+            log.record(&e).unwrap();
+        }
+        for got in log.list(&ActivityQuery::default()).unwrap() {
+            for text in [got.summary.as_str(), got.error.as_deref().unwrap()] {
+                assert!(text.contains("[redacted]"), "{text}");
+                for s in secrets {
+                    assert!(!text.contains(s), "{s} leaked in {text}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn long_text_is_capped_with_an_ellipsis_and_ordinary_text_is_kept() {
+        let log = ActivityLog::open_in_memory().unwrap();
+        let mut e = entry("op", Phase::Finished, Outcome::Failed);
+        e.summary = "s".repeat(5_000);
+        e.error = Some("é".repeat(MAX_TEXT_CHARS));
+        log.record(&e).unwrap();
+        let got = &log.list(&ActivityQuery::default()).unwrap()[0];
+        assert_eq!(got.summary.chars().count(), MAX_TEXT_CHARS);
+        assert!(got.summary.ends_with('\u{2026}'));
+        assert_eq!(got.error.as_deref(), e.error.as_deref());
+        assert_eq!(bounded("design=1 signal"), "design=1 signal");
+    }
+
+    #[test]
+    fn bidi_and_zero_width_characters_are_replaced() {
+        assert_eq!(plain("a\u{202e}b\u{200b}c"), "a b c");
     }
 }
