@@ -180,7 +180,7 @@ export type MessageState = "active" | "deferred" | "scheduled";
 export type PropValue =
   | { type: "null" }
   | { type: "bool"; value: boolean }
-  | { type: "int" | "uint" | "double"; value: number }
+  | { type: "int" | "long" | "uint" | "double"; value: number }
   | { type: "string" | "timestamp" | "timespan" | "uuid" | "binary" | "other"; value: string };
 /** `binary` values are base64. `value` and `sequence` bodies are AMQP values rendered as JSON. */
 export type MessageBody =

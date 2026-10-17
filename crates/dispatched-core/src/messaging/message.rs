@@ -172,8 +172,10 @@ pub enum PropValue {
     Null,
     /// bool
     Bool(bool),
-    /// any signed integer
-    Int(i64),
+    /// 32-bit signed integer (AMQP byte, short or int)
+    Int(i32),
+    /// 64-bit signed integer (AMQP long)
+    Long(i64),
     /// any unsigned integer
     UInt(u64),
     /// float / double
@@ -266,14 +268,14 @@ fn amqp_to_json(v: &Value) -> serde_json::Value {
     }
 }
 
-fn simple_to_prop(v: &SimpleValue) -> PropValue {
+pub(crate) fn simple_to_prop(v: &SimpleValue) -> PropValue {
     match v {
         SimpleValue::Null => PropValue::Null,
         SimpleValue::Bool(b) => PropValue::Bool(*b),
-        SimpleValue::Byte(n) => PropValue::Int(i64::from(*n)),
-        SimpleValue::Short(n) => PropValue::Int(i64::from(*n)),
-        SimpleValue::Int(n) => PropValue::Int(i64::from(*n)),
-        SimpleValue::Long(n) => PropValue::Int(*n),
+        SimpleValue::Byte(n) => PropValue::Int(i32::from(*n)),
+        SimpleValue::Short(n) => PropValue::Int(i32::from(*n)),
+        SimpleValue::Int(n) => PropValue::Int(*n),
+        SimpleValue::Long(n) => PropValue::Long(*n),
         SimpleValue::Ubyte(n) => PropValue::UInt(u64::from(*n)),
         SimpleValue::Ushort(n) => PropValue::UInt(u64::from(*n)),
         SimpleValue::Uint(n) => PropValue::UInt(u64::from(*n)),
@@ -284,7 +286,7 @@ fn simple_to_prop(v: &SimpleValue) -> PropValue {
         SimpleValue::Symbol(s) => PropValue::String(s.0.clone()),
         SimpleValue::Timestamp(t) => match timestamp_to_datetime(t) {
             Some(dt) => PropValue::Timestamp(dt),
-            None => PropValue::Int(t.milliseconds()),
+            None => PropValue::Long(t.milliseconds()),
         },
         SimpleValue::Uuid(u) => PropValue::Uuid(uuid::Uuid::from(u.clone())),
         SimpleValue::Binary(b) => PropValue::Binary(b.to_vec()),
@@ -766,11 +768,11 @@ mod tests {
         assert_eq!(m.enqueued_time, None);
         assert_eq!(m.scheduled_enqueue_time, None);
         assert_eq!(m.locked_until, None);
-        assert_eq!(m.application_properties["max"], PropValue::Int(i64::MAX));
-        assert_eq!(m.application_properties["min"], PropValue::Int(i64::MIN));
+        assert_eq!(m.application_properties["max"], PropValue::Long(i64::MAX));
+        assert_eq!(m.application_properties["min"], PropValue::Long(i64::MIN));
         assert_eq!(
             m.application_properties["far"],
-            PropValue::Int(300_000_000_000_000)
+            PropValue::Long(300_000_000_000_000)
         );
         assert!(matches!(
             m.application_properties["ok"],

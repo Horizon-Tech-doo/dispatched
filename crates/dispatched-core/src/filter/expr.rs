@@ -413,7 +413,8 @@ fn field_value(msg: &PeekedMessage, field: &Field) -> FieldValue {
         Field::User(name) => match msg.application_properties.get(name) {
             None | Some(PropValue::Null) => FieldValue::Null,
             Some(PropValue::Bool(b)) => FieldValue::Bool(*b),
-            Some(PropValue::Int(n)) => FieldValue::Num(*n as f64),
+            Some(PropValue::Int(n)) => FieldValue::Num(f64::from(*n)),
+            Some(PropValue::Long(n)) => FieldValue::Num(*n as f64),
             Some(PropValue::UInt(n)) => FieldValue::Num(*n as f64),
             Some(PropValue::Double(d)) => FieldValue::Num(*d),
             Some(PropValue::String(s)) | Some(PropValue::Other(s)) => FieldValue::Str(s.clone()),
@@ -540,6 +541,19 @@ mod tests {
 
     fn eval(src: &str) -> bool {
         PropertyFilter::parse(src).unwrap().matches(&msg())
+    }
+
+    #[test]
+    fn int_and_long_properties_compare_numerically() {
+        let mut m = msg();
+        m.application_properties
+            .insert("big".into(), PropValue::Long(5_000_000_000));
+        m.application_properties
+            .insert("small".into(), PropValue::Long(7));
+        let f = |src: &str| PropertyFilter::parse(src).unwrap().matches(&m);
+        assert!(f("tenant = 7 AND small = 7"));
+        assert!(f("big > 7 AND big = 5000000000 AND big >= 7"));
+        assert!(!f("big < 7"));
     }
 
     #[test]

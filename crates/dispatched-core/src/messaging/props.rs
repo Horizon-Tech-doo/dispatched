@@ -154,10 +154,8 @@ impl TypedValue {
             PropValue::String(s) => TypedValue::String(s.clone()),
             PropValue::Bool(b) => TypedValue::Bool(*b),
             PropValue::Double(d) => TypedValue::Double(*d),
-            PropValue::Int(n) => match i32::try_from(*n) {
-                Ok(n) => TypedValue::Int(n),
-                Err(_) => TypedValue::Long(*n),
-            },
+            PropValue::Int(n) => TypedValue::Int(*n),
+            PropValue::Long(n) => TypedValue::Long(*n),
             PropValue::UInt(n) => TypedValue::Long(i64::try_from(*n).ok()?),
             PropValue::Timestamp(t) => TypedValue::DateTime(*t),
             PropValue::TimeSpan(d) => TypedValue::TimeSpan(*d),
@@ -486,7 +484,7 @@ mod tests {
             (PropValue::Double(1.5), Some(TypedValue::Double(1.5))),
             (PropValue::Int(7), Some(TypedValue::Int(7))),
             (
-                PropValue::Int(3_000_000_000),
+                PropValue::Long(3_000_000_000),
                 Some(TypedValue::Long(3_000_000_000)),
             ),
             (PropValue::UInt(5), Some(TypedValue::Long(5))),

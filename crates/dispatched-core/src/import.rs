@@ -93,9 +93,15 @@ fn prop_value(name: &str, p: &RawProp) -> Result<PropValue> {
     Ok(match p.ty.to_ascii_lowercase().as_str() {
         "null" => PropValue::Null,
         "bool" => PropValue::Bool(p.value.as_bool().ok_or_else(|| bad("true or false"))?),
-        "int" | "int32" | "long" | "int64" => {
-            PropValue::Int(p.value.as_i64().ok_or_else(|| bad("an integer"))?)
+        "int" | "int32" => {
+            let n = p.value.as_i64().ok_or_else(|| bad("an integer"))?;
+            // Files written before the `long` tag existed hold wide values under `int`.
+            match i32::try_from(n) {
+                Ok(n) => PropValue::Int(n),
+                Err(_) => PropValue::Long(n),
+            }
         }
+        "long" | "int64" => PropValue::Long(p.value.as_i64().ok_or_else(|| bad("an integer"))?),
         "uint" => PropValue::UInt(p.value.as_u64().ok_or_else(|| bad("an unsigned integer"))?),
         "double" if p.value.is_null() => {
             return Err(Error::Invalid(format!(
@@ -151,18 +157,8 @@ fn convert(raw: Raw) -> Result<ImportedMessage> {
         }
     };
     let mut props = BTreeMap::new();
-    let mut longs = Vec::new();
     for (name, p) in &raw.application_properties {
         let value = prop_value(name, p)?;
-        match (p.ty.to_ascii_lowercase().as_str(), &value) {
-            ("long" | "int64", PropValue::Int(n)) => longs.push((name.clone(), *n)),
-            ("int32", PropValue::Int(n)) if i32::try_from(*n).is_err() => {
-                return Err(Error::Invalid(format!(
-                    "property '{name}' (int32) does not fit 32 bits"
-                )));
-            }
-            _ => {}
-        }
         props.insert(name.clone(), value);
     }
     let properties = copy_properties(
@@ -173,11 +169,6 @@ fn convert(raw: Raw) -> Result<ImportedMessage> {
         },
         &mut notes,
     );
-    // The export tags every signed integer `int`; a file that says `long` keeps 64 bits.
-    let mut properties = properties;
-    for (name, n) in longs {
-        properties.insert(name, crate::messaging::TypedValue::Long(n));
-    }
     let message = OutgoingMessage {
         body,
         message_id: non_empty(raw.message_id),
@@ -493,6 +484,43 @@ mod tests {
         assert!(e.contains("larger than"), "{e}");
         assert_eq!(MAX_IMPORT_MESSAGES, 100_000);
         assert_eq!(MAX_IMPORT_BYTES, 256 * 1024 * 1024);
+    }
+
+    #[test]
+    fn a_small_long_stays_a_long_from_decode_through_export_import_and_encode() {
+        use fe2o3_amqp::types::primitives::SimpleValue;
+        let mut m = crate::messaging::test_message(1);
+        m.application_properties.insert(
+            "l".into(),
+            crate::messaging::simple_to_prop(&SimpleValue::Long(5)),
+        );
+        m.application_properties.insert(
+            "i".into(),
+            crate::messaging::simple_to_prop(&SimpleValue::Int(5)),
+        );
+        assert_eq!(m.application_properties["l"], PropValue::Long(5));
+        assert_eq!(m.application_properties["i"], PropValue::Int(5));
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("x.ndjson");
+        crate::export::write_messages(
+            std::fs::File::create(&p).unwrap(),
+            &[m],
+            ExportFormat::Ndjson,
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(
+            text.contains(r#""l":{"type":"long","value":5}"#)
+                && text.contains(r#""i":{"type":"int","value":5}"#),
+            "{text}"
+        );
+        let r = read_messages(&p).unwrap();
+        assert_eq!(r[0].message.properties["l"], TypedValue::Long(5));
+        assert_eq!(r[0].message.properties["i"], TypedValue::Int(5));
+        let amqp = r[0].message.to_amqp(OffsetDateTime::now_utc()).unwrap();
+        let ap = amqp.application_properties.unwrap().0;
+        assert!(matches!(ap.get("l"), Some(SimpleValue::Long(5))));
+        assert!(matches!(ap.get("i"), Some(SimpleValue::Int(5))));
     }
 
     #[test]

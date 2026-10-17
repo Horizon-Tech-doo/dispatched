@@ -14,6 +14,7 @@ describe("message columns", () => {
     expect(propText({ type: "null" })).toBe("");
     expect(propText({ type: "null" }, "null")).toBe("null");
     expect(propText({ type: "int", value: 7 })).toBe("7");
+    expect(propText({ type: "long", value: 5_000_000_000 })).toBe("5000000000");
     expect(propText({ type: "bool", value: false })).toBe("false");
   });
   it("show time to live in its two largest units", () => {

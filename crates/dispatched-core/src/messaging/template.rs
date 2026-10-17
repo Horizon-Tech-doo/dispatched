@@ -9,6 +9,8 @@ use std::path::Path;
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, PrimitiveDateTime};
 
+/// The largest template file, in bytes.
+pub const MAX_TEMPLATE_BYTES: u64 = 1024 * 1024;
 const TYPE_NAMES: &str = "String, Int32, Int64, Double, Boolean, DateTime, TimeSpan, Guid";
 
 /// A template field set, shared by the JSON and XML readers.
@@ -120,12 +122,26 @@ fn json_text(v: &serde_json::Value) -> Option<String> {
 
 /// Read a template file: JSON when the first non-space byte is `{`, XML when it is `<`.
 pub fn read_template(path: &Path) -> Result<OutgoingMessage> {
-    let bytes = std::fs::read(path).map_err(|e| {
+    use std::io::Read;
+    let io = |e: std::io::Error| {
         Error::Io(format!(
             "cannot read template {}: {e}; check the path and permissions",
             path.display()
         ))
-    })?;
+    };
+    // Read through take() so a special file cannot slip past the cap.
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .map_err(io)?
+        .take(MAX_TEMPLATE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(io)?;
+    if bytes.len() as u64 > MAX_TEMPLATE_BYTES {
+        return Err(Error::Invalid(format!(
+            "template {} is larger than 1 MiB; a template holds one message",
+            path.display()
+        )));
+    }
     let text = String::from_utf8(bytes)
         .map_err(|_| Error::Invalid(format!("template {} is not UTF-8 text", path.display())))?;
     let text = text.trim_start_matches('\u{feff}');
@@ -305,6 +321,16 @@ mod tests {
             parse_template_xml("<brokeredMessage><body><![CDATA[ a ]]></body></brokeredMessage>")
                 .unwrap();
         assert_eq!(t.body, OutgoingBody::Bytes(b" a ".to_vec()));
+    }
+
+    #[test]
+    fn oversized_template_files_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("big.json");
+        let body = "x".repeat(MAX_TEMPLATE_BYTES as usize);
+        std::fs::write(&p, format!("{{\"body\":\"{body}\"}}")).unwrap();
+        let e = read_template(&p).unwrap_err().to_string();
+        assert!(e.contains("larger than 1 MiB"), "{e}");
     }
 
     #[test]

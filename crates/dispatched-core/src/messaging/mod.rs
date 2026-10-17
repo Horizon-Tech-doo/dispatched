@@ -17,11 +17,11 @@ mod transport;
 
 pub use connection::ServiceBusConnection;
 pub use management::{ManagementLink, MgmtResponse};
-#[cfg(test)]
-pub(crate) use message::test_message;
 pub use message::{
     MessageBody, MessageState, PeekedMessage, PropValue, decode_bytes, decode_message, ttl_ms,
 };
+#[cfg(test)]
+pub(crate) use message::{simple_to_prop, test_message};
 pub use outgoing::{
     BodySource, CloneOptions, Cloned, Edits, MessageIdSource, OutgoingBody, OutgoingMessage,
 };
