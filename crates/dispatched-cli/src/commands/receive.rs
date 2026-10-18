@@ -4,15 +4,13 @@ use super::browse::{ViewArgs, messages_table, peek};
 use super::operator_for;
 use crate::Format;
 use crate::context::Ctx;
-use crate::jobs::{JobExit, StderrProgress, finish_job, finish_job_with};
+use crate::jobs::{JobExit, StderrProgress, finish_job, finish_job_with_messages};
 use crate::resolve::Selection;
 use crate::safety::{MutateArgs, Planned};
 use clap::{ArgGroup, Args, Subcommand, ValueEnum};
 use dispatched_core::messaging::{DEFAULT_SCAN_LIMIT, Settlement};
 use dispatched_core::ops::receive::MAX_RECEIVE;
-use dispatched_core::{
-    EntityPath, ExportedMessage, Mutation, PeekView, ReceiveAction, ReceiveRequest, SubQueue,
-};
+use dispatched_core::{EntityPath, Mutation, PeekView, ReceiveAction, ReceiveRequest, SubQueue};
 use std::time::Duration;
 
 /// The longest `--wait`, in seconds.
@@ -108,6 +106,9 @@ pub struct DeferredReceiveArgs {
     /// The session the messages are in (session-enabled entities).
     #[arg(long)]
     pub session: Option<String>,
+    /// The messages are deferred in the dead-letter queue.
+    #[arg(long)]
+    pub dlq: bool,
     #[command(flatten)]
     pub mutate: MutateArgs,
 }
@@ -126,8 +127,9 @@ fn settlement(
         Then::Abandon => Settlement::Abandon,
         Then::Defer => Settlement::Defer,
         Then::DeadLetter => Settlement::DeadLetter {
-            reason: reason.clone().unwrap_or_default(),
-            description: description.clone().unwrap_or_default(),
+            // Not given: not set (an empty reason would read as a reason that says nothing).
+            reason: reason.clone(),
+            description: description.clone(),
         },
     })
 }
@@ -214,34 +216,32 @@ pub async fn receive(
     let result = operator.receive(req, &StderrProgress::new(), &cancel).await;
     operator.explorer().close().await;
     let outcome = result?;
-    let mut extra = serde_json::Map::new();
-    match format {
-        Format::Table => {
-            println!("{}", messages_table(&outcome.messages, view));
-            if outcome.messages.is_empty() {
-                eprintln!("(no messages)");
-            }
-        }
-        // One document: the report with the messages in the `peek --format json` shape.
-        Format::Json | Format::Ndjson => {
-            extra.insert(
-                "messages".into(),
-                serde_json::to_value(
-                    outcome
-                        .messages
-                        .iter()
-                        .map(ExportedMessage::new)
-                        .collect::<Vec<_>>(),
-                )?,
-            );
+    if let Format::Table = format {
+        println!("{}", messages_table(&outcome.messages, view));
+        if outcome.messages.is_empty() {
+            eprintln!("(no messages)");
+        } else if let Some(note) = shortened_note(&args.mutate, args.delete) {
+            eprintln!("{note}");
         }
     }
-    Ok(finish_job_with(
+    // JSON: one document with the messages in the `peek --format json` shape; the --report
+    // file holds them in full in both modes.
+    Ok(finish_job_with_messages(
         &outcome.report,
         format,
         &args.mutate,
-        extra,
+        &outcome.messages,
     ))
+}
+
+/// The table shortens bodies: a receive-and-delete without --report says how to keep full
+/// copies of what it removed.
+pub const SHORTENED_NOTE: &str =
+    "bodies are shortened above; use --format json or --report FILE to keep full copies";
+
+/// [`SHORTENED_NOTE`] for a table-format `receive --delete` with no `--report`.
+fn shortened_note(mutate: &MutateArgs, delete: bool) -> Option<&'static str> {
+    (delete && mutate.report.is_none()).then_some(SHORTENED_NOTE)
 }
 
 pub async fn deferred(
@@ -274,7 +274,11 @@ pub async fn deferred(
             let result = operator
                 .settle_deferred(
                     &entity,
-                    SubQueue::Active,
+                    if a.dlq {
+                        SubQueue::DeadLetter
+                    } else {
+                        SubQueue::Active
+                    },
                     &a.seq,
                     a.session.as_deref(),
                     how,
@@ -322,7 +326,7 @@ mod tests {
         .unwrap();
         assert_eq!(r.sub_queue, SubQueue::DeadLetter);
         assert!(
-            matches!(r.action, ReceiveAction::Settle(Settlement::DeadLetter { ref reason, .. }) if reason == "Manual")
+            matches!(r.action, ReceiveAction::Settle(Settlement::DeadLetter { ref reason, .. }) if reason.as_deref() == Some("Manual"))
         );
         assert!(matches!(
             receive_request_from(&parse(["receive", "q", "--delete"]))
@@ -338,8 +342,8 @@ mod tests {
         use dispatched_core::{Operation, SettleVerb, Target};
         let t = || Target::new(EntityPath::queue("q"), SubQueue::Active);
         let dl = Settlement::DeadLetter {
-            reason: String::new(),
-            description: String::new(),
+            reason: None,
+            description: None,
         };
         for (planned, op) in [
             (
@@ -428,11 +432,10 @@ mod tests {
     async fn receive_on_production_without_flags_never_connects() {
         let ctx = crate::context::Ctx::for_test_with_profiles(&[(
             "prod-weu",
-            "prod.servicebus.windows.net",
+            "prod.servicebus.invalid",
             true,
         )]);
-        let cs =
-            "Endpoint=sb://prod.servicebus.windows.net/;SharedAccessKeyName=k;SharedAccessKey=x";
+        let cs = "Endpoint=sb://prod.servicebus.invalid/;SharedAccessKeyName=k;SharedAccessKey=topsecret";
         for (args, verb, kind) in [
             (
                 vec!["receive", "orders", "--delete"],
@@ -455,15 +458,67 @@ mod tests {
             let mut argv = vec!["dispatched", "--connection-string", cs];
             argv.extend(args);
             let cli = crate::Cli::try_parse_from(argv).unwrap();
+            let list = || {
+                ctx.activity()
+                    .unwrap()
+                    .list(&dispatched_core::ActivityQuery::default())
+                    .unwrap()
+            };
+            let before = list().len();
             let e = crate::run_command(&ctx, cli).await.unwrap_err().to_string();
             assert!(e.contains("--confirm-prod orders"), "{e}");
-            let log = ctx
-                .activity()
-                .unwrap()
-                .list(&dispatched_core::ActivityQuery::default())
-                .unwrap();
+            assert!(!e.contains("topsecret"));
+            let log = list();
+            assert_eq!(log.len(), before + 1, "one entry: the precheck's");
             assert_eq!(log[0].action, verb);
             assert_eq!(log[0].kind, dispatched_core::OpKind::Mutating(kind));
+            assert_eq!(log[0].phase, dispatched_core::Phase::Finished);
+            // The precheck's own marker: the gate's denial would carry the effect sentence.
+            assert_eq!(
+                log[0].summary,
+                format!("{verb} on orders refused before connecting")
+            );
+            assert_eq!(log[0].error.as_deref(), Some(e.as_str()));
+            assert!(!format!("{:?}", log[0]).contains("topsecret"));
         }
+    }
+
+    #[test]
+    fn a_table_receive_and_delete_without_a_report_says_how_to_keep_copies() {
+        let none = MutateArgs::default();
+        assert_eq!(shortened_note(&none, true), Some(SHORTENED_NOTE));
+        assert_eq!(shortened_note(&none, false), None, "settled messages stay");
+        let with_report = MutateArgs {
+            report: Some("r.json".into()),
+            ..MutateArgs::default()
+        };
+        assert_eq!(
+            shortened_note(&with_report, true),
+            None,
+            "the report keeps them"
+        );
+    }
+
+    #[test]
+    fn dead_letter_reason_is_absent_unless_given() {
+        let r = receive_request_from(&parse(["receive", "q", "--then", "dead-letter"])).unwrap();
+        assert_eq!(
+            r.action,
+            ReceiveAction::Settle(Settlement::DeadLetter {
+                reason: None,
+                description: None
+            })
+        );
+        let cli = try_parse([
+            "deferred", "receive", "q", "--seq", "1", "--then", "complete", "--dlq",
+        ])
+        .unwrap();
+        let crate::Command::Deferred {
+            cmd: DeferredCmd::Receive(a),
+        } = cli.command
+        else {
+            panic!("not deferred receive")
+        };
+        assert!(a.dlq);
     }
 }

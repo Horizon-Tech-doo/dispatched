@@ -136,10 +136,10 @@ pub enum Settlement {
     Defer,
     /// Move it to the dead-letter queue.
     DeadLetter {
-        /// `DeadLetterReason`.
-        reason: String,
-        /// `DeadLetterErrorDescription`.
-        description: String,
+        /// `DeadLetterReason`; not set when `None`.
+        reason: Option<String>,
+        /// `DeadLetterErrorDescription`; not set when `None`.
+        description: Option<String>,
     },
 }
 
@@ -272,19 +272,24 @@ fn outcome_for(how: &Settlement) -> LinkOutcome {
             reason,
             description,
         } => {
+            // Only the values given: an absent reason is not sent as an empty one.
             let mut info = Fields::default();
-            info.insert(
-                Symbol::from("DeadLetterReason"),
-                Value::from(reason.as_str()),
-            );
-            info.insert(
-                Symbol::from("DeadLetterErrorDescription"),
-                Value::from(description.as_str()),
-            );
+            if let Some(reason) = reason {
+                info.insert(
+                    Symbol::from("DeadLetterReason"),
+                    Value::from(reason.as_str()),
+                );
+            }
+            if let Some(description) = description {
+                info.insert(
+                    Symbol::from("DeadLetterErrorDescription"),
+                    Value::from(description.as_str()),
+                );
+            }
             LinkOutcome::Rejected(AmqpError::new(
                 ErrorCondition::Custom(Symbol::from("com.microsoft:dead-letter")),
                 None,
-                Some(info),
+                (!info.is_empty()).then_some(info),
             ))
         }
     }
@@ -305,7 +310,7 @@ fn disposition_call(
             description,
         } => (
             DispositionStatus::Suspended,
-            Some((reason.as_str(), description.as_str())),
+            Some((reason.as_deref(), description.as_deref())),
         ),
     };
     (
@@ -1026,8 +1031,8 @@ mod tests {
             }
         ));
         let LinkOutcome::Rejected(e) = outcome_for(&Settlement::DeadLetter {
-            reason: "R".into(),
-            description: "D".into(),
+            reason: Some("R".into()),
+            description: Some("D".into()),
         }) else {
             panic!()
         };
@@ -1035,6 +1040,25 @@ mod tests {
             e.condition,
             ErrorCondition::Custom(Symbol::from("com.microsoft:dead-letter"))
         );
+        let info = e.info.expect("reason and description");
+        assert!(info.contains_key(&Symbol::from("DeadLetterReason")));
+        assert!(info.contains_key(&Symbol::from("DeadLetterErrorDescription")));
+        // Absent values are not sent (not even as empty strings).
+        let LinkOutcome::Rejected(e) = outcome_for(&Settlement::DeadLetter {
+            reason: Some("R".into()),
+            description: None,
+        }) else {
+            panic!()
+        };
+        let info = e.info.expect("the reason");
+        assert!(!info.contains_key(&Symbol::from("DeadLetterErrorDescription")));
+        let LinkOutcome::Rejected(e) = outcome_for(&Settlement::DeadLetter {
+            reason: None,
+            description: None,
+        }) else {
+            panic!()
+        };
+        assert!(e.info.is_none());
     }
 
     #[test]
@@ -1054,8 +1078,8 @@ mod tests {
         let (_, dl) = disposition_call(
             t,
             &Settlement::DeadLetter {
-                reason: "R".into(),
-                description: "D".into(),
+                reason: Some("R".into()),
+                description: Some("D".into()),
             },
             Some("S"),
         );

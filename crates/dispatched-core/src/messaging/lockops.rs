@@ -293,7 +293,7 @@ pub fn parse_receive_by_sequence_response(
 pub fn update_disposition_request(
     tokens: &[Uuid],
     status: DispositionStatus,
-    dead_letter: Option<(&str, &str)>,
+    dead_letter: Option<(Option<&str>, Option<&str>)>,
     session: Option<&str>,
 ) -> OrderedMap<String, Value> {
     let mut body = OrderedMap::new();
@@ -302,15 +302,20 @@ pub fn update_disposition_request(
         Value::String(status.as_str().to_string()),
     );
     body.insert("lock-tokens".to_string(), uuid_array(tokens));
+    // Only the values given: an absent reason is not sent as an empty one.
     if let Some((reason, description)) = dead_letter {
-        body.insert(
-            "deadletter-reason".to_string(),
-            Value::String(reason.to_string()),
-        );
-        body.insert(
-            "deadletter-description".to_string(),
-            Value::String(description.to_string()),
-        );
+        if let Some(reason) = reason {
+            body.insert(
+                "deadletter-reason".to_string(),
+                Value::String(reason.to_string()),
+            );
+        }
+        if let Some(description) = description {
+            body.insert(
+                "deadletter-description".to_string(),
+                Value::String(description.to_string()),
+            );
+        }
     }
     insert_session(&mut body, session);
     body
@@ -493,7 +498,7 @@ mod tests {
         let b = update_disposition_request(
             &[Uuid::nil()],
             DispositionStatus::Suspended,
-            Some(("Bad", "why")),
+            Some((Some("Bad"), Some("why"))),
             None,
         );
         assert_eq!(
@@ -517,6 +522,17 @@ mod tests {
         let c = update_disposition_request(&[], DispositionStatus::Completed, None, Some("S"));
         assert_eq!(c.get("session-id"), Some(&Value::String("S".into())));
         assert!(c.get("deadletter-reason").is_none());
+        let d = update_disposition_request(
+            &[],
+            DispositionStatus::Suspended,
+            Some((None, Some("why"))),
+            None,
+        );
+        assert!(d.get("deadletter-reason").is_none(), "absent, not empty");
+        assert_eq!(
+            d.get("deadletter-description"),
+            Some(&Value::String("why".into()))
+        );
         assert_eq!(DispositionStatus::Abandoned.as_str(), "abandoned");
     }
 

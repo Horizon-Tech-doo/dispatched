@@ -559,8 +559,8 @@ mod tests {
         let b = FakeBroker::default();
         let seq = b.add("q", FakeMsg::active("x"));
         let how = Settlement::DeadLetter {
-            reason: "Manual".into(),
-            description: "bad".into(),
+            reason: Some("Manual".into()),
+            description: Some("bad".into()),
         };
         let out = receive::run(
             &mut b.clone(),
@@ -581,6 +581,28 @@ mod tests {
             ),
             (Some("Manual"), Some("bad"))
         );
+        // No reason given: none is set (not an empty one).
+        b.add("q", FakeMsg::active("y"));
+        let how = Settlement::DeadLetter {
+            reason: None,
+            description: None,
+        };
+        receive::run(
+            &mut b.clone(),
+            &recv("q", 1, ReceiveAction::Settle(how)),
+            &NoProgress,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let dl = b.all("q/$DeadLetterQueue");
+        assert_eq!(dl.len(), 2);
+        assert!(
+            !dl[1]
+                .application_properties
+                .contains_key("DeadLetterReason")
+        );
+        assert_eq!(dl[1].dead_letter_reason, None);
     }
 
     #[tokio::test(start_paused = true)]
@@ -851,8 +873,8 @@ mod tests {
         let b = FakeBroker::default();
         let d = b.add("q", FakeMsg::active("x").deferred());
         let how = Settlement::DeadLetter {
-            reason: "Manual".into(),
-            description: "stale".into(),
+            reason: Some("Manual".into()),
+            description: Some("stale".into()),
         };
         let r = receive::settle_deferred(
             &mut b.clone(),

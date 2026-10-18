@@ -1,7 +1,8 @@
 //! Per-message job results, progress events and report files for bulk operations.
 
 use crate::activity::{Outcome, redact};
-use crate::export::{ExportFormat, FileExport};
+use crate::export::{ExportFormat, ExportedMessage, FileExport};
+use crate::messaging::PeekedMessage;
 use crate::{Error, Result};
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
@@ -260,19 +261,57 @@ impl JobReport {
     /// followed by a summary line with `"type":"summary"`.
     pub fn write(&self, path: &Path, format: ExportFormat, overwrite: bool) -> Result<()> {
         let report = self.scrubbed();
-        report.write_scrubbed(path, format, overwrite)
+        report.write_scrubbed(path, format, overwrite, None)
     }
 
-    fn write_scrubbed(&self, path: &Path, format: ExportFormat, overwrite: bool) -> Result<()> {
+    /// [`JobReport::write`] with the messages the job received, in full, in the export shape
+    /// (`dispatched.message/v1`, as `peek --format json` prints them): JSON adds a `messages`
+    /// array; NDJSON writes one `"type":"message"` line per message before the items. The
+    /// report is scrubbed; message content is the user's data and is written as received.
+    pub fn write_with_messages(
+        &self,
+        path: &Path,
+        format: ExportFormat,
+        overwrite: bool,
+        messages: &[PeekedMessage],
+    ) -> Result<()> {
+        let report = self.scrubbed();
+        report.write_scrubbed(path, format, overwrite, Some(messages))
+    }
+
+    fn write_scrubbed(
+        &self,
+        path: &Path,
+        format: ExportFormat,
+        overwrite: bool,
+        messages: Option<&[PeekedMessage]>,
+    ) -> Result<()> {
         let mut out = FileExport::create(path, format, overwrite)?;
+        let exported = |m| ExportedMessage::new(m);
         let bytes = match format {
             ExportFormat::Json => {
-                let mut v = serde_json::to_vec_pretty(&self.serializable()).map_err(json_err)?;
+                let mut doc = serde_json::to_value(self.serializable()).map_err(json_err)?;
+                if let (Some(messages), Some(fields)) = (messages, doc.as_object_mut()) {
+                    let list: Vec<_> = messages.iter().map(exported).collect();
+                    fields.insert(
+                        "messages".into(),
+                        serde_json::to_value(list).map_err(json_err)?,
+                    );
+                }
+                let mut v = serde_json::to_vec_pretty(&doc).map_err(json_err)?;
                 v.push(b'\n');
                 v
             }
             ExportFormat::Ndjson => {
                 let mut v = Vec::new();
+                for m in messages.unwrap_or_default() {
+                    let mut line = serde_json::to_value(exported(m)).map_err(json_err)?;
+                    if let Some(fields) = line.as_object_mut() {
+                        fields.insert("type".into(), "message".into());
+                    }
+                    serde_json::to_writer(&mut v, &line).map_err(json_err)?;
+                    v.push(b'\n');
+                }
                 for item in &self.items {
                     serde_json::to_writer(&mut v, item).map_err(json_err)?;
                     v.push(b'\n');
@@ -619,6 +658,43 @@ mod tests {
                 .unwrap()
                 .contains("\"type\":\"summary\"")
         );
+    }
+
+    #[test]
+    fn a_report_can_carry_the_received_messages_in_full() {
+        let long = "x".repeat(500);
+        let mut m = crate::messaging::test_message(9);
+        m.body = crate::messaging::MessageBody::Text(long.clone());
+        let r = report(&[ok(9)]);
+        let dir = tempfile::tempdir().unwrap();
+        let json = dir.path().join("r.json");
+        r.write_with_messages(&json, ExportFormat::Json, false, std::slice::from_ref(&m))
+            .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
+        assert_eq!(v["messages"][0]["schema"], crate::export::EXPORT_SCHEMA);
+        assert_eq!(v["messages"][0]["sequence_number"], 9);
+        assert!(v.to_string().contains(&long), "the full body");
+        assert!(v["items"].is_array());
+        let nd = dir.path().join("r.ndjson");
+        r.write_with_messages(&nd, ExportFormat::Ndjson, false, std::slice::from_ref(&m))
+            .unwrap();
+        let text = std::fs::read_to_string(&nd).unwrap();
+        let lines: Vec<serde_json::Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 3, "message, item, summary");
+        assert_eq!(lines[0]["type"], "message");
+        assert!(lines[0].to_string().contains(&long));
+        assert_eq!(lines[2]["type"], "summary");
+        // An empty receive still says so.
+        let empty = dir.path().join("e.json");
+        r.write_with_messages(&empty, ExportFormat::Json, false, &[])
+            .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&empty).unwrap()).unwrap();
+        assert_eq!(v["messages"], serde_json::json!([]));
     }
 
     #[test]

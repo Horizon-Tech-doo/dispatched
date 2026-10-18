@@ -50,7 +50,8 @@ pub struct SendArgs {
     /// The body text.
     #[arg(long, conflicts_with_all = ["file", "template"])]
     pub body: Option<String>,
-    /// Body files, used round-robin (repeat, or list several). With --template, they replace
+    /// Body files, used round-robin (repeat, or list several after one --file; put ENTITY
+    /// first: `send orders --file a.json b.json`). With --template, they replace
     /// its body.
     #[arg(long, value_name = "PATH", num_args = 1..)]
     pub file: Vec<PathBuf>,
@@ -199,14 +200,36 @@ pub fn send_request_from(a: &SendArgs) -> anyhow::Result<SendRequest> {
     if let Some(id) = ids.id_for(0) {
         template.message_id = Some(id);
     }
+    // A template's scheduledEnqueueTimeUtc is a schedule like --schedule (which overrides
+    // it): it goes through the schedule path, so the confirmation says schedule and the new
+    // sequence numbers come back. It never stays on the message.
+    let from_template = template.scheduled_enqueue_time.take();
     template.validate()?;
-    let schedule = match &a.schedule {
+    let now = OffsetDateTime::now_utc();
+    let schedule = match (&a.schedule, from_template) {
         // The core error names both forms (+DURATION and RFC 3339).
-        Some(when) => Some(
-            parse_when(when, OffsetDateTime::now_utc())
-                .map_err(|e| anyhow::anyhow!("--schedule: {e}"))?,
-        ),
-        None => None,
+        (Some(when), _) => {
+            let at = parse_when(when, now).map_err(|e| anyhow::anyhow!("--schedule: {e}"))?;
+            if at < now {
+                anyhow::bail!(
+                    "--schedule: {when} is in the past; use +DURATION, such as +10m, or a later \
+                     RFC 3339 time"
+                );
+            }
+            Some(at)
+        }
+        (None, Some(at)) => {
+            if at < now {
+                anyhow::bail!(
+                    "the template's scheduledEnqueueTimeUtc ({}) is in the past; remove it, or \
+                     pass --schedule with +DURATION, such as +10m, or a later RFC 3339 time",
+                    at.format(&time::format_description::well_known::Rfc3339)
+                        .unwrap_or_default()
+                );
+            }
+            Some(at)
+        }
+        (None, None) => None,
     };
     Ok(SendRequest {
         target,
@@ -234,31 +257,74 @@ fn duplicate_id_note(req: &SendRequest) -> Option<&'static str> {
     (req.count > 1 && fixed).then_some(DUPLICATE_ID_NOTE)
 }
 
-/// Error kinds of a sender link that failed or lost its access during the job.
-const LINK_KINDS: [&str; 5] = ["network", "protocol", "auth", "forbidden", "timeout"];
+/// Failures where the broker may have taken the message before the answer was lost.
+const UNCONFIRMED_KINDS: [&str; 2] = ["network", "timeout"];
+/// Failures where the broker refused the link or the message: nothing arrived.
+const REFUSED_KINDS: [&str; 3] = ["auth", "forbidden", "protocol"];
 
-/// A note explaining failed messages of a send or import whose link failed: a long send can
-/// outlive the access it was opened with, and messages in flight may have arrived.
-pub fn link_failure_note(report: &JobReport) -> Option<String> {
-    let n = report
+/// `n` messages, as the subject of a sentence.
+fn messages_were(n: u64) -> String {
+    if n == 1 {
+        "1 message was".into()
+    } else {
+        format!("{} messages were", thousands(n))
+    }
+}
+
+/// Notes explaining failed messages of a send or import whose link failed:
+/// - lost answers (network, timeout): not confirmed, some may have arrived;
+/// - refusals (auth, forbidden, protocol): not sent, with the first reason;
+/// - when some messages were sent before the first such failure, that a long send can outlive
+///   its access token.
+pub fn link_failure_notes(report: &JobReport) -> Vec<String> {
+    let kind_of = |i: &dispatched_core::ItemResult| match &i.outcome {
+        ItemOutcome::Failed { kind, .. } => Some(*kind),
+        _ => None,
+    };
+    let is = |kinds: &[&str], i: &dispatched_core::ItemResult| {
+        kind_of(i).is_some_and(|k| kinds.contains(&k))
+    };
+    let unconfirmed = report
         .items
         .iter()
-        .filter(
-            |i| matches!(&i.outcome, ItemOutcome::Failed { kind, .. } if LINK_KINDS.contains(kind)),
-        )
+        .filter(|i| is(&UNCONFIRMED_KINDS, i))
         .count() as u64;
-    (n > 0).then(|| {
-        let what = if n == 1 {
-            "1 message was".to_string()
-        } else {
-            format!("{} messages were", thousands(n))
-        };
-        format!(
-            "{what} not confirmed because the connection to the entity failed or its access \
-             expired during the job (a long send can outlive its access token); some may still \
-             have arrived, so check the entity before sending the failed ones again"
-        )
-    })
+    let refused: Vec<_> = report
+        .items
+        .iter()
+        .filter(|i| is(&REFUSED_KINDS, i))
+        .collect();
+    let mut notes = Vec::new();
+    if unconfirmed > 0 {
+        notes.push(format!(
+            "{} not confirmed because the connection to the entity failed during the job; some \
+             may still have arrived, so check the entity before sending the failed ones again",
+            messages_were(unconfirmed)
+        ));
+    }
+    if let Some(first) = refused.first() {
+        notes.push(format!(
+            "{} not sent: {}",
+            messages_were(refused.len() as u64),
+            JobReport::reason(first)
+        ));
+    }
+    let first_link_failure = report
+        .items
+        .iter()
+        .position(|i| is(&UNCONFIRMED_KINDS, i) || is(&REFUSED_KINDS, i));
+    if let Some(at) = first_link_failure
+        && report.items[..at]
+            .iter()
+            .any(|i| matches!(i.outcome, ItemOutcome::Succeeded { .. }))
+    {
+        notes.push(
+            "the link failed after some messages were sent; a long send can outlive its access \
+             token, so send large batches in smaller parts"
+                .into(),
+        );
+    }
+    notes
 }
 
 /// The new sequence numbers of a scheduled send, one row per scheduled message (failed ones
@@ -291,7 +357,7 @@ pub async fn send(
     operator.explorer().close().await;
     let mut report = result?;
     report.notes.extend(note.map(str::to_string));
-    report.notes.extend(link_failure_note(&report));
+    report.notes.extend(link_failure_notes(&report));
     let exit = finish_job(&report, format, &args.mutate);
     if scheduled
         && matches!(format, Format::Table)
@@ -313,8 +379,7 @@ pub async fn scheduled(
     format: Format,
 ) -> anyhow::Result<JobExit> {
     let ScheduledCmd::Cancel(args) = cmd;
-    // Scheduled messages live on the queue or topic.
-    let entity = send_target(&args.entity)?;
+    let entity = scheduled_target(&args.entity)?;
     let (operator, cancel) = operator_for(
         ctx,
         sel,
@@ -352,6 +417,19 @@ pub async fn scheduled(
         ));
     }
     Ok(finish_job(&report, format, &args.mutate))
+}
+
+/// The queue or topic of `scheduled cancel`: scheduled messages live there, not on a
+/// subscription.
+fn scheduled_target(name: &str) -> anyhow::Result<EntityPath> {
+    let path = EntityPath::parse(name)?;
+    if path.subscription.is_some() {
+        anyhow::bail!(
+            "scheduled messages are on the topic `{}`; name the topic",
+            sanitize(&path.entity)
+        );
+    }
+    Ok(path)
 }
 
 /// The sequence numbers of the scheduled messages of `entity`, at most [`MAX_SELECTION`],
@@ -414,7 +492,7 @@ pub async fn import(
         .await;
     operator.explorer().close().await;
     let mut report = result?;
-    report.notes.extend(link_failure_note(&report));
+    report.notes.extend(link_failure_notes(&report));
     Ok(finish_job(&report, format, &args.mutate))
 }
 
@@ -523,12 +601,14 @@ mod tests {
         );
     }
 
-    const PROD_CS: &str = "Endpoint=sb://prod.servicebus.windows.net/;SharedAccessKeyName=k;SharedAccessKey=topsecret";
+    /// A host that cannot resolve (`.invalid`), so a regression can never reach a real name.
+    const PROD_CS: &str =
+        "Endpoint=sb://prod.servicebus.invalid/;SharedAccessKeyName=k;SharedAccessKey=topsecret";
 
     fn prod_ctx() -> crate::context::Ctx {
         crate::context::Ctx::for_test_with_profiles(&[(
             "prod-weu",
-            "prod.servicebus.windows.net",
+            "prod.servicebus.invalid",
             true,
         )])
     }
@@ -572,12 +652,23 @@ mod tests {
             let mut argv = vec!["dispatched", "--connection-string", PROD_CS];
             argv.extend(args);
             let cli = crate::Cli::try_parse_from(argv).unwrap();
+            let before = log(&ctx).len();
             let e = crate::run_command(&ctx, cli).await.unwrap_err().to_string();
             assert!(e.contains("--confirm-prod orders"), "{e}");
             assert!(!e.contains("topsecret"));
-            let entry = log(&ctx).into_iter().next().unwrap();
+            let entries = log(&ctx);
+            assert_eq!(entries.len(), before + 1, "one entry: the precheck's");
+            let entry = &entries[0];
             assert_eq!(entry.action, verb);
             assert_eq!(entry.outcome, dispatched_core::Outcome::Denied);
+            assert_eq!(entry.phase, dispatched_core::Phase::Finished);
+            // The precheck's own marker: the gate's denial would carry the effect sentence.
+            assert_eq!(
+                entry.summary,
+                format!("{verb} on orders refused before connecting")
+            );
+            assert_eq!(entry.error.as_deref(), Some(e.as_str()));
+            assert!(!format!("{entry:?}").contains("topsecret"));
         }
         let mut kinds: Vec<_> = log(&ctx).iter().map(|e| e.kind).collect();
         kinds.dedup();
@@ -713,23 +804,137 @@ mod tests {
     fn link_failures_are_explained() {
         let fail = |kind| ItemOutcome::Failed {
             kind,
-            reason: "x".into(),
+            reason: "the namespace refused the Send claim".into(),
         };
+        let ok = || ItemOutcome::Succeeded { detail: None };
+        // Sent for a while, then the link failed: unconfirmed, refused and the token clause.
         let r = report(vec![
-            item(None, "a", ItemOutcome::Succeeded { detail: None }),
+            item(None, "a", ok()),
             item(None, "b", fail("auth")),
             item(None, "c", fail("network")),
             item(None, "d", fail("io")),
         ]);
-        let note = link_failure_note(&r).unwrap();
-        assert!(note.starts_with("2 messages were not confirmed"), "{note}");
+        let notes = link_failure_notes(&r);
+        assert_eq!(notes.len(), 3, "{notes:?}");
         assert!(
-            note.contains("access token") && note.contains("check the entity"),
-            "{note}"
+            notes[0].starts_with("1 message was not confirmed"),
+            "{notes:?}"
+        );
+        assert!(notes[0].contains("check the entity"));
+        assert_eq!(
+            notes[1],
+            "1 message was not sent: the namespace refused the Send claim"
+        );
+        assert!(notes[2].contains("access token"), "{notes:?}");
+        // Refused at the start (no Send right): nothing can have arrived, no token clause.
+        let notes = link_failure_notes(&report(vec![
+            item(None, "a", fail("forbidden")),
+            item(None, "b", fail("forbidden")),
+        ]));
+        assert_eq!(
+            notes,
+            ["2 messages were not sent: the namespace refused the Send claim"]
+        );
+        // A single message that timed out: unconfirmed, no token clause.
+        let notes = link_failure_notes(&report(vec![item(None, "a", fail("timeout"))]));
+        assert_eq!(notes.len(), 1);
+        assert!(!notes[0].contains("access token"));
+        assert!(link_failure_notes(&report(vec![item(None, "d", fail("io"))])).is_empty());
+    }
+
+    #[test]
+    fn a_template_schedule_is_a_schedule_and_the_flag_overrides_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let tpl = dir.path().join("t.json");
+        std::fs::write(
+            &tpl,
+            r#"{"messageId":"t-1","scheduledEnqueueTimeUtc":"2031-05-01T10:00:00Z","body":"b"}"#,
+        )
+        .unwrap();
+        let tpl_s = tpl.to_str().unwrap();
+        let req = send_request_from(&parse(["send", "q", "--template", tpl_s])).unwrap();
+        assert_eq!(req.schedule, Some(datetime!(2031-05-01 10:00 UTC)));
+        assert_eq!(
+            req.template.scheduled_enqueue_time, None,
+            "never left on the message"
+        );
+        let req = send_request_from(&parse([
+            "send",
+            "q",
+            "--template",
+            tpl_s,
+            "--schedule",
+            "2032-01-01T00:00:00Z",
+        ]))
+        .unwrap();
+        assert_eq!(
+            req.schedule,
+            Some(datetime!(2032-01-01 0:00 UTC)),
+            "the flag wins"
+        );
+        assert_eq!(req.template.scheduled_enqueue_time, None);
+        // A time in the past is refused before anything runs.
+        std::fs::write(
+            &tpl,
+            r#"{"scheduledEnqueueTimeUtc":"2001-01-01T00:00:00Z","body":"b"}"#,
+        )
+        .unwrap();
+        let e = send_request_from(&parse(["send", "q", "--template", tpl_s]))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("in the past") && e.contains("--schedule"), "{e}");
+        let e = send_request_from(&parse([
+            "send",
+            "q",
+            "--body",
+            "x",
+            "--schedule",
+            "2001-01-01T00:00:00Z",
+        ]))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            e.starts_with("--schedule") && e.contains("in the past"),
+            "{e}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_template_schedule_is_planned_and_confirmed_as_a_schedule() {
+        let dir = tempfile::tempdir().unwrap();
+        let tpl = dir.path().join("t.json");
+        std::fs::write(
+            &tpl,
+            r#"{"scheduledEnqueueTimeUtc":"2031-05-01T10:00:00Z","body":"b"}"#,
+        )
+        .unwrap();
+        let ctx = prod_ctx();
+        let cli = crate::Cli::try_parse_from([
+            "dispatched",
+            "--connection-string",
+            PROD_CS,
+            "send",
+            "orders",
+            "--template",
+            tpl.to_str().unwrap(),
+        ])
+        .unwrap();
+        crate::run_command(&ctx, cli).await.unwrap_err();
+        assert_eq!(log(&ctx)[0].action, "schedule");
+    }
+
+    #[test]
+    fn scheduled_cancel_names_the_topic_for_a_subscription() {
+        let e = scheduled_target("events/subscriptions/all")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            e,
+            "scheduled messages are on the topic `events`; name the topic"
         );
         assert_eq!(
-            link_failure_note(&report(vec![item(None, "d", fail("io"))])),
-            None
+            scheduled_target("events").unwrap(),
+            EntityPath::queue("events")
         );
     }
 }

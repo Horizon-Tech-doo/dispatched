@@ -316,11 +316,21 @@ pub fn cli_gate(
     resolved: &Resolved,
     args: &MutateArgs,
 ) -> anyhow::Result<(Gate, CancellationToken)> {
+    cli_gate_with(ctx, resolved, args, crate::jobs::arm_ctrl_c)
+}
+
+/// [`cli_gate`] with the function that arms the returned token on the first confirmation.
+fn cli_gate_with(
+    ctx: &Ctx,
+    resolved: &Resolved,
+    args: &MutateArgs,
+    arm: impl Fn(&CancellationToken) + Send + Sync + 'static,
+) -> anyhow::Result<(Gate, CancellationToken)> {
     let cancel = CancellationToken::new();
     let token = cancel.clone();
     let policy = ArmOnConfirm {
         inner: CliPolicy::for_terminal(args, &resolved.profile.name)?,
-        on_confirm: Box::new(move || crate::jobs::arm_ctrl_c(&token)),
+        on_confirm: Box::new(move || arm(&token)),
         armed: std::sync::Once::new(),
     };
     Ok((gate_with(ctx, resolved, Arc::new(policy))?, cancel))
@@ -840,6 +850,37 @@ mod tests {
             1,
             "armed once, on the first confirmation"
         );
+    }
+
+    #[tokio::test]
+    async fn cli_gate_arms_the_token_it_returns_once_a_run_is_confirmed() {
+        use dispatched_core::{Operation, SubQueue, Target};
+        let ctx = Ctx::for_test_with_profiles(&[]);
+        let dev = crate::resolve::resolve_for_test(
+            &ctx,
+            crate::resolve::TestSelection::ConnectionString(
+                "Endpoint=sb://dev.servicebus.invalid/;SharedAccessKeyName=k;SharedAccessKey=x"
+                    .into(),
+            ),
+        )
+        .unwrap();
+        let args = MutateArgs {
+            yes: true,
+            ..MutateArgs::default()
+        };
+        // The test's "arm" cancels the token it is given, so the returned token shows it.
+        let (gate, cancel) = cli_gate_with(&ctx, &dev, &args, |t| t.cancel()).unwrap();
+        assert!(
+            !cancel.is_cancelled(),
+            "nothing armed before a confirmation"
+        );
+        let op = Operation::send(
+            Target::new(EntityPath::queue("q"), SubQueue::Active),
+            1,
+            None,
+        );
+        gate.run(&op, |_| async { Ok(()) }).await.unwrap();
+        assert!(cancel.is_cancelled(), "the returned token was armed");
     }
 
     #[tokio::test]

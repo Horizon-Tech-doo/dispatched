@@ -307,19 +307,30 @@ impl State {
     }
 
     /// Move a message to `{address}/$DeadLetterQueue`, keeping its sequence number.
-    fn dead_letter(&mut self, address: &str, seq: i64, reason: &str, description: &str) {
+    fn dead_letter(
+        &mut self,
+        address: &str,
+        seq: i64,
+        reason: Option<&str>,
+        description: Option<&str>,
+    ) {
         let Some(mut msg) = self.remove(address, seq) else {
             return;
         };
         let props = &mut msg.application_properties;
-        props.insert(
-            "DeadLetterReason".into(),
-            PropValue::String(reason.to_string()),
-        );
-        props.insert(
-            "DeadLetterErrorDescription".into(),
-            PropValue::String(description.to_string()),
-        );
+        // Like the broker: only the values given are set.
+        if let Some(reason) = reason {
+            props.insert(
+                "DeadLetterReason".into(),
+                PropValue::String(reason.to_string()),
+            );
+        }
+        if let Some(description) = description {
+            props.insert(
+                "DeadLetterErrorDescription".into(),
+                PropValue::String(description.to_string()),
+            );
+        }
         (msg.dead_letter_reason, msg.dead_letter_description) = dead_letter_fields(props);
         msg.state = MessageState::Active;
         msg.locked_until = None;
@@ -330,8 +341,10 @@ impl State {
         self.dead_letter(
             address,
             seq,
-            "MaxDeliveryCountExceeded",
-            &format!("Message could not be consumed after {MAX_DELIVERY_COUNT} delivery attempts."),
+            Some("MaxDeliveryCountExceeded"),
+            Some(&format!(
+                "Message could not be consumed after {MAX_DELIVERY_COUNT} delivery attempts."
+            )),
         );
     }
 
@@ -1079,7 +1092,7 @@ impl LockReceiver for FakeReceiver {
                 Settlement::DeadLetter {
                     reason,
                     description,
-                } => s.dead_letter(&address, seq, reason, description),
+                } => s.dead_letter(&address, seq, reason.as_deref(), description.as_deref()),
             }
             Ok(())
         });
@@ -1563,8 +1576,8 @@ mod tests {
             .await
             .unwrap();
         let how = Settlement::DeadLetter {
-            reason: "bad".into(),
-            description: "no customer".into(),
+            reason: Some("bad".into()),
+            description: Some("no customer".into()),
         };
         r.settle(got[1].lock_token.unwrap(), &how).await.unwrap();
         let q = b.all("q");
