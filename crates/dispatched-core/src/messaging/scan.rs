@@ -577,6 +577,9 @@ pub struct SequenceCollection {
     pub missing: Vec<i64>,
     /// Messages examined.
     pub scanned: u64,
+    /// The highest sequence number the peek reached (examined); `None` when it examined none.
+    /// With `scanned` at the budget, wanted numbers above it were never looked at.
+    pub last_examined: Option<i64>,
 }
 
 /// The messages of `view` with the given sequence numbers, read from the smallest to the
@@ -627,6 +630,7 @@ pub async fn collect_sequences<S: PeekSource + ?Sized>(
                 break 'outer;
             }
             out.scanned += 1;
+            out.last_examined = Some(m.sequence_number);
             next = m.sequence_number + 1;
             advanced = true;
             let in_session = session.is_none_or(|s| m.session_id.as_deref() == Some(s));
@@ -1464,6 +1468,7 @@ mod tests {
             [3, 8, 21]
         );
         assert_eq!(c.missing, [4]);
+        assert_eq!(c.last_examined, Some(21));
     }
 
     #[tokio::test]
@@ -1481,6 +1486,11 @@ mod tests {
             "not reached within the budget"
         );
         assert_eq!(c.scanned, 500);
+        assert_eq!(
+            c.last_examined,
+            Some(500),
+            "the read reached 500 and no further"
+        );
         let token = CancellationToken::new();
         token.cancel();
         let e = collect_sequences(

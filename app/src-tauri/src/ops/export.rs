@@ -670,6 +670,7 @@ mod tests {
                 messages: found.into_iter().map(msg).collect(),
                 missing,
                 scanned: 0,
+                last_examined: None,
             })
         }
     }
@@ -842,6 +843,7 @@ mod tests {
                 messages: seqs.iter().copied().map(msg).collect(),
                 missing: vec![],
                 scanned: 0,
+                last_examined: None,
             })
         }
     }

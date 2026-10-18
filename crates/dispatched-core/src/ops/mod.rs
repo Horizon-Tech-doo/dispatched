@@ -5,11 +5,13 @@
 //! The public methods are thin wrappers. Every loop and per-message decision lives in a
 //! `pub(crate)` function over a [`MessagingBackend`], so tests drive it with the fake broker.
 
+pub mod locate;
 pub mod receive;
 pub mod send;
 pub mod session_state;
 
 pub use crate::messaging::sender::send_target;
+pub use locate::LocateLimits;
 pub use receive::{ReceiveAction, ReceiveOutcome, ReceiveRequest};
 pub use send::SendRequest;
 
