@@ -50,6 +50,8 @@ pub(crate) enum FakeOp {
     Cancel,
     /// A `renew_lock` call.
     Renew,
+    /// One `release` (also each one inside `release_all`).
+    Release,
 }
 
 /// A message to put in the fake broker.
@@ -135,6 +137,13 @@ struct State {
     fail_after: Option<(u32, Error)>,
     credit_max: u32,
     renewals: u32,
+    /// Tokens per `renew_lock` call, in order.
+    renew_sizes: Vec<usize>,
+    /// When each accepted session's lock runs out; it bounds its messages' locks.
+    session_locks: HashMap<(String, String), Instant>,
+    session_renewals: u32,
+    /// The renew_lock call (1 = the next one) that fails with this error.
+    renew_fails_on: Option<(u32, Error)>,
     receivers: u64,
 }
 
@@ -160,6 +169,10 @@ impl Default for State {
             fail_after: None,
             credit_max: 0,
             renewals: 0,
+            renew_sizes: Vec::new(),
+            session_locks: HashMap::new(),
+            session_renewals: 0,
+            renew_fails_on: None,
             receivers: 0,
         }
     }
@@ -334,8 +347,34 @@ impl State {
                     lock_token: None,
                 })
             }
-            ReceiveMode::PeekLock => Some(self.lock_at(address, i)),
+            ReceiveMode::PeekLock => {
+                let mut m = self.lock_at(address, i);
+                // In a session, the session lock is the lock of its messages.
+                let key = session.map(|id| (address.to_string(), id.to_string()));
+                if let Some(until) = key.and_then(|k| self.session_locks.get(&k).copied()) {
+                    let at = self.at(until);
+                    let s = &mut self.entities.get_mut(address).expect("found")[i];
+                    s.lock.as_mut().expect("locked").until = until;
+                    s.msg.locked_until = Some(at);
+                    m.message.locked_until = Some(at);
+                }
+                Some(m)
+            }
         }
+    }
+
+    /// Accept session `id` of `address`: its lock runs for the lock duration.
+    fn accept(&mut self, address: &str, id: &str) {
+        let key = (address.to_string(), id.to_string());
+        let until = Instant::now() + self.lock_duration;
+        self.session_locks.insert(key.clone(), until);
+        self.accepted.insert(key);
+    }
+
+    fn unaccept(&mut self, address: &str, id: &str) {
+        let key = (address.to_string(), id.to_string());
+        self.session_locks.remove(&key);
+        self.accepted.remove(&key);
     }
 
     fn lock_at(&mut self, address: &str, i: usize) -> ReceivedMessage {
@@ -462,6 +501,16 @@ impl FakeBroker {
         self.with(|s| s.renewals)
     }
 
+    /// The number of tokens in each `renew_lock` call, in order.
+    pub(crate) fn renew_sizes(&self) -> Vec<usize> {
+        self.with(|s| s.renew_sizes.clone())
+    }
+
+    /// How many successful `renew_session_lock` calls were made.
+    pub(crate) fn session_renewals(&self) -> u32 {
+        self.with(|s| s.session_renewals)
+    }
+
     /// What senders sent to `address` (the queue or topic), in order.
     pub(crate) fn sent(&self, address: &str) -> Vec<OutgoingMessage> {
         self.with(|s| s.sent.get(address).cloned().unwrap_or_default())
@@ -506,6 +555,11 @@ impl FakeBroker {
     /// The next `op` fails with `e` (queued: several calls fail several times).
     pub(crate) fn fail_next(&self, op: FakeOp, e: Error) {
         self.with(|s| s.faults.entry(op).or_default().push_back(e));
+    }
+
+    /// The `k`-th `renew_lock` call from now (1 = the next) fails with `e`; earlier ones work.
+    pub(crate) fn fail_renew_on_call(&self, k: u32, e: Error) {
+        self.with(|s| s.renew_fails_on = Some((k, e)));
     }
 
     /// The next `settle` answers `LockLost` and the lock counts as expired.
@@ -659,13 +713,19 @@ impl MessagingBackend for FakeBroker {
                 }
                 None
             }
+            SessionChoice::Id(_) | SessionChoice::NextAvailable if address.contains("/$") => {
+                // Sub-queues (dead-letter, transfer dead-letter) are not session-enabled.
+                return Err(Error::Invalid(format!(
+                    "{address} is not session-enabled; open a receiver without a session"
+                )));
+            }
             SessionChoice::Id(id) => {
                 let key = (address.clone(), id.clone());
                 self.with(|s| {
                     if s.locked_elsewhere.contains(&key) || s.accepted.contains(&key) {
                         Err(session_locked(id))
                     } else {
-                        s.accepted.insert(key);
+                        s.accept(&address, id);
                         Ok(())
                     }
                 })?;
@@ -676,7 +736,7 @@ impl MessagingBackend for FakeBroker {
                 loop {
                     let taken = self.with(|s| {
                         let id = s.free_session(&address)?;
-                        s.accepted.insert((address.clone(), id.clone()));
+                        s.accept(&address, &id);
                         Some(id)
                     });
                     if let Some(id) = taken {
@@ -1004,6 +1064,8 @@ impl LockReceiver for FakeReceiver {
                 "this receiver holds no message with that lock token; it was settled, released or never received here".into(),
             ));
         }
+        // An injected failure leaves the message locked (its lock expires later).
+        self.broker.fault(FakeOp::Release)?;
         let address = self.address.clone();
         self.broker.with(|s| {
             if let Some(seq) = s.locked_seq(&address, token) {
@@ -1015,11 +1077,21 @@ impl LockReceiver for FakeReceiver {
     }
 
     async fn release_all(&mut self) -> Result<u64> {
+        // As the real receiver: go on past failures; an error only when nothing was released.
         let tokens: Vec<LockToken> = self.tokens.iter().copied().collect();
+        let (mut released, mut first_error) = (0u64, None);
         for token in &tokens {
-            self.release(*token).await?;
+            match self.release(*token).await {
+                Ok(()) => released += 1,
+                Err(e) => {
+                    first_error.get_or_insert(e);
+                }
+            }
         }
-        Ok(tokens.len() as u64)
+        match first_error {
+            Some(e) if released == 0 => Err(e),
+            _ => Ok(released),
+        }
     }
 
     fn held(&self) -> usize {
@@ -1028,9 +1100,26 @@ impl LockReceiver for FakeReceiver {
 
     async fn renew_lock(&mut self, tokens: &[LockToken]) -> Result<Vec<OffsetDateTime>> {
         self.broker.fault(FakeOp::Renew)?;
+        let failing = self.broker.with(|s| match s.renew_fails_on.take() {
+            Some((k, e)) if k <= 1 => Some(e),
+            Some((k, e)) => {
+                s.renew_fails_on = Some((k - 1, e));
+                None
+            }
+            None => None,
+        });
+        if let Some(e) = failing {
+            return Err(e);
+        }
+        if self.session.is_some() {
+            return Err(Error::Invalid(
+                "message locks of a session receiver are renewed with the session lock".into(),
+            ));
+        }
         let address = self.address.clone();
         self.broker.with(|s| {
             s.renewals += 1;
+            s.renew_sizes.push(tokens.len());
             s.expire();
             let until = Instant::now() + s.lock_duration;
             let at = s.at(until);
@@ -1098,8 +1187,31 @@ impl LockReceiver for FakeReceiver {
     }
 
     async fn renew_session_lock(&mut self) -> Result<OffsetDateTime> {
-        self.require_session()?;
-        Ok(self.broker.with(|s| s.at(Instant::now() + s.lock_duration)))
+        let id = self.require_session()?;
+        let address = self.address.clone();
+        self.broker.with(|s| {
+            s.expire();
+            let key = (address.clone(), id.clone());
+            let now = Instant::now();
+            match s.session_locks.get(&key) {
+                Some(until) if *until > now => {}
+                _ => return Err(lock_lost("renew-session-lock")),
+            }
+            let until = now + s.lock_duration;
+            let at = s.at(until);
+            s.session_locks.insert(key, until);
+            s.session_renewals += 1;
+            // The session's messages this receiver holds are locked for as long.
+            for m in s.entities.get_mut(&address).into_iter().flatten() {
+                if m.msg.session_id.as_deref() == Some(id.as_str())
+                    && let Some(lock) = m.lock.as_mut()
+                {
+                    lock.until = until;
+                    m.msg.locked_until = Some(at);
+                }
+            }
+            Ok(at)
+        })
     }
 
     async fn close(mut self: Box<Self>) -> usize {
@@ -1108,8 +1220,8 @@ impl LockReceiver for FakeReceiver {
         let _ = self.release_all().await;
         self.buffer.retain(|m| m.lock_token.is_none());
         if let Some(id) = self.session.take() {
-            let key = (self.address.clone(), id);
-            self.broker.with(|s| s.accepted.remove(&key));
+            let address = self.address.clone();
+            self.broker.with(|s| s.unaccept(&address, &id));
         }
         self.buffer.len()
     }
@@ -1129,7 +1241,7 @@ impl Drop for FakeReceiver {
                 }
             }
             if let Some(id) = session {
-                s.accepted.remove(&(address.clone(), id));
+                s.unaccept(&address, &id);
             }
         });
     }

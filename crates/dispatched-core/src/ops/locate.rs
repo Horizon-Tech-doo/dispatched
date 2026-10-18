@@ -15,10 +15,11 @@ use crate::messaging::{
     SessionChoice, collect_sequences,
 };
 use crate::namespace::PeekView;
+use crate::safety::count_text;
 use crate::{Error, Result};
 use async_trait::async_trait;
 use horizon_azure_kit::safety::CancellationToken;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 use time::OffsetDateTime;
 use tokio::time::Instant;
@@ -28,11 +29,14 @@ use tokio::time::Instant;
 pub struct LocateLimits {
     /// An idle timeout: stop when this passes without a delivery.
     pub idle: Duration,
-    /// Examine at most this many messages (in the peek, and again in the receive).
+    /// Examine at most this many messages: in the peek, and again in each receive (where
+    /// every delivery counts, redeliveries of a message whose lock expired included).
     pub max_examined: u64,
     /// Hold at most this many locks on messages that were not asked for.
     pub max_held: usize,
-    /// Renew the held locks when the earliest expires within this.
+    /// Renew the held locks (or a session's lock) when the earliest expires within this. Locks
+    /// shorter than twice the margin are renewed at half their span instead, and never more
+    /// often than once a second.
     pub renew_margin: Duration,
 }
 
@@ -62,6 +66,8 @@ pub(crate) enum Found {
 /// What to do with each wanted message [`locate`] finds. A trait rather than a closure, so
 /// the action can borrow the receiver it is lent and use the plane `locate` holds (to cancel
 /// scheduled messages); an action that sends owns its sender, opened before `locate`.
+///
+/// Nothing renews held locks while `on_found` runs: keep it short (one send and one settle).
 #[async_trait]
 pub(crate) trait OnFound: Send {
     /// Act on `found`. `rx` is the receiver that holds the lock (settle through it); `None`
@@ -111,6 +117,30 @@ fn result(address: &str, seq: i64, m: Option<&PeekedMessage>, outcome: ItemOutco
     }
 }
 
+/// What [`locate`] found and did: one item per distinct sequence number, in the order given,
+/// and notes for the job report (Task 14 appends them to `JobReport.notes`).
+#[derive(Debug)]
+pub(crate) struct Located {
+    pub items: Vec<ItemResult>,
+    pub notes: Vec<String>,
+}
+
+/// The note for locks a search could not release.
+pub(crate) fn unlock_note(n: usize) -> String {
+    if n == 1 {
+        "1 message could not be unlocked; its delivery count rises by 1 when the lock expires"
+            .into()
+    } else {
+        format!(
+            "{} messages could not be unlocked; their delivery count rises by 1 when the lock expires",
+            count_text(n as u64)
+        )
+    }
+}
+
+/// Never renew more often than this.
+const RENEW_FLOOR: Duration = Duration::from_secs(1);
+
 fn not_reached(why: NotReached) -> ItemOutcome {
     ItemOutcome::NotReached { why }
 }
@@ -119,23 +149,29 @@ fn not_reached(why: NotReached) -> ItemOutcome {
 type Groups = BTreeMap<Option<String>, Vec<PeekedMessage>>;
 
 /// Find the messages of `view` on `address` with the sequence numbers `seqs` and hand each
-/// one to `on`, its lock held. One result per distinct number, in the order given.
+/// one to `on`, its lock held. One result per distinct number, in the order given, plus notes.
+/// `address` must be the view's own address (`{entity}/$DeadLetterQueue` for `DeadLetter`,
+/// and so on): the peek reads `address` as given.
 ///
 /// 1. A peek classifies them (at most `max_examined`): absent ones are `Missing`, except that
 ///    when the peek ran out of budget those above the last one examined are `NotReached
 ///    { Budget }` (never looked at).
 /// 2. Deferred ones are received by sequence number on one receiver per session.
 /// 3. Scheduled ones go to `on` without a receiver.
-/// 4. Active ones are received one at a time on a peek-lock receiver per session. A wanted
-///    message goes to `on` at once; any other stays locked (so it is not delivered again)
-///    and counts towards `max_held`. Held locks are renewed in one call when the earliest is
-///    within `renew_margin` of expiring; if renewing fails, the search stops (`LockTime`).
+/// 4. Active ones are received one at a time on a peek-lock receiver per session (dead-letter
+///    views use one plain receiver: sub-queues are not session-enabled). A wanted message goes
+///    to `on` at once; any other stays locked (so it is not delivered again) and counts
+///    towards `max_held`, as does a wanted one `on` left unsettled. Held locks are renewed in
+///    chunks of 100 when the earliest is within `renew_margin` of expiring (on a session
+///    receiver, the session lock is renewed instead: it covers its messages); if renewing
+///    fails, the search stops (`LockTime`).
 ///    It also stops on `idle` (`Timeout`), at `max_examined` (`Budget`), at `max_held`
 ///    (`HeldLimit`) and on cancel (`Cancelled`). Then everything held is released
 ///    (`released` keeps delivery counts; a close or an expiry would raise them).
 ///
 /// Every receiver is closed on every path. A receiver that fails fails the items it had
-/// not reached; the error is never dropped.
+/// not reached; one that fails after all were found, and locks that could not be released,
+/// become notes. No error is dropped.
 pub(crate) async fn locate(
     plane: &mut dyn MessagingBackend,
     address: &str,
@@ -144,7 +180,7 @@ pub(crate) async fn locate(
     limits: &LocateLimits,
     cancel: &CancellationToken,
     on: &mut dyn OnFound,
-) -> Result<Vec<ItemResult>> {
+) -> Result<Located> {
     let wanted = distinct(seqs);
     let clock = Clock::new();
     let budget = limits.max_examined;
@@ -152,14 +188,18 @@ pub(crate) async fn locate(
     {
         Ok(c) => c,
         Err(Error::Cancelled) => {
-            return Ok(wanted
-                .iter()
-                .map(|s| result(address, *s, None, not_reached(NotReached::Cancelled)))
-                .collect());
+            return Ok(Located {
+                items: wanted
+                    .iter()
+                    .map(|s| result(address, *s, None, not_reached(NotReached::Cancelled)))
+                    .collect(),
+                notes: Vec::new(),
+            });
         }
         Err(e) => return Err(e),
     };
     let mut out: HashMap<i64, ItemResult> = HashMap::new();
+    let mut notes = Vec::new();
     if c.scanned >= budget {
         for s in &c.missing {
             if c.last_examined.is_none_or(|l| *s > l) {
@@ -168,12 +208,20 @@ pub(crate) async fn locate(
             }
         }
     }
+    // Dead-lettered messages keep their session id, but the sub-queue is not
+    // session-enabled: read them without a session.
+    let by_session = !matches!(view, PeekView::DeadLetter | PeekView::TransferDeadLetter);
     let (mut deferred, mut active, mut scheduled) = (Groups::new(), Groups::new(), Vec::new());
     for m in c.messages {
+        let key = if by_session {
+            m.session_id.clone()
+        } else {
+            None
+        };
         match m.state {
-            MessageState::Deferred => deferred.entry(m.session_id.clone()).or_default().push(m),
+            MessageState::Deferred => deferred.entry(key).or_default().push(m),
             MessageState::Scheduled => scheduled.push(m),
-            MessageState::Active => active.entry(m.session_id.clone()).or_default().push(m),
+            MessageState::Active => active.entry(key).or_default().push(m),
         }
     }
 
@@ -217,18 +265,20 @@ pub(crate) async fn locate(
             limits,
             clock: &clock,
             out: &mut out,
+            notes: &mut notes,
         };
         search.run(msgs, cancel, on).await;
         rx.close().await;
     }
 
-    Ok(wanted
+    let items = wanted
         .into_iter()
         .map(|s| {
             out.remove(&s)
                 .unwrap_or_else(|| result(address, s, None, ItemOutcome::Missing))
         })
-        .collect())
+        .collect();
+    Ok(Located { items, notes })
 }
 
 /// A peek-lock receiver on `address` in `session`; a failure fails `msgs`.
@@ -349,12 +399,49 @@ struct Search<'a> {
     limits: &'a LocateLimits,
     clock: &'a Clock,
     out: &'a mut HashMap<i64, ItemResult>,
+    notes: &'a mut Vec<String>,
 }
 
-/// A message held locked (not asked for, or seen again after its lock expired).
+/// A message held locked (not asked for, left unsettled by `on`, or seen again after its
+/// lock expired).
 struct Held {
     token: LockToken,
     until: OffsetDateTime,
+}
+
+/// The locks a search holds and when to renew them.
+#[derive(Default)]
+struct Locks {
+    held: HashMap<i64, Held>,
+    /// On a session receiver: when the session lock runs out (it bounds its messages').
+    session_until: Option<OffsetDateTime>,
+    /// The shortest lock span seen (expiry minus the local time it was learnt).
+    span: Option<Duration>,
+    last_renew: Option<Instant>,
+}
+
+impl Locks {
+    /// Note a lock that runs until `until`, learnt now.
+    fn saw(&mut self, clock: &Clock, until: OffsetDateTime) {
+        let span = Duration::try_from(until - clock.now()).unwrap_or(Duration::ZERO);
+        self.span = Some(self.span.map_or(span, |s| s.min(span)));
+    }
+
+    /// When to renew next: the earliest expiry minus the margin (at most half the lock span),
+    /// and never sooner than `RENEW_FLOOR` after the last renewal.
+    fn renew_at(&self, clock: &Clock, margin: Duration, session: bool) -> Option<Instant> {
+        let earliest = if session {
+            self.session_until
+        } else {
+            self.held.values().map(|h| h.until).min()
+        }?;
+        let margin = self.span.map_or(margin, |s| margin.min(s / 2));
+        let at = clock.instant(earliest - margin);
+        Some(
+            self.last_renew
+                .map_or(at, |last| at.max(last + RENEW_FLOOR)),
+        )
+    }
 }
 
 impl Search<'_> {
@@ -366,8 +453,8 @@ impl Search<'_> {
     ) {
         let mut wanted: HashMap<i64, PeekedMessage> =
             msgs.into_iter().map(|m| (m.sequence_number, m)).collect();
-        let mut held: HashMap<i64, Held> = HashMap::new();
-        let mut seen: HashSet<i64> = HashSet::new();
+        let session = self.rx.session_id().is_some();
+        let mut locks = Locks::default();
         let mut examined = 0u64;
         let mut idle_until = Instant::now() + self.limits.idle;
         let mut stop = None;
@@ -381,27 +468,24 @@ impl Search<'_> {
                 stop = Some(NotReached::Budget);
                 break;
             }
-            if held.len() >= self.limits.max_held {
+            if locks.held.len() >= self.limits.max_held {
                 stop = Some(NotReached::HeldLimit);
                 break;
-            }
-            let renew_at = held
-                .values()
-                .map(|h| h.until)
-                .min()
-                .map(|t| self.clock.instant(t - self.limits.renew_margin));
-            if renew_at.is_some_and(|at| Instant::now() >= at) {
-                if let Err(e) = self.renew(&mut held).await {
-                    tracing::warn!(error = %e, held = held.len(), "renewing held locks failed; releasing them and stopping the search");
-                    stop = Some(NotReached::LockTime);
-                    break;
-                }
-                continue;
             }
             let now = Instant::now();
             if now >= idle_until {
                 stop = Some(NotReached::Timeout);
                 break;
+            }
+            let renew_at = locks.renew_at(self.clock, self.limits.renew_margin, session);
+            if renew_at.is_some_and(|at| now >= at) {
+                locks.last_renew = Some(now);
+                if let Err(e) = self.renew(&mut locks, session).await {
+                    tracing::warn!(error = %e, held = locks.held.len(), "renewing held locks failed; releasing them and stopping the search");
+                    stop = Some(NotReached::LockTime);
+                    break;
+                }
+                continue;
             }
             let renew_due = async {
                 match renew_at {
@@ -431,7 +515,7 @@ impl Search<'_> {
             for m in batch {
                 examined += 1;
                 idle_until = Instant::now() + self.limits.idle;
-                self.take(m, &mut wanted, &mut held, &mut seen, on).await;
+                self.take(m, &mut wanted, &mut locks, session, on).await;
             }
         }
         if error.is_none() {
@@ -452,11 +536,23 @@ impl Search<'_> {
                 .insert(seq, result(self.address, seq, Some(&m), outcome));
         }
         if let (Some(e), true) = (&error, all_found) {
-            tracing::warn!(error = %e, "the receiver failed after every wanted message was found");
+            self.notes.push(format!(
+                "the receiver on {} failed after the search finished: {e}",
+                self.address
+            ));
         }
         // Explicitly, before the link closes: closing with locks held would raise the counts.
-        if let Err(e) = self.rx.release_all().await {
-            tracing::warn!(error = %e, "releasing held messages failed; their locks expire");
+        // A partial failure answers `Ok` with fewer released, so count what is left.
+        let before = self.rx.held();
+        let left = match self.rx.release_all().await {
+            Ok(n) => before.saturating_sub(usize::try_from(n).unwrap_or(usize::MAX)),
+            Err(e) => {
+                tracing::warn!(error = %e, "releasing held messages failed; their locks expire");
+                before
+            }
+        };
+        if left > 0 {
+            self.notes.push(unlock_note(left));
         }
     }
 
@@ -465,8 +561,8 @@ impl Search<'_> {
         &mut self,
         m: ReceivedMessage,
         wanted: &mut HashMap<i64, PeekedMessage>,
-        held: &mut HashMap<i64, Held>,
-        seen: &mut HashSet<i64>,
+        locks: &mut Locks,
+        session: bool,
         on: &mut dyn OnFound,
     ) {
         let seq = m.message.sequence_number;
@@ -478,9 +574,18 @@ impl Search<'_> {
             }
             return;
         };
-        // Seen before (its lock expired or was lost and it came back): not acted on again.
-        // Kept locked, so it is not delivered once more.
-        if seen.insert(seq) && wanted.remove(&seq).is_some() {
+        // Unknown expiry: renew at once, which tells.
+        let until = m.message.locked_until.unwrap_or_else(|| self.clock.now());
+        locks.saw(self.clock, until);
+        if session {
+            // In a session, a message's lock is the session lock.
+            locks.session_until = Some(locks.session_until.map_or(until, |s| s.max(until)));
+        }
+        // `wanted` is the guard: a number leaves it when it is acted on, so a message that
+        // comes back (its lock expired or was lost) is never acted on twice; it is held
+        // instead, so it is not delivered once more.
+        if wanted.remove(&seq).is_some() {
+            let before = self.rx.held();
             let r = on
                 .on_found(
                     &mut *self.plane,
@@ -489,28 +594,42 @@ impl Search<'_> {
                 )
                 .await;
             self.out.insert(seq, r);
-            return;
+            if self.rx.held() < before {
+                return;
+            }
+            // Left unsettled (skipped, or the settle failed): still held, so renew it.
         }
-        // Unknown expiry: renew at once, which tells.
-        let until = m.message.locked_until.unwrap_or_else(|| self.clock.now());
-        held.insert(seq, Held { token, until });
+        locks.held.insert(seq, Held { token, until });
     }
 
-    /// Renew every held lock in one call and take the new expiries.
-    async fn renew(&mut self, held: &mut HashMap<i64, Held>) -> Result<()> {
-        let order: Vec<i64> = held.keys().copied().collect();
-        let tokens: Vec<LockToken> = order.iter().map(|s| held[s].token).collect();
-        let untils = self.rx.renew_lock(&tokens).await?;
-        if untils.len() != tokens.len() {
-            return Err(Error::Protocol(format!(
-                "renew-lock answered {} expiries for {} locks",
-                untils.len(),
-                tokens.len()
-            )));
-        }
-        for (seq, until) in order.iter().zip(untils) {
-            if let Some(h) = held.get_mut(seq) {
+    /// Renew the session lock, or every held message lock in chunks of 100, and take the new
+    /// expiries. The first failure ends it.
+    async fn renew(&mut self, locks: &mut Locks, session: bool) -> Result<()> {
+        if session {
+            let until = self.rx.renew_session_lock().await?;
+            locks.saw(self.clock, until);
+            locks.session_until = Some(until);
+            for h in locks.held.values_mut() {
                 h.until = until;
+            }
+            return Ok(());
+        }
+        let order: Vec<i64> = locks.held.keys().copied().collect();
+        for part in chunks(&order) {
+            let tokens: Vec<LockToken> = part.iter().map(|s| locks.held[s].token).collect();
+            let untils = self.rx.renew_lock(&tokens).await?;
+            if untils.len() != tokens.len() {
+                return Err(Error::Protocol(format!(
+                    "renew-lock answered {} expiries for {} locks",
+                    untils.len(),
+                    tokens.len()
+                )));
+            }
+            for (seq, until) in part.iter().zip(untils) {
+                locks.saw(self.clock, until);
+                if let Some(h) = locks.held.get_mut(seq) {
+                    h.until = until;
+                }
             }
         }
         Ok(())
@@ -651,13 +770,21 @@ mod tests {
             &mut CompleteIt,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .items;
         assert!(
             results
                 .iter()
                 .all(|r| matches!(r.outcome, ItemOutcome::Succeeded { .. }))
         );
-        assert_eq!(b.all("q").len(), 3);
+        assert_eq!(
+            b.all("q")
+                .iter()
+                .map(|m| m.sequence_number)
+                .collect::<Vec<_>>(),
+            [seqs[1], seqs[3], seqs[5]],
+            "exactly the wanted ones were completed"
+        );
         for s in [seqs[1], seqs[3], seqs[5]] {
             assert_eq!(b.delivery_count("q", s), 0, "released, not abandoned");
         }
@@ -681,7 +808,8 @@ mod tests {
             &mut CompleteOrCancel("q"),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .items;
         assert!(
             matches!(r[0].outcome, ItemOutcome::Succeeded { .. }),
             "deferred: received by sequence number"
@@ -697,7 +825,8 @@ mod tests {
             &mut CompleteOrCancel("q"),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .items;
         assert!(
             matches!(r[0].outcome, ItemOutcome::Succeeded { .. }),
             "scheduled: handed to on_found as Found::Scheduled, cancelled through the plane"
@@ -712,7 +841,8 @@ mod tests {
             &mut CompleteOrCancel("q"),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .items;
         assert!(
             matches!(r[0].outcome, ItemOutcome::Missing),
             "not in the active view"
@@ -735,7 +865,8 @@ mod tests {
             &mut CompleteIt,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .items;
         assert!(matches!(r[0].outcome, ItemOutcome::Succeeded { .. }));
         assert_eq!(r[0].session_id.as_deref(), Some("A"));
     }
@@ -761,7 +892,8 @@ mod tests {
             &mut CompleteIt,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .items;
         assert!(matches!(
             r[0].outcome,
             ItemOutcome::NotReached {
@@ -789,7 +921,8 @@ mod tests {
             &mut CompleteIt,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .items;
         assert!(r.iter().all(|i| matches!(
             i.outcome,
             ItemOutcome::Succeeded { .. }
@@ -828,7 +961,8 @@ mod tests {
             &mut CompleteIt,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .items;
         assert!(matches!(r[0].outcome, ItemOutcome::Succeeded { .. }));
         assert!(b.renewals() >= 1, "held locks were renewed in time");
         for s in &seqs[..39] {
@@ -851,7 +985,8 @@ mod tests {
             &mut CompleteIt,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .items;
         assert!(matches!(
             r[0].outcome,
             ItemOutcome::NotReached {
@@ -882,7 +1017,8 @@ mod tests {
             &mut CompleteIt,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .items;
         assert!(
             matches!(&r[0].outcome, ItemOutcome::Failed { kind: "lock_lost", reason } if reason.contains("run again"))
         );
@@ -907,7 +1043,8 @@ mod tests {
             &mut CompleteIt,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .items;
         assert!(matches!(r[0].outcome, ItemOutcome::Succeeded { .. }));
         assert_eq!(b.renewals(), 0, "no lock came within the margin");
         // 25 messages: the first lock (until 31 s) is within 10 s at 21 s, so one renewal
@@ -950,7 +1087,8 @@ mod tests {
             &mut CompleteIt,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .items;
         assert!(matches!(
             r[0].outcome,
             ItemOutcome::NotReached {
@@ -989,7 +1127,8 @@ mod tests {
             &mut CompleteIt,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .items;
         assert!(matches!(
             r[0].outcome,
             ItemOutcome::NotReached {
@@ -1015,7 +1154,8 @@ mod tests {
             &mut CompleteIt,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .items;
         assert!(matches!(r[0].outcome, ItemOutcome::Succeeded { .. }));
         assert!(
             matches!(&r[1].outcome, ItemOutcome::Failed { kind: "network", reason } if reason.contains("link detached")),
@@ -1040,7 +1180,8 @@ mod tests {
             &mut CompleteIt,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .items;
         assert!(matches!(
             &r[0].outcome,
             ItemOutcome::Failed {
@@ -1066,7 +1207,8 @@ mod tests {
             &mut CompleteIt,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .items;
         assert!(
             r.iter()
                 .all(|i| matches!(i.outcome, ItemOutcome::Succeeded { .. }))
@@ -1098,7 +1240,8 @@ mod tests {
             &mut CompleteIt,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .items;
         assert_eq!(r.len(), 1, "distinct numbers");
         assert!(matches!(
             r[0].outcome,
@@ -1107,6 +1250,336 @@ mod tests {
             }
         ));
         assert_eq!(b.delivery_count("q", x), 0);
+    }
+
+    /// Counts its calls per sequence number, then completes like `CompleteIt`.
+    #[derive(Default)]
+    struct Counting(HashMap<i64, u32>);
+    #[async_trait]
+    impl OnFound for Counting {
+        async fn on_found(
+            &mut self,
+            plane: &mut dyn MessagingBackend,
+            rx: Option<&mut dyn LockReceiver>,
+            found: Found,
+        ) -> ItemResult {
+            let seq = match &found {
+                Found::Locked { received } => received.message.sequence_number,
+                Found::Scheduled(m) => m.sequence_number,
+            };
+            *self.0.entry(seq).or_default() += 1;
+            CompleteIt.on_found(plane, rx, found).await
+        }
+    }
+
+    /// Leaves every message unsettled.
+    struct LeaveIt;
+    #[async_trait]
+    impl OnFound for LeaveIt {
+        async fn on_found(
+            &mut self,
+            _plane: &mut dyn MessagingBackend,
+            _rx: Option<&mut dyn LockReceiver>,
+            found: Found,
+        ) -> ItemResult {
+            let m = match found {
+                Found::Locked { received } => received.message,
+                Found::Scheduled(m) => m,
+            };
+            item(
+                &m,
+                ItemOutcome::Skipped {
+                    reason: "left".into(),
+                },
+            )
+        }
+    }
+
+    fn slow(lock_secs: u64, delivery_ms: u64) -> FakeBroker {
+        FakeBroker::default()
+            .with_lock_duration(Duration::from_secs(lock_secs))
+            .with_receive_delay(Duration::from_millis(delivery_ms))
+    }
+
+    async fn find(b: &FakeBroker, address: &str, view: PeekView, seqs: &[i64]) -> Located {
+        locate(
+            &mut b.clone(),
+            address,
+            view,
+            seqs,
+            &LocateLimits::default(),
+            &CancellationToken::new(),
+            &mut CompleteIt,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn locks_left_held_after_the_release_become_a_note() {
+        let b = FakeBroker::default();
+        let seqs: Vec<i64> = (0..6).map(|_| b.add("q", FakeMsg::active("x"))).collect();
+        b.fail_next(FakeOp::Release, Error::Network("reset".into()));
+        let l = find(&b, "q", PeekView::Active, &[seqs[0], seqs[2], seqs[4]]).await;
+        assert!(
+            l.items
+                .iter()
+                .all(|i| matches!(i.outcome, ItemOutcome::Succeeded { .. }))
+        );
+        assert_eq!(
+            l.notes,
+            [
+                "1 message could not be unlocked; its delivery count rises by 1 when the lock expires"
+            ]
+        );
+        let b = FakeBroker::default();
+        let seqs: Vec<i64> = (0..6).map(|_| b.add("q", FakeMsg::active("x"))).collect();
+        for _ in 0..3 {
+            b.fail_next(FakeOp::Release, Error::Network("reset".into()));
+        }
+        let l = find(&b, "q", PeekView::Active, &[seqs[5]]).await;
+        assert_eq!(
+            l.notes,
+            [
+                "3 messages could not be unlocked; their delivery count rises by 1 when the lock expires"
+            ],
+            "a partial release answers Ok with fewer released: the rest is in the note"
+        );
+        // Nothing released at all (`release_all` fails): every held lock is in the note.
+        let b = FakeBroker::default();
+        let seqs: Vec<i64> = (0..6).map(|_| b.add("q", FakeMsg::active("x"))).collect();
+        for _ in 0..5 {
+            b.fail_next(FakeOp::Release, Error::Network("reset".into()));
+        }
+        let l = find(&b, "q", PeekView::Active, &[seqs[5]]).await;
+        assert_eq!(
+            l.notes,
+            [
+                "5 messages could not be unlocked; their delivery count rises by 1 when the lock expires"
+            ]
+        );
+        // A clean run has no notes.
+        let b = FakeBroker::default();
+        let x = b.add("q", FakeMsg::active("x"));
+        b.add("q", FakeMsg::active("y"));
+        assert!(find(&b, "q", PeekView::Active, &[x]).await.notes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn held_locks_are_renewed_in_chunks_of_100() {
+        tokio::time::pause();
+        // 30 s locks, 80 ms per delivery: the one renewal (at about 20 s) covers about 250
+        // held locks.
+        let b = slow(30, 80);
+        let seqs: Vec<i64> = (0..300).map(|_| b.add("q", FakeMsg::active("x"))).collect();
+        let l = find(&b, "q", PeekView::Active, &[seqs[299]]).await;
+        assert!(matches!(l.items[0].outcome, ItemOutcome::Succeeded { .. }));
+        let sizes = b.renew_sizes();
+        assert!(
+            sizes.len() == 3 && sizes[..2] == [100, 100] && (40..=60).contains(&sizes[2]),
+            "one renewal in three calls of at most 100: {sizes:?}"
+        );
+        for s in &seqs[..299] {
+            assert_eq!(b.delivery_count("q", *s), 0);
+        }
+        assert_eq!(b.held_locks(), 0);
+        // The second chunk fails: the search stops on lock time and releases everything.
+        let b = slow(30, 80);
+        let seqs: Vec<i64> = (0..300).map(|_| b.add("q", FakeMsg::active("x"))).collect();
+        b.fail_renew_on_call(2, Error::Network("reset".into()));
+        let l = find(&b, "q", PeekView::Active, &[seqs[299]]).await;
+        assert!(matches!(
+            l.items[0].outcome,
+            ItemOutcome::NotReached {
+                why: NotReached::LockTime
+            }
+        ));
+        assert_eq!(b.renew_sizes(), [100]);
+        assert_eq!(b.held_locks(), 0);
+        for s in &seqs[..299] {
+            assert_eq!(b.delivery_count("q", *s), 0, "released, not expired");
+        }
+    }
+
+    #[tokio::test]
+    async fn locks_shorter_than_the_margin_are_renewed_without_spinning() {
+        tokio::time::pause();
+        // 5 s locks (the Service Bus minimum) against the default 10 s margin.
+        let b = slow(5, 1_000);
+        let seqs: Vec<i64> = (0..20).map(|_| b.add("q", FakeMsg::active("x"))).collect();
+        let l = find(&b, "q", PeekView::Active, &[seqs[19]]).await;
+        assert!(matches!(l.items[0].outcome, ItemOutcome::Succeeded { .. }));
+        assert!(b.renewals() >= 1);
+        assert!(b.renewals() <= 15, "renewed {} times", b.renewals());
+        for s in &seqs[..19] {
+            assert_eq!(b.delivery_count("q", *s), 0, "no held lock expired");
+        }
+        // A held lock and nothing more to deliver: the idle time (4 s here, so the other
+        // receiver's 5 s lock on the wanted one outlasts it) still ends the search while the
+        // short lock is being renewed.
+        let b = slow(5, 0);
+        let wanted = b.add("q", FakeMsg::active("w"));
+        let mut other = b
+            .clone()
+            .open_receiver(&ReceiverSpec::peek_lock("q"), Duration::ZERO)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(other.receive(1, Duration::ZERO).await.unwrap().len(), 1);
+        let h = b.add("q", FakeMsg::active("h"));
+        let limits = LocateLimits {
+            idle: Duration::from_secs(4),
+            ..Default::default()
+        };
+        let l = locate(
+            &mut b.clone(),
+            "q",
+            PeekView::Active,
+            &[wanted],
+            &limits,
+            &CancellationToken::new(),
+            &mut CompleteIt,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            l.items[0].outcome,
+            ItemOutcome::NotReached {
+                why: NotReached::Timeout
+            }
+        ));
+        assert!(b.renewals() >= 1, "the held lock was renewed while waiting");
+        assert_eq!(b.delivery_count("q", h), 0);
+        assert_eq!(b.held_locks(), 1, "only the other receiver's lock");
+        other.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_session_entitys_dead_letter_queue_is_searched_without_a_session() {
+        let b = FakeBroker::default();
+        let dlq = "s/$DeadLetterQueue";
+        let a = b.add(dlq, FakeMsg::active("a").in_session("A"));
+        let c = b.add(dlq, FakeMsg::active("c").in_session("C"));
+        let d = b.add(dlq, FakeMsg::active("d").in_session("A").deferred());
+        let l = find(&b, dlq, PeekView::DeadLetter, &[a, c, d]).await;
+        assert!(
+            l.items
+                .iter()
+                .all(|i| matches!(i.outcome, ItemOutcome::Succeeded { .. })),
+            "{:?}",
+            l.items
+        );
+        assert!(b.all(dlq).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_session_search_renews_the_session_lock() {
+        tokio::time::pause();
+        let b = slow(30, 1_000);
+        let seqs: Vec<i64> = (0..40)
+            .map(|_| b.add("s", FakeMsg::active("x").in_session("A")))
+            .collect();
+        let l = find(&b, "s", PeekView::Active, &[seqs[39]]).await;
+        assert!(
+            matches!(l.items[0].outcome, ItemOutcome::Succeeded { .. }),
+            "{:?}",
+            l.items[0].outcome
+        );
+        assert!(b.session_renewals() >= 1);
+        assert_eq!(
+            b.renewals(),
+            0,
+            "no message-lock renewal on a session receiver"
+        );
+        for s in &seqs[..39] {
+            assert_eq!(
+                b.delivery_count("s", *s),
+                0,
+                "the session lock never lapsed"
+            );
+        }
+        assert_eq!(b.held_locks(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_receiver_failing_after_the_last_match_is_a_note() {
+        let b = FakeBroker::default();
+        let seqs: Vec<i64> = (0..3).map(|_| b.add("q", FakeMsg::active("x"))).collect();
+        b.fail_receive_after(3, Error::Network("link detached".into()));
+        let l = find(&b, "q", PeekView::Active, &[seqs[2]]).await;
+        assert!(matches!(l.items[0].outcome, ItemOutcome::Succeeded { .. }));
+        assert_eq!(l.notes.len(), 1, "{:?}", l.notes);
+        assert!(
+            l.notes[0].starts_with("the receiver on q failed after the search finished: ")
+                && l.notes[0].contains("link detached"),
+            "{}",
+            l.notes[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_message_that_comes_back_is_acted_on_once() {
+        let b = FakeBroker::default();
+        let (x, y) = (
+            b.add("q", FakeMsg::active("x")),
+            b.add("q", FakeMsg::active("y")),
+        );
+        b.expire_lock_on_next_settle();
+        let mut on = Counting::default();
+        let l = locate(
+            &mut b.clone(),
+            "q",
+            PeekView::Active,
+            &[x, y],
+            &LocateLimits::default(),
+            &CancellationToken::new(),
+            &mut on,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            &l.items[0].outcome,
+            ItemOutcome::Failed {
+                kind: "lock_lost",
+                ..
+            }
+        ));
+        assert!(matches!(l.items[1].outcome, ItemOutcome::Succeeded { .. }));
+        assert_eq!(
+            on.0.get(&x),
+            Some(&1),
+            "x came back but was not acted on again"
+        );
+        assert_eq!(b.held_locks(), 0, "released at the end");
+        assert_eq!(b.delivery_count("q", x), 1, "only the lost lock counted");
+    }
+
+    #[tokio::test]
+    async fn a_wanted_message_left_unsettled_is_held_and_renewed() {
+        tokio::time::pause();
+        let b = slow(30, 1_000);
+        let seqs: Vec<i64> = (0..40).map(|_| b.add("q", FakeMsg::active("x"))).collect();
+        let l = locate(
+            &mut b.clone(),
+            "q",
+            PeekView::Active,
+            &[seqs[0], seqs[39]],
+            &LocateLimits::default(),
+            &CancellationToken::new(),
+            &mut LeaveIt,
+        )
+        .await
+        .unwrap();
+        assert!(
+            l.items
+                .iter()
+                .all(|i| matches!(i.outcome, ItemOutcome::Skipped { .. }))
+        );
+        for s in &seqs {
+            assert_eq!(b.delivery_count("q", *s), 0, "{s}: renewed, then released");
+        }
+        assert_eq!(b.held_locks(), 0);
+        assert_eq!(b.all("q").len(), 40);
     }
 
     #[tokio::test]
@@ -1124,7 +1597,8 @@ mod tests {
             &mut CancelAfterFirst(cancel.clone()),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .items;
         assert!(matches!(r[0].outcome, ItemOutcome::Succeeded { .. }));
         assert!(matches!(
             r[1].outcome,
@@ -1133,5 +1607,8 @@ mod tests {
             }
         ));
         assert_eq!(b.held_locks(), 0);
+        for s in &seqs[1..] {
+            assert_eq!(b.delivery_count("q", *s), 0);
+        }
     }
 }
