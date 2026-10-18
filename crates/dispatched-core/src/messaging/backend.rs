@@ -101,7 +101,8 @@ pub(crate) trait LockReceiver: Send {
     fn held(&self) -> usize;
     /// Renew the locks of `tokens`; the new expirations in order.
     async fn renew_lock(&mut self, tokens: &[LockToken]) -> Result<Vec<OffsetDateTime>>;
-    /// Receive deferred messages by sequence number, locked.
+    /// Receive deferred messages by sequence number, locked. Deferred messages received
+    /// here are not held: settle each one, or its lock expires.
     async fn receive_deferred(&mut self, seqs: &[i64]) -> Result<Vec<ReceivedMessage>>;
     /// The accepted session's state.
     async fn session_state(&mut self) -> Result<Option<Vec<u8>>>;

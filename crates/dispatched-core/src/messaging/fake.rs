@@ -519,12 +519,14 @@ impl FakeBroker {
         });
     }
 
-    /// The next `n` deliveries arrive only during a drain (after the wait passed).
+    /// No delivery arrives before the wait passes; then, during the drain, whatever is
+    /// available arrives (up to the credit) and counts toward the `n` late ones.
     pub(crate) fn deliver_late(&self, n: u32) {
         self.with(|s| s.late = n);
     }
 
-    /// The next drain ends by the grace time with `n` credit unaccounted.
+    /// The next drain ends by the grace time with `n` credit unaccounted. It waits
+    /// `DRAIN_GRACE` on the tokio clock: pause the clock in tests that use it.
     pub(crate) fn stall_drain(&self, n: u32) {
         self.with(|s| s.stall = n);
     }
@@ -590,7 +592,7 @@ impl MessagingBackend for FakeBroker {
             }
             return Err(e);
         }
-        let now = OffsetDateTime::now_utc();
+        let now = self.with(|s| s.now());
         for (i, m) in batch.iter().enumerate() {
             // The real encoding, so ids and properties come out as the broker would store them.
             let encoded = encode_for_schedule(m, at, now).and_then(|(b, ..)| decode_bytes(&b));
@@ -619,19 +621,15 @@ impl MessagingBackend for FakeBroker {
             }
             return Err(e);
         }
+        // The broker ignores numbers it does not know: every index succeeds.
         for (i, seq) in seqs.iter().enumerate() {
-            let removed = self.with(|s| {
+            self.with(|s| {
                 let found = s.position(&target, |m| {
                     m.msg.sequence_number == *seq && m.msg.state == MessageState::Scheduled
                 });
                 found.and_then(|_| s.remove(&target, *seq))
             });
-            each(
-                i,
-                removed
-                    .map(|_| ())
-                    .ok_or_else(|| Error::NotFound(format!("scheduled message {seq} in {target}"))),
-            );
+            each(i, Ok(()));
         }
         Ok(())
     }
@@ -766,7 +764,22 @@ impl MessageSender for FakeSender {
                 each(i, Err(e));
                 continue;
             }
-            let stored = m.to_amqp(OffsetDateTime::now_utc()).map(|amqp| {
+            if m.session_id.is_none()
+                && self
+                    .broker
+                    .with(|s| s.sessions_required.contains(&self.target))
+            {
+                each(
+                    i,
+                    Err(Error::Invalid(format!(
+                        "{} requires sessions; give the message a session id",
+                        self.target
+                    ))),
+                );
+                continue;
+            }
+            let now = self.broker.with(|s| s.now());
+            let stored = m.to_amqp(now).map(|amqp| {
                 let mut msg = decode_message(amqp);
                 msg.state = if msg.scheduled_enqueue_time.is_some() {
                     MessageState::Scheduled
@@ -1020,7 +1033,8 @@ impl LockReceiver for FakeReceiver {
                     .collect::<Vec<_>>(),
             )
         })?;
-        self.tokens.extend(got.iter().filter_map(|m| m.lock_token));
+        // As on the real receiver: no link delivery, so not held. Settle each one, or its
+        // lock expires (raising the delivery count); release and close do not touch it.
         Ok(got)
     }
 
@@ -1057,6 +1071,26 @@ impl LockReceiver for FakeReceiver {
             self.broker.with(|s| s.accepted.remove(&key));
         }
         self.buffer.len()
+    }
+}
+
+impl Drop for FakeReceiver {
+    /// Dropped without `close`: the link detaches, so the session frees and held locks are
+    /// lost, which raises their delivery counts (as closing a link with locks held does).
+    fn drop(&mut self) {
+        let address = self.address.clone();
+        let tokens: Vec<LockToken> = self.tokens.drain().collect();
+        let session = self.session.take();
+        self.broker.with(|s| {
+            for token in tokens {
+                if let Some(seq) = s.locked_seq(&address, token) {
+                    s.unlock(&address, seq, true);
+                }
+            }
+            if let Some(id) = session {
+                s.accepted.remove(&(address.clone(), id));
+            }
+        });
     }
 }
 
@@ -1163,12 +1197,13 @@ mod tests {
             .unwrap();
         assert_eq!(r.receive(3, WAIT).await.unwrap().len(), 3);
         assert_eq!(b.all("q").len(), 2);
-        assert!(b.credit_granted_max() <= 3);
+        assert_eq!(b.credit_granted_max(), 3);
     }
 
     #[tokio::test]
     async fn next_available_session_skips_sessions_locked_elsewhere() {
         let b = FakeBroker::default();
+        b.require_sessions("s");
         b.add("s", FakeMsg::active("1").in_session("a"));
         b.add("s", FakeMsg::active("2").in_session("b"));
         b.lock_session_elsewhere("s", "a");
@@ -1201,6 +1236,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_stalled_drain_reports_its_shortfall() {
+        tokio::time::pause();
         let b = FakeBroker::default();
         b.add("q", FakeMsg::active("x"));
         b.stall_drain(2);
@@ -1269,7 +1305,8 @@ mod tests {
 
     #[tokio::test]
     async fn deferred_and_scheduled_are_received_only_by_sequence_number() {
-        let b = FakeBroker::default();
+        tokio::time::pause();
+        let b = FakeBroker::default().with_lock_duration(Duration::from_secs(30));
         let deferred = b.add("q", FakeMsg::active("d").deferred());
         b.add("q", FakeMsg::active("s").scheduled());
         let mut r = b
@@ -1286,10 +1323,16 @@ mod tests {
         );
         let got = r.receive_deferred(&[deferred]).await.unwrap();
         assert_eq!(got[0].message.sequence_number, deferred);
-        assert_eq!(r.held(), 1);
+        assert_eq!(r.held(), 0, "received by sequence number: not held");
         r.settle(got[0].lock_token.unwrap(), &Settlement::Complete)
             .await
             .unwrap();
+        // A second deferred message: not releasable, and close leaves it locked.
+        let other = b.add("q", FakeMsg::active("e").deferred());
+        let token = r.receive_deferred(&[other]).await.unwrap()[0]
+            .lock_token
+            .unwrap();
+        assert!(matches!(r.release(token).await, Err(Error::Invalid(_))));
         assert!(matches!(
             r.receive_deferred(&[deferred]).await,
             Err(Error::NotFound(_))
@@ -1300,7 +1343,24 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!((counts.active, counts.scheduled), (0, 1));
+        assert_eq!(
+            (counts.active, counts.scheduled),
+            (1, 1),
+            "the second deferred one counts as active"
+        );
+        assert_eq!(r.close().await, 0);
+        assert_eq!(b.held_locks(), 1, "close leaves it locked");
+        assert_eq!(b.delivery_count("q", other), 0);
+        tokio::time::advance(Duration::from_secs(31)).await;
+        assert_eq!(b.held_locks(), 0);
+        assert_eq!(b.delivery_count("q", other), 1, "its lock expired");
+        let state = b
+            .all("q")
+            .into_iter()
+            .find(|m| m.sequence_number == other)
+            .unwrap()
+            .state;
+        assert_eq!(state, MessageState::Deferred);
     }
 
     #[tokio::test]
@@ -1409,9 +1469,12 @@ mod tests {
         let mut b = FakeBroker::default();
         let at = OffsetDateTime::now_utc() + Duration::from_secs(3600);
         let mut seqs = Vec::new();
-        b.schedule("q", &[OutgoingMessage::text("x")], at, &mut |_, r| {
-            seqs.push(r.unwrap())
-        })
+        b.schedule(
+            "q",
+            &[OutgoingMessage::text("x"), OutgoingMessage::text("y")],
+            at,
+            &mut |_, r| seqs.push(r.unwrap()),
+        )
         .await
         .unwrap();
         assert_eq!(b.all("q")[0].state, MessageState::Scheduled);
@@ -1419,8 +1482,11 @@ mod tests {
         b.cancel_scheduled("q", &[seqs[0], 999], &mut |i, r| out.push((i, r.is_ok())))
             .await
             .unwrap();
-        assert_eq!(out, [(0, true), (1, false)]);
-        assert!(b.all("q").is_empty());
+        assert_eq!(out, [(0, true), (1, true)], "unknown numbers are ignored");
+        let left = b.all("q");
+        assert_eq!(left.len(), 1, "only the cancelled one is gone");
+        assert_eq!(left[0].sequence_number, seqs[1]);
+        assert_eq!(left[0].state, MessageState::Scheduled);
     }
 
     #[tokio::test]
@@ -1445,6 +1511,14 @@ mod tests {
         assert_eq!(b.session_state("s", "a").as_deref(), Some(&b"step-2"[..]));
         assert_eq!(b.session_ids("s").await.unwrap(), ["a"]);
         r.close().await;
+        let mut tx = b.open_sender("s").await.unwrap();
+        let mut seen = Vec::new();
+        tx.send_all(&[OutgoingMessage::text("no session")], &mut |i, r| {
+            seen.push((i, r.is_ok()))
+        })
+        .await
+        .unwrap();
+        assert_eq!(seen, [(0, false)], "a session entity needs a session id");
         let s = EntityPath::queue("s");
         assert_eq!(b.requires_session(&s).await.unwrap(), Some(true));
         b.counts_unavailable();
