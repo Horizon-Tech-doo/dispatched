@@ -79,6 +79,28 @@ fn session_body(session: &str) -> OrderedMap<String, Value> {
     body
 }
 
+/// The AMQP type of a value, for error messages: values from the broker can
+/// carry message content, so errors name the type and never echo the value.
+fn kind(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Ubyte(_) | Value::Ushort(_) | Value::Uint(_) | Value::Ulong(_) => "unsigned integer",
+        Value::Byte(_) | Value::Short(_) | Value::Int(_) | Value::Long(_) => "integer",
+        Value::Float(_) | Value::Double(_) => "floating point number",
+        Value::Timestamp(_) => "timestamp",
+        Value::Uuid(_) => "uuid",
+        Value::Binary(_) => "binary",
+        Value::String(_) => "string",
+        Value::Symbol(_) => "symbol",
+        Value::List(_) => "list",
+        Value::Map(_) => "map",
+        Value::Array(_) => "array",
+        Value::Described(_) => "described value",
+        _ => "other value",
+    }
+}
+
 /// Accept 200 (with a body to read) or 204 (`Ok(None)`: nothing); any other
 /// status is mapped with [`MgmtResponse::error`].
 fn success_body<'a>(
@@ -90,7 +112,8 @@ fn success_body<'a>(
         200 => match &resp.body {
             Value::Map(m) => Ok(Some(m)),
             other => Err(Error::Protocol(format!(
-                "{op}: unexpected response body {other:?}"
+                "{op}: expected a map response body, got a {}",
+                kind(other)
             ))),
         },
         _ => Err(resp.error(op)),
@@ -102,8 +125,12 @@ fn items<'a>(map: &'a OrderedMap<Value, Value>, field: &str, op: &str) -> Result
     match map.get(&key(field)) {
         Some(Value::List(list)) => Ok(list.iter().collect()),
         Some(Value::Array(array)) => Ok(array.0.iter().collect()),
-        other => Err(Error::Protocol(format!(
-            "{op}: expected a `{field}` list, got {other:?}"
+        Some(other) => Err(Error::Protocol(format!(
+            "{op}: expected a `{field}` list, got a {}",
+            kind(other)
+        ))),
+        None => Err(Error::Protocol(format!(
+            "{op}: the response has no `{field}` list"
         ))),
     }
 }
@@ -113,7 +140,8 @@ fn as_datetime(v: &Value, op: &str) -> Result<OffsetDateTime> {
         Value::Timestamp(t) => timestamp_to_datetime(t)
             .ok_or_else(|| Error::Protocol(format!("{op}: expiration out of range"))),
         other => Err(Error::Protocol(format!(
-            "{op}: expected a timestamp, got {other:?}"
+            "{op}: expected a timestamp, got a {}",
+            kind(other)
         ))),
     }
 }
@@ -154,7 +182,8 @@ pub fn parse_schedule_response(resp: MgmtResponse) -> Result<Vec<i64>> {
         .map(|v| match v {
             Value::Long(n) => Ok(*n),
             other => Err(Error::Protocol(format!(
-                "{SCHEDULE}: unexpected sequence number {other:?}"
+                "{SCHEDULE}: expected a long sequence number, got a {}",
+                kind(other)
             ))),
         })
         .collect()
@@ -211,11 +240,14 @@ pub fn receive_by_sequence_request(
 }
 
 /// The received messages with their lock tokens. `204` means none of the
-/// sequence numbers exist. A missing `lock-token` (receive-and-delete) is the
-/// nil uuid.
+/// sequence numbers exist. `peek_lock` is the mode the request asked for: in
+/// peek-lock mode every message must carry a `lock-token` (a missing one is a
+/// protocol error, never a made-up token); in receive-and-delete mode there is
+/// no lock and the token is `None` when absent.
 pub fn parse_receive_by_sequence_response(
     resp: MgmtResponse,
-) -> Result<Vec<(PeekedMessage, Uuid)>> {
+    peek_lock: bool,
+) -> Result<Vec<(PeekedMessage, Option<Uuid>)>> {
     let Some(map) = success_body(&resp, RECEIVE_BY_SEQUENCE)? else {
         return Ok(Vec::new());
     };
@@ -224,7 +256,8 @@ pub fn parse_receive_by_sequence_response(
         .map(|item| {
             let Value::Map(entry) = item else {
                 return Err(Error::Protocol(format!(
-                    "{RECEIVE_BY_SEQUENCE}: unexpected entry {item:?}"
+                    "{RECEIVE_BY_SEQUENCE}: expected a map per message, got a {}",
+                    kind(item)
                 )));
             };
             let message = match entry.get(&key("message")) {
@@ -236,11 +269,17 @@ pub fn parse_receive_by_sequence_response(
                 }
             };
             let token = match entry.get(&key("lock-token")) {
-                Some(Value::Uuid(u)) => Uuid::from(u.clone()),
-                None | Some(Value::Null) => Uuid::nil(),
+                Some(Value::Uuid(u)) => Some(Uuid::from(u.clone())),
+                None | Some(Value::Null) if peek_lock => {
+                    return Err(Error::Protocol(format!(
+                        "{RECEIVE_BY_SEQUENCE}: a peek-lock response carried a message without a lock token"
+                    )));
+                }
+                None | Some(Value::Null) => None,
                 Some(other) => {
                     return Err(Error::Protocol(format!(
-                        "{RECEIVE_BY_SEQUENCE}: unexpected lock token {other:?}"
+                        "{RECEIVE_BY_SEQUENCE}: expected a uuid lock token, got a {}",
+                        kind(other)
                     )));
                 }
             };
@@ -291,7 +330,8 @@ pub fn parse_session_state_response(resp: MgmtResponse) -> Result<Option<Vec<u8>
         None | Some(Value::Null) => Ok(None),
         Some(Value::Binary(bytes)) => Ok(Some(bytes.to_vec())),
         Some(other) => Err(Error::Protocol(format!(
-            "{GET_SESSION_STATE}: unexpected session state {other:?}"
+            "{GET_SESSION_STATE}: expected binary session state, got a {}",
+            kind(other)
         ))),
     }
 }
@@ -480,47 +520,137 @@ mod tests {
         assert_eq!(DispositionStatus::Abandoned.as_str(), "abandoned");
     }
 
-    #[test]
-    fn receive_by_sequence_returns_messages_with_lock_tokens() {
+    fn encoded_message(seq: i64) -> Vec<u8> {
         let msg = Message::builder()
             .message_annotations(
                 MessageAnnotations::builder()
-                    .insert("x-opt-sequence-number", 9i64)
+                    .insert("x-opt-sequence-number", seq)
                     .build(),
             )
-            .data(b"x".to_vec())
+            .data(b"secret body".to_vec())
             .build();
-        let bytes = serde_amqp::to_vec(&Serializable(msg)).unwrap();
+        serde_amqp::to_vec(&Serializable(msg)).unwrap()
+    }
+
+    fn entry(bytes: Vec<u8>, token: Option<Value>) -> Value {
+        let mut m = OrderedMap::new();
+        m.insert(
+            Value::String("message".into()),
+            Value::Binary(ByteBuf::from(bytes)),
+        );
+        if let Some(t) = token {
+            m.insert(Value::String("lock-token".into()), t);
+        }
+        Value::Map(m)
+    }
+
+    fn messages(entries: Vec<Value>) -> MgmtResponse {
+        resp(200, map([("messages", Value::List(entries))]))
+    }
+
+    #[test]
+    fn receive_by_sequence_returns_messages_with_lock_tokens() {
         let token = Uuid::from_u128(0x0011_2233_4455_6677_8899_aabb_ccdd_eeff);
-        let entry = Value::Map(OrderedMap::from_iter([
-            (
-                Value::String("message".into()),
-                Value::Binary(ByteBuf::from(bytes)),
-            ),
-            (
-                Value::String("lock-token".into()),
-                Value::Uuid(token.into()),
-            ),
-        ]));
-        let got = parse_receive_by_sequence_response(resp(
-            200,
-            map([("messages", Value::List(vec![entry]))]),
-        ))
+        let got = parse_receive_by_sequence_response(
+            messages(vec![entry(
+                encoded_message(9),
+                Some(Value::Uuid(token.into())),
+            )]),
+            true,
+        )
         .unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].0.sequence_number, 9);
-        assert_eq!(got[0].1, token);
+        assert_eq!(got[0].1, Some(token));
         assert!(
-            parse_receive_by_sequence_response(resp(204, map([])))
+            parse_receive_by_sequence_response(resp(204, map([])), true)
                 .unwrap()
                 .is_empty(),
             "204: none of them exist"
         );
         assert!(
-            parse_receive_by_sequence_response(resp(200, map([("messages", Value::Null)])))
+            parse_receive_by_sequence_response(resp(200, map([("messages", Value::Null)])), true)
                 .is_err(),
             "a malformed body is a protocol error"
         );
+    }
+
+    #[test]
+    fn peek_lock_without_a_lock_token_is_a_protocol_error() {
+        for token in [None, Some(Value::Null)] {
+            let err = parse_receive_by_sequence_response(
+                messages(vec![entry(encoded_message(9), token)]),
+                true,
+            )
+            .unwrap_err();
+            let Error::Protocol(m) = err else {
+                panic!("expected a protocol error, got {err}")
+            };
+            assert!(m.contains("without a lock token"), "{m}");
+        }
+        let err = parse_receive_by_sequence_response(
+            messages(vec![entry(
+                encoded_message(9),
+                Some(Value::String("secret token".into())),
+            )]),
+            true,
+        )
+        .unwrap_err();
+        let Error::Protocol(m) = err else {
+            panic!("expected a protocol error, got {err}")
+        };
+        assert!(m.contains("got a string") && !m.contains("secret"), "{m}");
+    }
+
+    #[test]
+    fn receive_and_delete_without_a_lock_token_is_none() {
+        for token in [None, Some(Value::Null)] {
+            let got = parse_receive_by_sequence_response(
+                messages(vec![entry(encoded_message(4), token)]),
+                false,
+            )
+            .unwrap();
+            assert_eq!(got.len(), 1);
+            assert_eq!(got[0].0.sequence_number, 4);
+            assert_eq!(got[0].1, None);
+        }
+    }
+
+    #[test]
+    fn malformed_entries_never_echo_message_content() {
+        let err = parse_receive_by_sequence_response(
+            messages(vec![Value::Binary(ByteBuf::from(encoded_message(1)))]),
+            false,
+        )
+        .unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("got a binary"), "{text}");
+        assert!(!text.contains("115, 101, 99"), "no bytes in {text}");
+    }
+
+    #[test]
+    fn array_fields_accept_lists_and_reject_other_element_types() {
+        let list = resp(
+            200,
+            map([("sequence-numbers", Value::List(vec![Value::Long(1)]))]),
+        );
+        assert_eq!(parse_schedule_response(list).unwrap(), [1]);
+        let wrong = resp(
+            200,
+            map([("sequence-numbers", Value::List(vec![Value::Int(1)]))]),
+        );
+        assert!(matches!(
+            parse_schedule_response(wrong),
+            Err(Error::Protocol(_))
+        ));
+        let not_time = resp(
+            200,
+            map([("expirations", Value::List(vec![Value::Long(1)]))]),
+        );
+        assert!(matches!(
+            parse_renew_lock_response(not_time),
+            Err(Error::Protocol(_))
+        ));
     }
 
     #[test]

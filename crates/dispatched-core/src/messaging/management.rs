@@ -153,6 +153,8 @@ impl MgmtResponse {
         {
             return e;
         }
+        // 410 and 409 apply to every operation; today only the lock and
+        // session operations return them (a missing entity is 404).
         match self.status {
             410 => return lock_lost(operation, &detail),
             409 => return Error::Conflict(format!("{operation}: {detail}")),
@@ -541,6 +543,15 @@ mod tests {
             }
             .error("x"),
             Error::LockLost(_)
+        ));
+        // The condition wins over a 410 or 409 status.
+        assert!(matches!(
+            with_condition(409, "com.microsoft:message-lock-lost").error("x"),
+            Error::LockLost(_)
+        ));
+        assert!(matches!(
+            with_condition(410, "com.microsoft:session-cannot-be-locked").error("x"),
+            Error::Conflict(_)
         ));
         // A condition string arrives as a String too; other conditions keep the status mapping.
         let mut app = OrderedMap::new();
