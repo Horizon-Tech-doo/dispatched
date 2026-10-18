@@ -16,6 +16,11 @@ describe("message columns", () => {
     expect(propText({ type: "int", value: 7 })).toBe("7");
     expect(propText({ type: "long", value: 5_000_000_000 })).toBe("5000000000");
     expect(propText({ type: "bool", value: false })).toBe("false");
+    // Unsigned values keep their AMQP width (ubyte, ushort, uint, ulong).
+    expect(propText({ type: "ubyte", value: 255 })).toBe("255");
+    expect(propText({ type: "ushort", value: 65_535 })).toBe("65535");
+    expect(propText({ type: "uint", value: 4_294_967_295 })).toBe("4294967295");
+    expect(propText({ type: "ulong", value: 5_000_000_000 })).toBe("5000000000");
   });
   it("show time to live in its two largest units", () => {
     expect(formatTtl(null)).toBe("");

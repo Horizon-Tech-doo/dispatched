@@ -176,8 +176,14 @@ pub enum PropValue {
     Int(i32),
     /// 64-bit signed integer (AMQP long)
     Long(i64),
-    /// any unsigned integer
-    UInt(u64),
+    /// 8-bit unsigned integer (AMQP ubyte)
+    UByte(u8),
+    /// 16-bit unsigned integer (AMQP ushort)
+    UShort(u16),
+    /// 32-bit unsigned integer (AMQP uint)
+    UInt(u32),
+    /// 64-bit unsigned integer (AMQP ulong)
+    ULong(u64),
     /// float / double
     Double(f64),
     /// string or symbol
@@ -276,10 +282,10 @@ pub(crate) fn simple_to_prop(v: &SimpleValue) -> PropValue {
         SimpleValue::Short(n) => PropValue::Int(i32::from(*n)),
         SimpleValue::Int(n) => PropValue::Int(*n),
         SimpleValue::Long(n) => PropValue::Long(*n),
-        SimpleValue::Ubyte(n) => PropValue::UInt(u64::from(*n)),
-        SimpleValue::Ushort(n) => PropValue::UInt(u64::from(*n)),
-        SimpleValue::Uint(n) => PropValue::UInt(u64::from(*n)),
-        SimpleValue::Ulong(n) => PropValue::UInt(*n),
+        SimpleValue::Ubyte(n) => PropValue::UByte(*n),
+        SimpleValue::Ushort(n) => PropValue::UShort(*n),
+        SimpleValue::Uint(n) => PropValue::UInt(*n),
+        SimpleValue::Ulong(n) => PropValue::ULong(*n),
         SimpleValue::Float(f) => PropValue::Double(f64::from(f.into_inner())),
         SimpleValue::Double(f) => PropValue::Double(f.into_inner()),
         SimpleValue::String(s) => PropValue::String(s.clone()),

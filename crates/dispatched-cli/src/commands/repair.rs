@@ -146,6 +146,10 @@ pub struct MoveArgs {
     /// The queue or topic to move the messages to.
     #[arg(long, value_name = "TARGET")]
     pub to: String,
+    /// Send a copy even when it must lose custom properties whose type cannot be copied;
+    /// without it such a message fails and its original stays.
+    #[arg(long)]
+    pub drop_uncopyable_properties: bool,
     #[command(flatten)]
     pub mutate: MutateArgs,
 }
@@ -163,6 +167,10 @@ pub struct EditArgs {
     /// Keep DeadLetterReason and DeadLetterErrorDescription on copies from a dead-letter queue.
     #[arg(long)]
     pub keep_dead_letter_properties: bool,
+    /// With --remove-original: send a copy even when it must lose custom properties whose
+    /// type cannot be copied; without it such a message fails and its original stays.
+    #[arg(long, requires = "remove_original")]
+    pub drop_uncopyable_properties: bool,
     /// Replace the body with this text.
     #[arg(long, value_name = "TEXT", conflicts_with = "set_body_file")]
     pub set_body: Option<String>,
@@ -332,6 +340,10 @@ pub struct DlqMoveArgs {
     /// The queue or topic to move the messages to.
     #[arg(long, value_name = "TARGET")]
     pub to: String,
+    /// Send a copy even when it must lose custom properties whose type cannot be copied;
+    /// without it such a message fails and its original stays.
+    #[arg(long)]
+    pub drop_uncopyable_properties: bool,
     #[command(flatten)]
     pub mutate: MutateArgs,
 }
@@ -374,6 +386,7 @@ impl DlqMoveArgs {
         MoveArgs {
             select: self.select.select(),
             to: self.to.clone(),
+            drop_uncopyable_properties: self.drop_uncopyable_properties,
             mutate: self.mutate.clone(),
         }
     }
@@ -486,6 +499,7 @@ pub fn resubmit_spec_from(a: &ResubmitArgs) -> anyhow::Result<ResubmitSpec> {
         new_message_id: a.edits.new_message_id,
         remove_original: a.edits.remove_original,
         keep_dead_letter_properties: a.edits.keep_dead_letter_properties,
+        drop_uncopyable_properties: a.edits.drop_uncopyable_properties,
     })
 }
 
@@ -632,7 +646,13 @@ pub async fn move_messages(
     let entities = named(&spec.entity, Some(&target))?;
     let (operator, cancel) = operator_for(ctx, sel, &args.mutate, MOVE, &entities)?;
     let result = operator
-        .move_messages(spec, target, &StderrProgress::new(), &cancel)
+        .move_messages(
+            spec,
+            target,
+            args.drop_uncopyable_properties,
+            &StderrProgress::new(),
+            &cancel,
+        )
         .await;
     operator.explorer().close().await;
     Ok(finish_job(&result?, format, &args.mutate))
@@ -913,6 +933,67 @@ mod tests {
         assert!(spec.new_message_id && spec.remove_original);
         assert_eq!(spec.edits.set["retry"], TypedValue::Int(1));
         assert_eq!(spec.edits.subject, Some(Some("again".into())));
+    }
+
+    impl FromCommand for MoveArgs {
+        fn from_command(c: crate::Command) -> Option<Self> {
+            match c {
+                crate::Command::Move(a) => Some(a),
+                crate::Command::Dlq {
+                    cmd: DlqCmd::Move(a),
+                } => Some(a.normal()),
+                _ => None,
+            }
+        }
+    }
+
+    #[test]
+    fn dropping_uncopyable_properties_is_explicit() {
+        let m: MoveArgs = parse(["move", "q", "--seq", "1", "--to", "t"]);
+        assert!(!m.drop_uncopyable_properties, "off by default");
+        let m: MoveArgs = parse([
+            "move",
+            "q",
+            "--seq",
+            "1",
+            "--to",
+            "t",
+            "--drop-uncopyable-properties",
+        ]);
+        assert!(m.drop_uncopyable_properties);
+        let m: MoveArgs = parse([
+            "dlq",
+            "move",
+            "q",
+            "--seq",
+            "1",
+            "--to",
+            "t",
+            "--drop-uncopyable-properties",
+        ]);
+        assert!(m.drop_uncopyable_properties, "dlq move too");
+        let spec = resubmit_spec_from(&parse([
+            "dlq",
+            "resubmit",
+            "q",
+            "--seq",
+            "1",
+            "--remove-original",
+            "--drop-uncopyable-properties",
+        ]))
+        .unwrap();
+        assert!(spec.drop_uncopyable_properties);
+        assert!(
+            try_parse([
+                "resubmit",
+                "q",
+                "--seq",
+                "1",
+                "--drop-uncopyable-properties"
+            ])
+            .is_err(),
+            "copies that keep their originals are sent anyway: the flag needs --remove-original"
+        );
     }
 
     #[test]

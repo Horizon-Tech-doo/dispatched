@@ -28,6 +28,8 @@ pub struct ImportedMessage {
     pub message: OutgoingMessage,
     /// What changed while reading (re-encoded body, dropped properties).
     pub notes: Vec<String>,
+    /// Custom properties the message lacks because their type cannot be sent (`other`).
+    pub lost: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -82,6 +84,11 @@ fn non_empty(s: Option<String>) -> Option<String> {
     s.filter(|s| !s.is_empty())
 }
 
+/// A JSON integer that fits the unsigned type `T`.
+fn unsigned<T: TryFrom<u64>>(v: &serde_json::Value) -> Option<T> {
+    T::try_from(v.as_u64()?).ok()
+}
+
 fn prop_value(name: &str, p: &RawProp) -> Result<PropValue> {
     let bad = |what: &str| {
         Error::Invalid(format!(
@@ -102,7 +109,16 @@ fn prop_value(name: &str, p: &RawProp) -> Result<PropValue> {
             }
         }
         "long" | "int64" => PropValue::Long(p.value.as_i64().ok_or_else(|| bad("an integer"))?),
-        "uint" => PropValue::UInt(p.value.as_u64().ok_or_else(|| bad("an unsigned integer"))?),
+        "ubyte" => {
+            PropValue::UByte(unsigned(&p.value).ok_or_else(|| bad("an 8-bit unsigned integer"))?)
+        }
+        "ushort" => {
+            PropValue::UShort(unsigned(&p.value).ok_or_else(|| bad("a 16-bit unsigned integer"))?)
+        }
+        "uint" => {
+            PropValue::UInt(unsigned(&p.value).ok_or_else(|| bad("a 32-bit unsigned integer"))?)
+        }
+        "ulong" => PropValue::ULong(p.value.as_u64().ok_or_else(|| bad("an unsigned integer"))?),
         "double" if p.value.is_null() => {
             return Err(Error::Invalid(format!(
                 "property '{name}' (double) has no value; NaN and infinity cannot be imported"
@@ -115,8 +131,13 @@ fn prop_value(name: &str, p: &RawProp) -> Result<PropValue> {
         ),
         "timespan" => PropValue::TimeSpan(parse_span(text()?).map_err(|_| bad("a duration"))?),
         "uuid" => PropValue::Uuid(uuid::Uuid::parse_str(text()?).map_err(|_| bad("a GUID"))?),
-        "binary" => PropValue::Binary(Vec::new()),
-        "other" => PropValue::Other(String::new()),
+        "binary" => PropValue::Binary(
+            base64::engine::general_purpose::STANDARD
+                .decode(text()?)
+                .map_err(|_| bad("base64"))?,
+        ),
+        // Rendered text only: it cannot be sent again, and the copy reports it lost.
+        "other" => PropValue::Other(p.value.as_str().unwrap_or_default().to_string()),
         other => {
             return Err(Error::Invalid(format!(
                 "property '{name}' has unknown type '{other}'"
@@ -161,6 +182,7 @@ fn convert(raw: Raw) -> Result<ImportedMessage> {
         let value = prop_value(name, p)?;
         props.insert(name.clone(), value);
     }
+    let mut lost = Vec::new();
     let properties = copy_properties(
         &props,
         &CloneOptions {
@@ -168,6 +190,7 @@ fn convert(raw: Raw) -> Result<ImportedMessage> {
             ..Default::default()
         },
         &mut notes,
+        &mut lost,
     );
     let message = OutgoingMessage {
         body,
@@ -188,6 +211,7 @@ fn convert(raw: Raw) -> Result<ImportedMessage> {
         source_sequence: raw.sequence_number,
         message,
         notes,
+        lost,
     })
 }
 
@@ -331,6 +355,19 @@ mod tests {
             "wait".into(),
             PropValue::TimeSpan(time::Duration::minutes(90)),
         );
+        let blob: Vec<u8> = (0..=255).cycle().take(4096).collect();
+        m.application_properties
+            .insert("blob".into(), PropValue::Binary(blob.clone()));
+        m.application_properties
+            .insert("none".into(), PropValue::Null);
+        m.application_properties
+            .insert("b".into(), PropValue::UByte(255));
+        m.application_properties
+            .insert("s".into(), PropValue::UShort(65_535));
+        m.application_properties
+            .insert("u".into(), PropValue::UInt(u32::MAX));
+        m.application_properties
+            .insert("ul".into(), PropValue::ULong(u64::MAX));
         let dir = tempfile::tempdir().unwrap();
         for format in [ExportFormat::Json, ExportFormat::Ndjson] {
             let path = dir.path().join(format!("{format:?}"));
@@ -352,6 +389,18 @@ mod tests {
                 TypedValue::TimeSpan(time::Duration::minutes(90)),
                 "timespan survives export and import"
             );
+            let p = &read[0].message.properties;
+            assert_eq!(
+                p["blob"],
+                TypedValue::Binary(blob.clone()),
+                "binary in full"
+            );
+            assert_eq!(p["none"], TypedValue::Null);
+            assert_eq!(p["b"], TypedValue::UByte(255));
+            assert_eq!(p["s"], TypedValue::UShort(65_535));
+            assert_eq!(p["u"], TypedValue::UInt(u32::MAX));
+            assert_eq!(p["ul"], TypedValue::ULong(u64::MAX));
+            assert!(read[0].notes.is_empty(), "{:?}", read[0].notes);
         }
     }
 
@@ -405,8 +454,14 @@ mod tests {
                 .contains(&"body re-encoded from JSON".to_string())
         );
         assert_eq!(r[2].message.body, OutgoingBody::Empty);
-        assert_eq!(r[2].message.properties.len(), 1);
-        assert_eq!(r[2].notes.len(), 2, "{:?}", r[2].notes);
+        assert_eq!(r[2].message.properties.len(), 2, "binary and string");
+        assert_eq!(r[2].message.properties["b"], TypedValue::Binary(vec![0, 1]));
+        assert_eq!(
+            r[2].notes,
+            ["property o (unsupported type) was not copied"],
+            "only `other` is lost"
+        );
+        assert_eq!(r[2].lost, ["o"]);
     }
 
     #[test]

@@ -465,11 +465,14 @@ impl Operator {
     }
 
     /// Move the selected messages to the queue or topic `target`, unchanged and with their
-    /// MessageIds: each is sent first, then removed (at-least-once).
+    /// MessageIds: each is sent first, then removed (at-least-once). A message whose copy would
+    /// lose custom properties (a type that cannot be copied) fails and stays, unless
+    /// `drop_uncopyable_properties`.
     pub async fn move_messages(
         &self,
         source: SelectSpec,
         target: String,
+        drop_uncopyable_properties: bool,
         progress: &dyn Progress,
         cancel: &CancellationToken,
     ) -> Result<JobReport> {
@@ -480,6 +483,7 @@ impl Operator {
             new_message_id: false,
             remove_original: true,
             keep_dead_letter_properties: false,
+            drop_uncopyable_properties,
         };
         self.resubmit_as(spec, JobKind::Move, progress, cancel)
             .await
@@ -679,6 +683,7 @@ pub(crate) mod testkit {
             new_message_id: false,
             remove_original: false,
             keep_dead_letter_properties: false,
+            drop_uncopyable_properties: false,
         }
     }
 
@@ -950,6 +955,7 @@ mod tests {
         assert_send(&o.move_messages(
             select("q", PeekView::Active, &[1]),
             "t".into(),
+            false,
             &NoProgress,
             c,
         ));

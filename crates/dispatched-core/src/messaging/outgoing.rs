@@ -232,7 +232,8 @@ impl OutgoingMessage {
             }
             MessageBody::Empty => OutgoingBody::Empty,
         };
-        let properties = copy_properties(&m.application_properties, opts, &mut notes);
+        let mut lost = Vec::new();
+        let properties = copy_properties(&m.application_properties, opts, &mut notes, &mut lost);
         let message_id = if opts.new_message_id {
             Some(uuid::Uuid::new_v4().to_string())
         } else {
@@ -255,6 +256,7 @@ impl OutgoingMessage {
                 properties,
             },
             notes,
+            lost,
         }
     }
 }
@@ -279,11 +281,14 @@ impl CloneOptions {
     }
 }
 
-/// The one property conversion for clone, import and templates.
+/// The one property conversion for clone, import and templates. Every value is copied as it is
+/// except `other` ones, which cannot be re-encoded: their names go into `lost` and a note says
+/// so.
 pub(crate) fn copy_properties(
     props: &BTreeMap<String, PropValue>,
     opts: &CloneOptions,
     notes: &mut Vec<String>,
+    lost: &mut Vec<String>,
 ) -> BTreeMap<String, TypedValue> {
     let mut out = BTreeMap::new();
     for (name, value) in props {
@@ -295,12 +300,8 @@ pub(crate) fn copy_properties(
                 out.insert(name.clone(), t);
             }
             None => {
-                let kind = match value {
-                    PropValue::Binary(_) => "binary",
-                    PropValue::Null => "null",
-                    _ => "unsupported type",
-                };
-                notes.push(format!("property {name} ({kind}) was not copied"));
+                notes.push(format!("property {name} (unsupported type) was not copied"));
+                lost.push(name.clone());
             }
         }
     }
@@ -314,6 +315,8 @@ pub struct Cloned {
     pub message: OutgoingMessage,
     /// Human-readable notes about differences from the source.
     pub notes: Vec<String>,
+    /// Custom properties the copy lacks because their type cannot be copied (`other`).
+    pub lost: Vec<String>,
 }
 
 /// Edits applied to an outgoing message; `Some(None)` clears a field.
@@ -699,10 +702,24 @@ mod tests {
             c.message.properties["kind"],
             TypedValue::String("order".into())
         );
+        assert_eq!(
+            c.message.properties["blob"],
+            TypedValue::Binary(vec![1]),
+            "binary is copied as it is"
+        );
+        assert!(c.notes.is_empty() && c.lost.is_empty(), "{:?}", c.notes);
+        let mut odd = src.clone();
+        odd.application_properties
+            .insert("weird".into(), PropValue::Other("described".into()));
+        let c = OutgoingMessage::from_peeked(&odd, &CloneOptions::default());
+        assert_eq!(c.lost, ["weird"]);
+        assert!(!c.message.properties.contains_key("weird"));
         assert!(
             c.notes
                 .iter()
-                .any(|n| n == "property blob (binary) was not copied")
+                .any(|n| n == "property weird (unsupported type) was not copied"),
+            "{:?}",
+            c.notes
         );
         let fresh = OutgoingMessage::from_peeked(
             &src,

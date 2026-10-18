@@ -2,7 +2,9 @@
 
 use super::failed;
 use crate::ImportedMessage;
-use crate::jobs::{ItemOutcome, ItemResult, JobKind, JobReport, JobRun, NotReached, Progress};
+use crate::jobs::{
+    ItemOutcome, ItemResult, JobKind, JobReport, JobRun, LostProperties, NotReached, Progress,
+};
 use crate::messaging::CloneOptions;
 use crate::messaging::backend::MessagingBackend;
 use crate::messaging::outgoing::OutgoingMessage;
@@ -97,6 +99,7 @@ pub(crate) async fn run<B: MessagingBackend + ?Sized>(
         Some(messages.len() as u64),
     );
     let mut sender: Option<Box<dyn crate::messaging::backend::MessageSender>> = None;
+    let mut lost = LostProperties::default();
     let mut attempted = false;
     let mut cancelled = false;
     for (n, slice) in messages.chunks(IMPORT_SLICE).enumerate() {
@@ -167,11 +170,18 @@ pub(crate) async fn run<B: MessagingBackend + ?Sized>(
             }
         }
         for ((m, sent), o) in slice.iter().zip(&prepared).zip(outcomes) {
-            run.item(item(&entity, m, sent, o.expect("filled")));
+            let o = o.expect("filled");
+            if matches!(o, ItemOutcome::Succeeded { .. }) {
+                lost.add(&m.lost);
+            }
+            run.item(item(&entity, m, sent, o));
         }
     }
     if let Some(s) = sender {
         s.close().await;
+    }
+    if let Some(note) = lost.note() {
+        run.note(note);
     }
     Ok(run.finish(cancelled))
 }
@@ -189,6 +199,7 @@ mod tests {
             source_sequence: Some(seq),
             message: OutgoingMessage::text(body),
             notes: vec![],
+            lost: vec![],
         }
     }
 

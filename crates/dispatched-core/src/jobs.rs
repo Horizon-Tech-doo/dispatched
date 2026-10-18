@@ -422,6 +422,50 @@ impl Progress for RecordingProgress {
 
 /// Builds a [`JobReport`] while emitting progress events.
 #[allow(dead_code)] // used by the ops that follow in this milestone
+/// Copies a job sent without some custom properties (their type cannot be copied), for the
+/// per-job note "k copies lost properties: …".
+#[derive(Debug, Default)]
+pub(crate) struct LostProperties {
+    copies: u64,
+    names: std::collections::BTreeSet<String>,
+}
+
+impl LostProperties {
+    /// The most property names the note lists.
+    const SHOWN: usize = 10;
+
+    /// A copy was sent without `names` (nothing when it lost none).
+    pub(crate) fn add(&mut self, names: &[String]) {
+        if names.is_empty() {
+            return;
+        }
+        self.copies += 1;
+        self.names.extend(names.iter().cloned());
+    }
+
+    /// The note, when any copy lost properties.
+    pub(crate) fn note(&self) -> Option<String> {
+        if self.copies == 0 {
+            return None;
+        }
+        let mut list: Vec<&str> = self
+            .names
+            .iter()
+            .take(Self::SHOWN)
+            .map(String::as_str)
+            .collect();
+        let more = self.names.len().saturating_sub(Self::SHOWN);
+        let more = (more > 0).then(|| format!("and {more} more"));
+        list.extend(more.as_deref());
+        let copies = if self.copies == 1 {
+            "1 copy".to_string()
+        } else {
+            format!("{} copies", crate::safety::count_text(self.copies))
+        };
+        Some(format!("{copies} lost properties: {}", list.join(", ")))
+    }
+}
+
 pub(crate) struct JobRun<'a> {
     kind: JobKind,
     entity: String,

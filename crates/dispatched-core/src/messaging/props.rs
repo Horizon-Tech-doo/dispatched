@@ -87,6 +87,18 @@ pub enum TypedValue {
     TimeSpan(time::Duration),
     /// A GUID.
     Guid(uuid::Uuid),
+    /// AMQP null (a copy keeps it; there is no syntax to type one).
+    Null,
+    /// Bytes (AMQP binary).
+    Binary(Vec<u8>),
+    /// 8-bit unsigned integer (AMQP ubyte).
+    UByte(u8),
+    /// 16-bit unsigned integer (AMQP ushort).
+    UShort(u16),
+    /// 32-bit unsigned integer (AMQP uint).
+    UInt(u32),
+    /// 64-bit unsigned integer (AMQP ulong).
+    ULong(u64),
 }
 
 impl TypedValue {
@@ -144,11 +156,18 @@ impl TypedValue {
                 value: Value::Long(ticks_from_duration(*d)),
             })),
             TypedValue::Guid(u) => SimpleValue::Uuid((*u).into()),
+            TypedValue::Null => SimpleValue::Null,
+            TypedValue::Binary(b) => SimpleValue::Binary(b.clone().into()),
+            TypedValue::UByte(n) => SimpleValue::Ubyte(*n),
+            TypedValue::UShort(n) => SimpleValue::Ushort(*n),
+            TypedValue::UInt(n) => SimpleValue::Uint(*n),
+            TypedValue::ULong(n) => SimpleValue::Ulong(*n),
         }
     }
 
-    /// The one conversion used by cloning, import and templates; `None` for values that cannot be
-    /// copied (binary, other, null), which the caller reports.
+    /// The one conversion used by cloning, import and templates: every value is copied as it
+    /// is, width included, except `Other` (a described value or type Dispatched does not
+    /// decode), which cannot be re-encoded and is `None`; the caller reports it.
     pub fn from_prop(p: &PropValue) -> Option<Self> {
         Some(match p {
             PropValue::String(s) => TypedValue::String(s.clone()),
@@ -156,11 +175,16 @@ impl TypedValue {
             PropValue::Double(d) => TypedValue::Double(*d),
             PropValue::Int(n) => TypedValue::Int(*n),
             PropValue::Long(n) => TypedValue::Long(*n),
-            PropValue::UInt(n) => TypedValue::Long(i64::try_from(*n).ok()?),
+            PropValue::UByte(n) => TypedValue::UByte(*n),
+            PropValue::UShort(n) => TypedValue::UShort(*n),
+            PropValue::UInt(n) => TypedValue::UInt(*n),
+            PropValue::ULong(n) => TypedValue::ULong(*n),
             PropValue::Timestamp(t) => TypedValue::DateTime(*t),
             PropValue::TimeSpan(d) => TypedValue::TimeSpan(*d),
             PropValue::Uuid(u) => TypedValue::Guid(*u),
-            PropValue::Binary(_) | PropValue::Other(_) | PropValue::Null => return None,
+            PropValue::Null => TypedValue::Null,
+            PropValue::Binary(b) => TypedValue::Binary(b.clone()),
+            PropValue::Other(_) => return None,
         })
     }
 }
@@ -487,8 +511,13 @@ mod tests {
                 PropValue::Long(3_000_000_000),
                 Some(TypedValue::Long(3_000_000_000)),
             ),
-            (PropValue::UInt(5), Some(TypedValue::Long(5))),
-            (PropValue::UInt(u64::MAX), None),
+            (PropValue::UByte(5), Some(TypedValue::UByte(5))),
+            (PropValue::UShort(500), Some(TypedValue::UShort(500))),
+            (PropValue::UInt(u32::MAX), Some(TypedValue::UInt(u32::MAX))),
+            (
+                PropValue::ULong(u64::MAX),
+                Some(TypedValue::ULong(u64::MAX)),
+            ),
             (PropValue::Timestamp(at), Some(TypedValue::DateTime(at))),
             (
                 PropValue::TimeSpan(time::Duration::minutes(5)),
@@ -498,10 +527,35 @@ mod tests {
                 PropValue::Uuid(uuid::Uuid::nil()),
                 Some(TypedValue::Guid(uuid::Uuid::nil())),
             ),
-            (PropValue::Binary(vec![1]), None),
-            (PropValue::Null, None),
+            (
+                PropValue::Binary(vec![1, 2]),
+                Some(TypedValue::Binary(vec![1, 2])),
+            ),
+            (PropValue::Null, Some(TypedValue::Null)),
+            (PropValue::Other("described".into()), None),
         ] {
             assert_eq!(TypedValue::from_prop(&p), t, "{p:?}");
+        }
+    }
+
+    #[test]
+    fn copies_keep_null_binary_and_unsigned_widths() {
+        // What a copy sends decodes back to what the original held, width included: a .NET
+        // consumer casting `(uint)` or `(byte)` must not get a long.
+        for p in [
+            PropValue::Null,
+            PropValue::Binary(vec![0, 255, 7]),
+            PropValue::UByte(u8::MAX),
+            PropValue::UShort(u16::MAX),
+            PropValue::UInt(u32::MAX),
+            PropValue::ULong(u64::MAX),
+        ] {
+            let t = TypedValue::from_prop(&p).expect("copyable");
+            assert_eq!(
+                crate::messaging::message::simple_to_prop(&t.to_simple()),
+                p,
+                "{p:?}"
+            );
         }
     }
 

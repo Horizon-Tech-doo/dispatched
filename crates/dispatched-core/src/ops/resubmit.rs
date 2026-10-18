@@ -5,7 +5,9 @@ use super::locate::{Found, OnFound, locate};
 use super::send::distinct;
 use super::{Resolved, SelectSpec, failed, record, seq_item};
 use crate::diagnostics::error_kind;
-use crate::jobs::{ItemOutcome, ItemResult, JobKind, JobReport, JobRun, NotReached, Progress};
+use crate::jobs::{
+    ItemOutcome, ItemResult, JobKind, JobReport, JobRun, LostProperties, NotReached, Progress,
+};
 use crate::messaging::backend::{LockReceiver, MessageSender, MessagingBackend};
 use crate::messaging::sender::{copy_error, send_target};
 use crate::messaging::{
@@ -35,6 +37,9 @@ pub struct ResubmitSpec {
     /// Keep `DeadLetterReason` and `DeadLetterErrorDescription` on copies from a dead-letter
     /// queue.
     pub keep_dead_letter_properties: bool,
+    /// When originals are removed, send a copy even if it must lose custom properties whose
+    /// type cannot be copied (`other`). Without it such an item fails and its original stays.
+    pub drop_uncopyable_properties: bool,
 }
 
 impl ResubmitSpec {
@@ -104,16 +109,37 @@ pub(crate) fn operation(
     Ok(if searched { op.searched() } else { op })
 }
 
-/// The copy of `m` to send, edited, and the notes from cloning it.
+/// The copy of `m` to send, edited, the notes from cloning it, and the custom properties it
+/// lost (those whose type cannot be copied, unless the edits removed or replaced them). With
+/// `keep_lossless`, a copy that would lose any is refused, so the original is kept.
 fn prepare(
     m: &PeekedMessage,
     edits: &Edits,
     clone: &CloneOptions,
-) -> Result<(OutgoingMessage, Vec<String>)> {
-    let Cloned { mut message, notes } = OutgoingMessage::from_peeked(m, clone);
+    keep_lossless: bool,
+) -> Result<(OutgoingMessage, Vec<String>, Vec<String>)> {
+    let Cloned {
+        mut message,
+        notes,
+        mut lost,
+    } = OutgoingMessage::from_peeked(m, clone);
     edits.apply(&mut message);
+    lost.retain(|name| !edits.remove.contains(name) && !edits.set.contains_key(name));
+    if keep_lossless && !lost.is_empty() {
+        return Err(Error::Invalid(format!(
+            "the copy would lose {} {} (a type that cannot be copied), so the original was kept; \
+             pass --drop-uncopyable-properties to send the copy without {}",
+            if lost.len() == 1 {
+                "property"
+            } else {
+                "properties"
+            },
+            lost.join(", "),
+            if lost.len() == 1 { "it" } else { "them" },
+        )));
+    }
     message.validate()?;
-    Ok((message, notes))
+    Ok((message, notes, lost))
 }
 
 /// The detail of a sent copy: what cloning changed, if anything.
@@ -167,6 +193,7 @@ pub(crate) async fn run_as(
         progress,
         Some(seqs.len() as u64),
     );
+    let mut lost = LostProperties::default();
     let cancelled = if spec.remove_original {
         let sender = plane.open_sender(&to).await?;
         let mut on = ResubmitOnFound {
@@ -176,6 +203,8 @@ pub(crate) async fn run_as(
             edits: spec.edits.clone(),
             clone: spec.clone_options(),
             kind,
+            keep_lossless: !spec.drop_uncopyable_properties,
+            lost: LostProperties::default(),
         };
         let located = locate(
             plane,
@@ -189,10 +218,18 @@ pub(crate) async fn run_as(
         .await;
         // On every path, the error one included.
         on.close().await;
-        record(&mut job, located?)
+        let cancelled = record(&mut job, located?);
+        lost = on.lost;
+        cancelled
     } else {
-        clone_and_resend(plane, spec, &to, &address, &seqs, kind, &mut job, cancel).await?
+        clone_and_resend(
+            plane, spec, &to, &address, &seqs, kind, &mut job, &mut lost, cancel,
+        )
+        .await?
     };
+    if let Some(note) = lost.note() {
+        job.note(note);
+    }
     Ok(job.finish(cancelled))
 }
 
@@ -206,6 +243,10 @@ struct ResubmitOnFound {
     edits: Edits,
     clone: CloneOptions,
     kind: JobKind,
+    /// Refuse copies that would lose properties (`!drop_uncopyable_properties`).
+    keep_lossless: bool,
+    /// Copies sent without some properties.
+    lost: LostProperties,
 }
 
 /// A copy that was not sent, as far as the sender knows.
@@ -242,13 +283,13 @@ fn deferred_kept(from_dead_letter: bool, abandoned: bool) -> &'static str {
 }
 
 impl ResubmitOnFound {
-    /// Clone, edit and send the copy of `m`; the cloning notes on success.
+    /// Clone, edit and send the copy of `m`; the cloning notes and lost properties on success.
     async fn send(
         &mut self,
         plane: &mut dyn MessagingBackend,
         m: &PeekedMessage,
-    ) -> std::result::Result<Vec<String>, SendFailure> {
-        let (copy, notes) = prepare(m, &self.edits, &self.clone)?;
+    ) -> std::result::Result<(Vec<String>, Vec<String>), SendFailure> {
+        let (copy, notes, lost) = prepare(m, &self.edits, &self.clone, self.keep_lossless)?;
         let sender = match &mut self.sender {
             Some(s) => s,
             empty => empty.insert(plane.open_sender(&self.target).await?),
@@ -263,7 +304,7 @@ impl ResubmitOnFound {
             broken.close().await;
         }
         match (one, call) {
-            (Some(r), _) => Ok(r.map(|()| notes)?),
+            (Some(r), _) => Ok(r.map(|()| (notes, lost))?),
             (None, Err(error)) => Err(SendFailure {
                 error,
                 maybe_sent: true,
@@ -300,17 +341,24 @@ impl OnFound for ResubmitOnFound {
             return seq_item(&self.address, m, failed(&e));
         };
         let outcome = match self.send(plane, m).await {
-            Ok(notes) => match rx.settle(token, &Settlement::Complete).await {
-                Ok(()) => ItemOutcome::Succeeded {
-                    detail: detail(&notes),
-                },
-                Err(e) => ItemOutcome::Failed {
-                    kind: error_kind(&e),
-                    reason: format!(
-                        "sent to {}, but the original could not be removed ({e}); it may be delivered twice",
-                        self.target
-                    ),
-                },
+            Ok((notes, lost)) => match rx.settle(token, &Settlement::Complete).await {
+                Ok(()) => {
+                    self.lost.add(&lost);
+                    ItemOutcome::Succeeded {
+                        detail: detail(&notes),
+                    }
+                }
+                Err(e) => {
+                    // The copy was sent: what it lost is lost either way.
+                    self.lost.add(&lost);
+                    ItemOutcome::Failed {
+                        kind: error_kind(&e),
+                        reason: format!(
+                            "sent to {}, but the original could not be removed ({e}); it may be delivered twice",
+                            self.target
+                        ),
+                    }
+                }
             },
             Err(f) if m.state == MessageState::Deferred => {
                 // Received by sequence number, so not held: it cannot be released. Abandoning
@@ -352,6 +400,7 @@ async fn clone_and_resend(
     seqs: &[i64],
     kind: JobKind,
     job: &mut JobRun<'_>,
+    lost: &mut LostProperties,
     cancel: &CancellationToken,
 ) -> Result<bool> {
     let not_reached = |seq: i64, m: Option<&PeekedMessage>, why: NotReached| {
@@ -392,15 +441,16 @@ async fn clone_and_resend(
         out.insert(*s, bare_item(address, *s, outcome));
     }
     let clone = spec.clone_options();
-    let mut ready: Vec<(OutgoingMessage, Vec<String>, &PeekedMessage)> = Vec::new();
+    // The originals stay, so a copy that loses properties is sent (and noted).
+    let mut ready: Vec<(OutgoingMessage, Vec<String>, Vec<String>, &PeekedMessage)> = Vec::new();
     for m in &found.messages {
         let seq = m.sequence_number;
         if m.state == MessageState::Scheduled {
             out.insert(seq, seq_item(address, m, scheduled_skip(kind)));
             continue;
         }
-        match prepare(m, &spec.edits, &clone) {
-            Ok((copy, notes)) => ready.push((copy, notes, m)),
+        match prepare(m, &spec.edits, &clone, false) {
+            Ok((copy, notes, gone)) => ready.push((copy, notes, gone, m)),
             Err(e) => {
                 out.insert(seq, seq_item(address, m, failed(&e)));
             }
@@ -412,7 +462,7 @@ async fn clone_and_resend(
     for slice in ready.chunks(RESEND_SLICE) {
         if cancelled || cancel.is_cancelled() {
             cancelled = true;
-            for (_, _, m) in slice {
+            for (_, _, _, m) in slice {
                 let r = not_reached(m.sequence_number, Some(m), NotReached::Cancelled);
                 out.insert(m.sequence_number, r);
             }
@@ -420,7 +470,7 @@ async fn clone_and_resend(
         }
         if let Some(e) = &broken {
             // The link broke and could not be opened again: the rest fail with it.
-            for (_, _, m) in slice {
+            for (_, _, _, m) in slice {
                 out.insert(m.sequence_number, seq_item(address, m, failed(e)));
             }
             continue;
@@ -430,7 +480,7 @@ async fn clone_and_resend(
             empty => match plane.open_sender(to).await {
                 Ok(s) => empty.insert(s),
                 Err(e) => {
-                    for (_, _, m) in slice {
+                    for (_, _, _, m) in slice {
                         out.insert(m.sequence_number, seq_item(address, m, failed(&e)));
                     }
                     broken = Some(e);
@@ -443,11 +493,14 @@ async fn clone_and_resend(
         let call = link
             .send_all(&batch, &mut |i, r| results[i] = Some(r))
             .await;
-        for ((_, notes, m), r) in slice.iter().zip(results) {
+        for ((_, notes, gone, m), r) in slice.iter().zip(results) {
             let outcome = match r {
-                Some(Ok(())) => ItemOutcome::Succeeded {
-                    detail: detail(notes),
-                },
+                Some(Ok(())) => {
+                    lost.add(gone);
+                    ItemOutcome::Succeeded {
+                        detail: detail(notes),
+                    }
+                }
                 Some(Err(e)) => failed(&e),
                 None => {
                     let e = call.as_ref().err().map_or_else(
@@ -910,10 +963,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_move_copies_null_binary_and_unsigned_properties_as_they_are() {
+        let b = FakeBroker::default();
+        let dl = "q/$DeadLetterQueue";
+        let s = b.add(
+            dl,
+            FakeMsg::active("x")
+                .prop("nothing", PropValue::Null)
+                .prop("blob", PropValue::Binary(vec![1, 2, 3]))
+                .prop("tiny", PropValue::UByte(7))
+                .prop("count", PropValue::UInt(u32::MAX)),
+        );
+        let r = run(
+            &mut b.clone(),
+            &move_spec(dl, &[s], "t"),
+            &[s],
+            &NoProgress,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.succeeded(), 1, "{:?}", r.items);
+        assert!(r.notes.is_empty(), "{:?}", r.notes);
+        let copy = &b.all("t")[0].application_properties;
+        assert_eq!(copy["nothing"], PropValue::Null);
+        assert_eq!(copy["blob"], PropValue::Binary(vec![1, 2, 3]));
+        assert_eq!(copy["tiny"], PropValue::UByte(7));
+        assert_eq!(copy["count"], PropValue::UInt(u32::MAX));
+    }
+
+    #[tokio::test]
+    async fn a_move_that_would_lose_a_property_fails_and_keeps_the_original() {
+        let b = FakeBroker::default();
+        let dl = "q/$DeadLetterQueue";
+        let odd = || FakeMsg::active("x").prop("weird", PropValue::Other("described".into()));
+        let s = b.add(dl, odd());
+        let r = run(
+            &mut b.clone(),
+            &move_spec(dl, &[s], "t"),
+            &[s],
+            &NoProgress,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.failed(), 1, "{:?}", r.items);
+        assert!(
+            matches!(&r.items[0].outcome, ItemOutcome::Failed { reason, .. }
+                if reason.contains("weird") && reason.contains("--drop-uncopyable-properties")),
+            "{:?}",
+            r.items[0].outcome
+        );
+        assert!(b.all("t").is_empty(), "no copy was sent");
+        assert_eq!(b.all(dl).len(), 1, "the original stays");
+        assert_eq!(b.held_locks(), 0);
+        // With the flag the copy goes without it, and the job says so.
+        let mut spec = move_spec(dl, &[s], "t");
+        spec.drop_uncopyable_properties = true;
+        let r = run(
+            &mut b.clone(),
+            &spec,
+            &[s],
+            &NoProgress,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.succeeded(), 1, "{:?}", r.items);
+        assert!(b.all(dl).is_empty());
+        assert_eq!(r.notes, ["1 copy lost properties: weird"]);
+        // A resubmit that keeps the originals sends the copy and notes the loss.
+        let k = b.add(dl, odd());
+        let r = run(
+            &mut b.clone(),
+            &resubmit_spec(dl, &[k], "t"),
+            &[k],
+            &NoProgress,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.succeeded(), 1);
+        assert_eq!(r.notes, ["1 copy lost properties: weird"]);
+    }
+
+    #[tokio::test]
     async fn clone_and_resend_reports_missing_and_cloning_notes() {
         let b = FakeBroker::default();
         let dl = "q/$DeadLetterQueue";
-        let s = b.add(dl, FakeMsg::active("x").prop("nothing", PropValue::Null));
+        let s = b.add(
+            dl,
+            FakeMsg::active("x").prop("weird", PropValue::Other("described".into())),
+        );
         let r = run(
             &mut b.clone(),
             &resubmit_spec(dl, &[s, 999], "t"),
@@ -927,7 +1068,7 @@ mod tests {
         assert_eq!(
             r.items[0].outcome,
             ItemOutcome::Succeeded {
-                detail: Some("property nothing (null) was not copied".into())
+                detail: Some("property weird (unsupported type) was not copied".into())
             }
         );
         assert_eq!(r.items[1].outcome, ItemOutcome::Missing);

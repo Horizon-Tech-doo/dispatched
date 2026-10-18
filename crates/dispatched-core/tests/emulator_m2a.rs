@@ -660,6 +660,7 @@ async fn m2a_operate() {
                 dl.iter().map(|m| m.sequence_number).collect(),
             ),
             TARGET.into(),
+            false,
             &np,
             &cancel,
         )
@@ -724,6 +725,7 @@ async fn m2a_operate() {
                 new_message_id: true,
                 remove_original: false,
                 keep_dead_letter_properties: false,
+                drop_uncopyable_properties: false,
             },
             &np,
             &cancel,
