@@ -27,8 +27,6 @@ use fe2o3_amqp::types::definitions::{
 use fe2o3_amqp::types::messaging::{Body, FilterSet, Modified, Source};
 use fe2o3_amqp::types::primitives::{OrderedMap, Symbol, Value};
 use fe2o3_amqp::{Delivery, Receiver};
-use serde_amqp::described::Described;
-use serde_amqp::descriptor::Descriptor;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Display;
 use std::future::Future;
@@ -203,14 +201,14 @@ impl CreditPlan {
     }
 }
 
-/// Descriptor of the `com.microsoft:session-filter` value.
-const SESSION_FILTER_CODE: u64 = 0x0000_0137_0000_000C;
 const SESSION_FILTER: &str = "com.microsoft:session-filter";
 /// Attach property: how long the broker waits for a next-available session.
 const TIMEOUT_PROPERTY: &str = "com.microsoft:timeout";
 
-/// The source filter for a session choice: the described session id, or a
-/// described null for the next available session; `None` without sessions.
+/// The source filter for a session choice: the session id, or null for the next available
+/// session; `None` without sessions. Plain values, as the Azure SDKs send them: the broker's
+/// gateway reads a described filter value as a selector and refuses the attach ("System only
+/// support Jms or Apache selector filter type").
 fn session_filter(choice: &SessionChoice) -> Option<FilterSet> {
     let value = match choice {
         SessionChoice::None => return None,
@@ -218,13 +216,7 @@ fn session_filter(choice: &SessionChoice) -> Option<FilterSet> {
         SessionChoice::NextAvailable => Value::Null,
     };
     let mut filter = FilterSet::new();
-    filter.insert(
-        Symbol::from(SESSION_FILTER),
-        Value::Described(Box::new(Described {
-            descriptor: Descriptor::Code(SESSION_FILTER_CODE),
-            value,
-        })),
-    );
+    filter.insert(Symbol::from(SESSION_FILTER), value);
     Some(filter)
 }
 
@@ -997,14 +989,20 @@ mod tests {
     }
 
     #[test]
-    fn session_filter_is_the_described_session_id_or_null() {
+    fn session_filter_is_the_plain_session_id_or_null() {
+        // Plain values, as the Azure SDKs send them: the broker's gateway reads a described
+        // filter value as a selector and refuses the attach (seen on the emulator, Task 22).
         let f = session_filter(&SessionChoice::Id("RMA-1".into())).unwrap();
         let v = f
             .get(&Symbol::from("com.microsoft:session-filter"))
             .unwrap();
-        assert!(matches!(v, Value::Described(d) if d.value == Value::String("RMA-1".into())));
-        assert!(
-            matches!(session_filter(&SessionChoice::NextAvailable).unwrap().values().next(), Some(Value::Described(d)) if d.value == Value::Null)
+        assert_eq!(v, &Value::String("RMA-1".into()));
+        assert_eq!(
+            session_filter(&SessionChoice::NextAvailable)
+                .unwrap()
+                .values()
+                .next(),
+            Some(&Value::Null)
         );
         assert!(session_filter(&SessionChoice::None).is_none());
     }
