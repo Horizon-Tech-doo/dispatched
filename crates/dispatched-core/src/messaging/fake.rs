@@ -733,9 +733,7 @@ impl MessagingBackend for FakeBroker {
         let session = match &spec.session {
             SessionChoice::None => {
                 if self.with(|s| s.sessions_required.contains(&address)) {
-                    return Err(Error::Invalid(format!(
-                        "{address} requires sessions; open a session receiver"
-                    )));
+                    return Err(super::management::session_required_error(&address));
                 }
                 None
             }

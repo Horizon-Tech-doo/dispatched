@@ -247,6 +247,26 @@ where
     .await
 }
 
+/// [`gated`], also returning the activity op id when the gate wrote an entry under it (a
+/// denial included).
+pub(crate) async fn gated_logged<T, F, Fut>(
+    gate: &Gate,
+    op: &Operation,
+    work: F,
+) -> (Option<String>, Result<T>)
+where
+    T: Audited,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    gate.run_logged(op, |op_id| async move {
+        let mut t = work().await?;
+        t.set_op_id(op_id);
+        Ok(t)
+    })
+    .await
+}
+
 /// The safety verb of a settlement.
 pub(crate) fn settle_verb(how: &Settlement) -> SettleVerb {
     match how {

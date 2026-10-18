@@ -69,13 +69,45 @@ pub(crate) fn map_sender_attach_error(node: &str, address: &str, e: SenderAttach
     }
 }
 
-/// Map a failed receiver attach to `{address}`'s node (see [`map_remote_error`]).
+/// The tail of [`session_required_error`]'s message.
+const SESSION_REQUIRED: &str = "requires sessions; open a session receiver";
+
+/// The error for a receiver without a session on a session-enabled entity. Not a transport
+/// failure (`Invalid`), so it is neither retried nor drops the connection.
+pub(crate) fn session_required_error(address: &str) -> Error {
+    Error::Invalid(format!("{address} {SESSION_REQUIRED}"))
+}
+
+/// Whether `e` refuses a receiver because the entity needs sessions: the mapped error of
+/// [`session_required_error`], or, as a fallback, any error whose text says "requires sessions".
+pub(crate) fn is_session_required(e: &Error) -> bool {
+    match e {
+        Error::Invalid(m) if m.ends_with(SESSION_REQUIRED) => true,
+        e => e
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("requires sessions"),
+    }
+}
+
+/// Map a failed receiver attach to `{address}`'s node (see [`map_remote_error`]). The broker
+/// refuses a receiver without a session on a session-enabled entity with `amqp:not-allowed`
+/// and a description about sessions: that is [`session_required_error`].
 pub(crate) fn map_receiver_attach_error(
     node: &str,
     address: &str,
     e: ReceiverAttachError,
 ) -> Error {
     match &e {
+        ReceiverAttachError::RemoteClosedWithError(err)
+            if err.condition == ErrorCondition::AmqpError(AmqpError::NotAllowed)
+                && err
+                    .description
+                    .as_deref()
+                    .is_some_and(|d| d.to_ascii_lowercase().contains("session")) =>
+        {
+            session_required_error(address)
+        }
         ReceiverAttachError::RemoteClosedWithError(err) => {
             map_remote_error(&format!("attach receiver to {node}"), address, err)
         }
@@ -481,6 +513,38 @@ mod tests {
             next_available_outcome::<()>(Err(Error::Network("down".into()))),
             Err(Error::Network(_))
         ));
+    }
+
+    #[test]
+    fn a_receiver_without_a_session_on_a_session_entity_is_session_required() {
+        let refused = ReceiverAttachError::RemoteClosedWithError(remote(
+            AmqpError::NotAllowed,
+            Some(
+                "It is not possible for an entity that requires sessions to create a non-sessionful message receiver.",
+            ),
+        ));
+        let e = map_receiver_attach_error("s", "s", refused);
+        assert!(
+            matches!(&e, Error::Invalid(m) if m == "s requires sessions; open a session receiver"),
+            "{e:?}"
+        );
+        assert!(is_session_required(&e));
+        assert!(
+            !crate::explorer::retry_after(&e, 0),
+            "not retried, keeps the connection"
+        );
+        // Another not-allowed refusal stays what it was.
+        let other =
+            ReceiverAttachError::RemoteClosedWithError(remote(AmqpError::NotAllowed, Some("no")));
+        assert!(matches!(
+            map_receiver_attach_error("s", "s", other),
+            Error::Protocol(_)
+        ));
+        // The text fallback.
+        assert!(is_session_required(&Error::Protocol(
+            "attach: entity requires sessions".into()
+        )));
+        assert!(!is_session_required(&Error::Network("reset".into())));
     }
 
     #[test]

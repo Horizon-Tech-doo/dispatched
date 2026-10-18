@@ -8,12 +8,13 @@
 //! allowance. Scheduled messages are never purged.
 
 use super::receive::{self, ReceiveAction, ReceiveRequest};
-use super::{failed, gated};
+use super::{failed, gated_logged};
 use crate::jobs::{ItemOutcome, ItemResult, JobEvent, JobKind, JobReport, JobRun, Progress};
 use crate::messaging::backend::{LockReceiver, MessagingBackend};
 use crate::messaging::scan::walk_messages;
 use crate::messaging::{
     MessageState, ReceiveMode, ReceiverSpec, SessionChoice, Settlement, count_messages,
+    is_session_required,
 };
 use crate::mgmt::EntityCounts;
 use crate::namespace::{EntityPath, SubQueue};
@@ -21,7 +22,7 @@ use crate::safety::{CountEstimate, Gate, Operation, Target, count_text};
 use crate::{Error, NoProgress, Result};
 use horizon_azure_kit::safety::CancellationToken;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::time::Duration;
 use time::OffsetDateTime;
 
@@ -31,9 +32,6 @@ pub const PURGE_COUNT_CAP: u32 = 10_000;
 /// A purge link stops when this passes without a delivery (an idle timeout), and a
 /// next-available session accept waits this long for a session.
 const PURGE_IDLE: Duration = Duration::from_secs(2);
-
-/// How many messages the check for messages left behind examines.
-const REMAIN_CAP: u32 = 1_000;
 
 /// Which messages a purge removes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -94,6 +92,19 @@ impl PurgePlan {
     /// The operation the gate confirms for this plan.
     pub fn operation(&self) -> Operation {
         Operation::purge(self.target(), self.total)
+    }
+
+    /// The most messages the plan removes; refused when the total or a line is not bounded
+    /// (an unknown count cannot be confirmed as a limit).
+    pub(crate) fn bound(&self) -> Result<u64> {
+        let total = self.total.bound();
+        match total {
+            Some(n) if self.per_queue.iter().all(|(_, c)| c.bound().is_some()) => Ok(n),
+            _ => Err(Error::Invalid(format!(
+                "the number of messages to purge in {} is not known; count them first",
+                self.target().address_text()
+            ))),
+        }
     }
 
     /// Mark the entity session-enabled (a test convenience; real plans ask management).
@@ -216,13 +227,6 @@ fn peeked_exact(n: u64, truncated: bool) -> CountEstimate {
     }
 }
 
-/// Whether `e` says the entity needs a session receiver.
-fn session_required(e: &Error) -> bool {
-    e.to_string()
-        .to_ascii_lowercase()
-        .contains("requires sessions")
-}
-
 /// The item for a whole sub-queue or session (a failure or skip without a message).
 fn bare(address: &str, session: Option<String>, outcome: ItemOutcome) -> ItemResult {
     ItemResult {
@@ -235,12 +239,51 @@ fn bare(address: &str, session: Option<String>, outcome: ItemOutcome) -> ItemRes
     }
 }
 
+/// Deferred sequence numbers per session (one group without a session unless `by_session`).
+fn group_deferred(
+    found: &[(i64, Option<String>)],
+    by_session: bool,
+) -> VecDeque<(Option<String>, Vec<i64>)> {
+    let mut groups: BTreeMap<Option<String>, Vec<i64>> = BTreeMap::new();
+    for (seq, session) in found {
+        let key = if by_session { session.clone() } else { None };
+        groups.entry(key).or_default().push(*seq);
+    }
+    groups.into_iter().collect()
+}
+
 /// The note for a sub-queue whose allowance ran out with messages left.
 fn more_remain_note(n: u64, address: &str) -> String {
     format!(
         "{} removed from {address}; more remain, run purge again",
         count_text(n)
     )
+}
+
+/// The note for a sub-queue whose allowance ran out and whose check for leftovers hit its cap.
+fn may_remain_note(n: u64, address: &str) -> String {
+    format!(
+        "{} removed from {address}; more may remain, run purge again",
+        count_text(n)
+    )
+}
+
+/// Whether a sub-queue still holds messages a purge would take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Remains {
+    Yes,
+    No,
+    /// None found within the peek cap, but there are more messages beyond it.
+    Maybe,
+}
+
+/// What the deferred purge left behind.
+#[derive(Debug, Default)]
+struct Leftover {
+    /// More deferred messages were found than the allowance covers.
+    more: bool,
+    /// The search hit its cap: deferred messages may lie beyond it.
+    truncated: bool,
 }
 
 /// The purge of one sub-queue (or the deferred messages) so far.
@@ -310,7 +353,7 @@ impl<B: MessagingBackend + ?Sized> Purge<'_, '_, B> {
                     self.job.item(bare(&address, None, failed(&e)));
                     return d;
                 }
-                Err(e) if q == SubQueue::Active && session_required(&e) => self.sessions = true,
+                Err(e) if q == SubQueue::Active && is_session_required(&e) => self.sessions = true,
                 Err(e) => {
                     self.job.item(bare(&address, None, failed(&e)));
                     return d;
@@ -401,45 +444,45 @@ impl<B: MessagingBackend + ?Sized> Purge<'_, '_, B> {
         }
     }
 
-    /// Complete up to `allowance` deferred messages of the entity, by sequence number.
-    /// Returns the drain and whether more deferred messages are left beyond the allowance.
-    async fn deferred(&mut self, allowance: u64) -> (Drain, bool) {
+    /// Complete up to `allowance` deferred messages of the entity, by sequence number, found by
+    /// a peek of up to [`PURGE_COUNT_CAP`] messages. On a session entity they are received
+    /// inside their session; when that was not known and the plain receiver is refused as
+    /// session-required, they are grouped by session and tried again.
+    async fn deferred(&mut self, allowance: u64) -> (Drain, Leftover) {
         let address = self.plan.entity.address(SubQueue::Active);
         let mut d = Drain::default();
         let mut found: Vec<(i64, Option<String>)> = Vec::new();
-        let mut more = false;
+        let mut left = Leftover::default();
         let cap = usize::try_from(allowance).unwrap_or(usize::MAX);
         let walked = walk_messages(self.plane, &address, PURGE_COUNT_CAP, |m| {
             if m.state == MessageState::Deferred {
                 if found.len() < cap {
                     found.push((m.sequence_number, m.session_id.clone()));
                 } else {
-                    more = true;
+                    left.more = true;
                 }
             }
         })
         .await;
-        if let Err(e) = walked {
-            let reason = format!("could not find the deferred messages: {e}");
-            let outcome = ItemOutcome::Failed {
-                kind: crate::diagnostics::error_kind(&e),
-                reason,
-            };
-            self.job.item(bare(&address, None, outcome));
-            return (d, false);
+        match walked {
+            Ok(w) => left.truncated = w.truncated,
+            Err(e) => {
+                let reason = format!("could not find the deferred messages: {e}");
+                let outcome = ItemOutcome::Failed {
+                    kind: crate::diagnostics::error_kind(&e),
+                    reason,
+                };
+                self.job.item(bare(&address, None, outcome));
+                return (d, left);
+            }
         }
-        // Deferred messages of a session entity are received inside their session.
-        let mut groups: BTreeMap<Option<String>, Vec<i64>> = BTreeMap::new();
-        for (seq, session) in found {
-            let key = if self.sessions { session } else { None };
-            groups.entry(key).or_default().push(seq);
-        }
-        for (session, seqs) in groups {
+        let mut groups = group_deferred(&found, self.sessions);
+        let mut regrouped = false;
+        while let Some((session, seqs)) = groups.pop_front() {
             if self.cancel.is_cancelled() {
                 d.cancelled = true;
                 break;
             }
-            d.used += seqs.len() as u64;
             let settled = receive::settle_deferred(
                 self.plane,
                 &address,
@@ -451,7 +494,14 @@ impl<B: MessagingBackend + ?Sized> Purge<'_, '_, B> {
             )
             .await;
             match settled {
+                // No receiver opened, so nothing was received: try again inside the sessions.
+                Err(e) if session.is_none() && !regrouped && is_session_required(&e) => {
+                    self.sessions = true;
+                    regrouped = true;
+                    groups = group_deferred(&found, true);
+                }
                 Ok(report) => {
+                    d.used += seqs.len() as u64;
                     d.removed += report.succeeded();
                     d.cancelled |= report.cancelled;
                     for item in report.items {
@@ -462,6 +512,7 @@ impl<B: MessagingBackend + ?Sized> Purge<'_, '_, B> {
                     }
                 }
                 Err(e) => {
+                    d.used += seqs.len() as u64;
                     let outcome = match (&e, &session) {
                         (Error::Conflict(_), Some(id)) => ItemOutcome::Skipped {
                             reason: format!("session {id} is locked by another receiver"),
@@ -477,20 +528,27 @@ impl<B: MessagingBackend + ?Sized> Purge<'_, '_, B> {
                 }
             }
         }
-        (d, more)
+        (d, left)
     }
 
-    /// Whether messages purge would take are still in `q` (active ones for the queue itself).
-    async fn remains(&mut self, q: SubQueue) -> Result<bool> {
+    /// Whether messages purge would take are still in `q` (active ones for the queue itself),
+    /// from a peek of up to [`PURGE_COUNT_CAP`] messages.
+    async fn remains(&mut self, q: SubQueue) -> Result<Remains> {
         let address = self.plan.entity.address(q);
         let mut any = false;
-        walk_messages(self.plane, &address, REMAIN_CAP, |m| {
+        let walked = walk_messages(self.plane, &address, PURGE_COUNT_CAP, |m| {
             if q != SubQueue::Active || m.state == MessageState::Active {
                 any = true;
             }
         })
         .await?;
-        Ok(any)
+        Ok(if any {
+            Remains::Yes
+        } else if walked.truncated {
+            Remains::Maybe
+        } else {
+            Remains::No
+        })
     }
 }
 
@@ -504,16 +562,8 @@ pub(crate) async fn run<B: MessagingBackend + ?Sized>(
     progress: &dyn Progress,
     cancel: &CancellationToken,
 ) -> Result<JobReport> {
-    let unknown = || {
-        Error::Invalid(format!(
-            "the number of messages to purge in {} is not known; count them first",
-            plan.target().address_text()
-        ))
-    };
-    let total = plan.total.bound().ok_or_else(unknown)?;
-    if plan.per_queue.iter().any(|(_, c)| c.bound().is_none()) {
-        return Err(unknown());
-    }
+    // `run_many` checks this before the confirmation; here it is a backstop.
+    let total = plan.bound()?;
     let mut p = Purge {
         plane,
         plan,
@@ -552,10 +602,13 @@ pub(crate) async fn run<B: MessagingBackend + ?Sized>(
         }
         if d.used >= allowance {
             match p.remains(*q).await {
-                Ok(true) => p
+                Ok(Remains::Yes) => p
                     .job
                     .note(more_remain_note(d.removed, &plan.entity.address(*q))),
-                Ok(false) => {}
+                Ok(Remains::Maybe) => p
+                    .job
+                    .note(may_remain_note(d.removed, &plan.entity.address(*q))),
+                Ok(Remains::No) => {}
                 Err(e) => p.job.note(format!(
                     "could not check whether messages remain in {}: {e}",
                     plan.entity.address(*q)
@@ -572,14 +625,19 @@ pub(crate) async fn run<B: MessagingBackend + ?Sized>(
         if cancel.is_cancelled() {
             cancelled = true;
         } else {
-            let (d, more) = p.deferred(allowance).await;
+            let (d, left_over) = p.deferred(allowance).await;
             cancelled |= d.cancelled;
-            if more && !d.cancelled {
-                p.job.note(format!(
-                    "{} deferred removed from {}; more remain, run purge again",
-                    count_text(d.removed),
-                    plan.entity.address(SubQueue::Active)
-                ));
+            let address = plan.entity.address(SubQueue::Active);
+            match (d.cancelled, left_over.more, left_over.truncated) {
+                (true, ..) => {}
+                (false, true, _) => p.job.note(format!(
+                    "{} deferred removed from {address}; more remain, run purge again",
+                    count_text(d.removed)
+                )),
+                (false, false, true) => p.job.note(format!(
+                    "more deferred messages may remain in {address}; run purge again"
+                )),
+                (false, false, false) => {}
             }
         }
     }
@@ -588,8 +646,10 @@ pub(crate) async fn run<B: MessagingBackend + ?Sized>(
 
 /// Purge several entities in order, each behind its own confirmation (one gate run per
 /// entity, confirming that entity's total). A denied entity is one skipped item and the rest go
-/// on; another failure before an entity's purge ran is one failed item. The combined report has
-/// no op id of its own: a note per entity names its activity op id.
+/// on; another failure before an entity's purge ran is one failed item. A plan without a bounded
+/// count is one failed item and is never put to the confirmation. The combined report has no op
+/// id of its own: a note per entity the gate logged names its activity op id (`(denied)` for a
+/// denial).
 pub(crate) async fn run_many<B: MessagingBackend + ?Sized>(
     plane: &mut B,
     gate: &Gate,
@@ -614,13 +674,24 @@ pub(crate) async fn run_many<B: MessagingBackend + ?Sized>(
             cancelled = true;
             break;
         }
+        // Refused before the confirmation: never ask to confirm what would then be refused.
+        if let Err(e) = plan.bound() {
+            push(&mut items, bare(&plan.entity.base(), None, failed(&e)));
+            continue;
+        }
         let op = plan.operation();
-        let ran = gated(gate, &op, || run(&mut *plane, plan, progress, cancel)).await;
+        let (logged, ran) =
+            gated_logged(gate, &op, || run(&mut *plane, plan, progress, cancel)).await;
+        if let Some(op_id) = &logged {
+            let denied = if matches!(ran, Err(Error::Denied(_))) {
+                " (denied)"
+            } else {
+                ""
+            };
+            notes.push(format!("{name}: activity op {op_id}{denied}"));
+        }
         match ran {
             Ok(report) => {
-                if let Some(op_id) = &report.op_id {
-                    notes.push(format!("{name}: activity op {op_id}"));
-                }
                 notes.extend(report.notes.iter().map(|n| format!("{name}: {n}")));
                 items.extend(report.items);
                 if report.cancelled {
@@ -1076,17 +1147,248 @@ mod tests {
             .filter(|e| e.phase == Phase::Started)
             .map(|e| e.op_id.as_str())
             .collect();
+        let denied = e.iter().find(|e| e.outcome == Outcome::Denied).unwrap();
         assert_eq!(
             r.notes,
             [
                 format!("a: activity op {}", started[0]),
+                format!("b: activity op {} (denied)", denied.op_id),
                 format!("c: activity op {}", started[1]),
-            ]
+            ],
+            "every entity the gate logged is traceable"
         );
         assert_eq!(
             e[0].summary, "Remove 1 message from a on dev",
             "each confirmation names its own entity and count"
         );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_count_is_never_put_to_the_confirmation() {
+        let b = FakeBroker::default();
+        b.add("a", FakeMsg::active("x"));
+        b.add("c", FakeMsg::active("x"));
+        let (gate, audit) = fake_gate();
+        let plans = vec![
+            plan_with("a", PurgeScope::Active, CountEstimate::Unknown),
+            plan_with("c", PurgeScope::Active, CountEstimate::Exact(1)),
+        ];
+        let r = run_many(
+            &mut b.clone(),
+            &gate,
+            plans,
+            &NoProgress,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            &r.items[0],
+            ItemResult { entity, outcome: ItemOutcome::Failed { kind: "invalid", .. }, .. } if entity == "a"
+        ));
+        assert_eq!(b.all("a").len(), 1);
+        assert!(b.all("c").is_empty(), "the next entity still runs");
+        let e = audit.entries();
+        assert!(
+            e.iter().all(|e| e.entity.as_deref() == Some("c")),
+            "no confirmation or activity entry for the refused plan: {e:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deferred_messages_beyond_the_peek_cap_are_noted() {
+        // The first 10,000 messages are scheduled (never purged); the deferred one lies beyond.
+        let b = FakeBroker::default();
+        for _ in 0..PURGE_COUNT_CAP {
+            b.add("q", FakeMsg::active("s").scheduled());
+        }
+        b.add("q", FakeMsg::active("d").deferred());
+        let plan = plan_with_counts("q", PurgeScope::All, &[(SubQueue::Active, 0)], 1);
+        let r = purge(&b, &plan).await;
+        assert_eq!(r.succeeded(), 0);
+        assert_eq!(
+            b.all("q").len(),
+            PURGE_COUNT_CAP as usize + 1,
+            "nothing removed"
+        );
+        assert!(
+            r.notes
+                .iter()
+                .any(|n| n == "more deferred messages may remain in q; run purge again"),
+            "{:?}",
+            r.notes
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deferred_messages_left_beyond_the_allowance_are_noted() {
+        let b = FakeBroker::default();
+        for _ in 0..3 {
+            b.add("q", FakeMsg::active("d").deferred());
+        }
+        let plan = plan_with_counts("q", PurgeScope::All, &[(SubQueue::Active, 0)], 2);
+        let r = purge(&b, &plan).await;
+        assert_eq!(r.succeeded(), 2);
+        assert_eq!(b.all("q").len(), 1);
+        assert!(
+            r.notes
+                .iter()
+                .any(|n| n == "2 deferred removed from q; more remain, run purge again"),
+            "{:?}",
+            r.notes
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_leftover_check_that_hits_the_cap_says_more_may_remain() {
+        let b = FakeBroker::default();
+        b.add("q", FakeMsg::active("a"));
+        for _ in 0..PURGE_COUNT_CAP {
+            b.add("q", FakeMsg::active("d").deferred());
+        }
+        b.add("q", FakeMsg::active("late"));
+        let r = purge(
+            &b,
+            &plan_with("q", PurgeScope::Active, CountEstimate::Exact(1)),
+        )
+        .await;
+        assert_eq!(r.succeeded(), 1);
+        assert!(
+            r.notes
+                .iter()
+                .any(|n| n == "1 removed from q; more may remain, run purge again"),
+            "{:?}",
+            r.notes
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deferred_messages_of_a_session_entity_go_by_session() {
+        let b = FakeBroker::default();
+        b.add("s", FakeMsg::active("1").in_session("A").deferred());
+        b.add("s", FakeMsg::active("2").in_session("B").deferred());
+        b.lock_session_elsewhere("s", "B");
+        let plan = plan_with_counts("s", PurgeScope::All, &[(SubQueue::Active, 0)], 2).sessions();
+        let r = purge(&b, &plan).await;
+        assert_eq!(r.succeeded(), 1);
+        assert!(r.items.iter().any(|i| i.session_id.as_deref() == Some("B")
+            && i.sequence_number.is_some()
+            && matches!(&i.outcome, ItemOutcome::Skipped { reason } if reason == "session B is locked by another receiver")));
+        assert_eq!(b.all("s").len(), 1);
+        assert_eq!((b.held_locks(), b.open_receivers()), (0, 0));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deferred_messages_learn_that_the_entity_needs_sessions() {
+        // Management cannot say and no active line ran: the plain receiver is refused, so the
+        // deferred messages are tried again inside their sessions.
+        let b = FakeBroker::default();
+        b.require_sessions("s");
+        b.add("s", FakeMsg::active("1").in_session("A").deferred());
+        b.add("s", FakeMsg::active("2").in_session("B").deferred());
+        let plan = plan_with_counts("s", PurgeScope::All, &[(SubQueue::Active, 0)], 2);
+        let r = purge(&b, &plan).await;
+        assert_eq!((r.succeeded(), r.failed()), (2, 0), "{:?}", r.items);
+        assert!(b.all("s").is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_session_handed_out_again_ends_the_next_available_loop() {
+        // Session Z holds only state: next-available keeps handing it out.
+        let b = FakeBroker::default();
+        b.add("s", FakeMsg::active("1").in_session("A"));
+        let spec = ReceiverSpec {
+            address: "s".into(),
+            mode: ReceiveMode::PeekLock,
+            session: SessionChoice::Id("Z".into()),
+        };
+        let mut rx = b
+            .clone()
+            .open_receiver(&spec, Duration::ZERO)
+            .await
+            .unwrap()
+            .unwrap();
+        rx.set_session_state(Some(b"state")).await.unwrap();
+        rx.close().await;
+        let plan = plan_with("s", PurgeScope::Active, CountEstimate::Exact(5)).sessions();
+        let r = purge(&b, &plan).await;
+        assert_eq!(r.succeeded(), 1);
+        assert_eq!(b.open_receivers(), 0);
+        assert_eq!(b.session_state("s", "Z").as_deref(), Some(&b"state"[..]));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cancel_during_a_bulk_purge_stops_before_the_next_entity() {
+        use crate::activity::MemoryAudit;
+        use crate::safety::{Actor, ProfileRef};
+        use horizon_azure_kit::safety::{ConfirmRequest, Decision, Origin, Policy};
+        use std::sync::Arc;
+        /// Allows everything, and cancels the job when asked about `b`.
+        struct CancelOnB(CancellationToken);
+        #[async_trait::async_trait]
+        impl Policy for CancelOnB {
+            async fn confirm(&self, req: &ConfirmRequest) -> Decision {
+                if req.target == "b" {
+                    self.0.cancel();
+                }
+                Decision::Allow
+            }
+        }
+        let b = FakeBroker::default();
+        for q in ["a", "b", "c"] {
+            b.add(q, FakeMsg::active("x"));
+        }
+        let cancel = CancellationToken::new();
+        let audit = Arc::new(MemoryAudit::new());
+        let gate = Gate::new(
+            Arc::new(CancelOnB(cancel.clone())),
+            audit.clone(),
+            Actor {
+                origin: Origin::Cli,
+                profile: ProfileRef {
+                    name: "dev".into(),
+                    production: false,
+                },
+            },
+        );
+        let plans = ["a", "b", "c"]
+            .map(|q| plan_with(q, PurgeScope::Active, CountEstimate::Exact(1)))
+            .to_vec();
+        let r = run_many(&mut b.clone(), &gate, plans, &NoProgress, &cancel)
+            .await
+            .unwrap();
+        assert!(r.cancelled);
+        assert!(b.all("a").is_empty());
+        assert_eq!((b.all("b").len(), b.all("c").len()), (1, 1));
+        assert!(
+            audit
+                .entries()
+                .iter()
+                .all(|e| e.entity.as_deref() != Some("c")),
+            "c was never confirmed"
+        );
+        assert_eq!(b.open_receivers(), 0);
+    }
+
+    #[test]
+    fn counts_say_how_sure_they_are() {
+        let c = |approximate, truncated| EntityCounts {
+            active: 0,
+            dead_letter: 0,
+            scheduled: 0,
+            transfer: 0,
+            transfer_dead_letter: 0,
+            approximate,
+            truncated,
+        };
+        assert_eq!(managed(&c(false, false), 3), CountEstimate::Exact(3));
+        assert_eq!(managed(&c(true, false), 3), CountEstimate::About(3));
+        assert_eq!(managed(&c(true, true), 3), CountEstimate::AtLeast(3));
+        use CountEstimate::*;
+        assert_eq!(combined(&[Exact(1), Exact(2)]), Exact(3));
+        assert_eq!(combined(&[Exact(1), About(2)]), About(3));
+        assert_eq!(combined(&[About(1), AtLeast(2)]), AtLeast(3));
+        assert_eq!(combined(&[Exact(1), Unknown]), Unknown);
     }
 
     use super::super::purge;

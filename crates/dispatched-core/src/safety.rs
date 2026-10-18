@@ -748,6 +748,21 @@ impl Gate {
         F: FnOnce(String) -> Fut,
         Fut: Future<Output = Result<T>>,
     {
+        self.run_logged(op, work).await.1
+    }
+
+    /// [`Gate::run`], also returning the op id when an activity entry was written under it (a
+    /// denial included), so a caller can name the entry even when the operation was refused.
+    pub(crate) async fn run_logged<T, F, Fut>(
+        &self,
+        op: &Operation,
+        work: F,
+    ) -> (Option<String>, Result<T>)
+    where
+        T: Audited,
+        F: FnOnce(String) -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
         let op_id = format!("op-{}", uuid::Uuid::new_v4().simple());
         let request = op.confirm_request(&self.actor);
         let summary = request.summary.clone();
@@ -756,17 +771,24 @@ impl Gate {
             let error: Error = denied.into();
             let mut entry = self.entry(op, &op_id, Phase::Finished, Outcome::Denied, &summary);
             entry.error = Some(error.to_string());
-            if let Err(e) = self.audit.record(&entry) {
-                tracing::warn!("could not write the denial to the activity log: {e}");
-            }
-            return Err(error);
+            let logged = match self.audit.record(&entry) {
+                Ok(_) => Some(op_id),
+                Err(e) => {
+                    tracing::warn!("could not write the denial to the activity log: {e}");
+                    None
+                }
+            };
+            return (logged, Err(error));
         }
 
         let started = self.entry(op, &op_id, Phase::Started, Outcome::Pending, &summary);
         if let Err(e) = self.audit.record(&started) {
-            return Err(Error::Io(format!(
-                "cannot write the activity log ({e}); nothing was changed"
-            )));
+            return (
+                None,
+                Err(Error::Io(format!(
+                    "cannot write the activity log ({e}); nothing was changed"
+                ))),
+            );
         }
 
         let mut guard = FinishGuard {
@@ -805,7 +827,7 @@ impl Gate {
         if let Err(e) = self.audit.record(&finished) {
             tracing::warn!("could not write the finished entry to the activity log: {e}");
         }
-        result
+        (Some(op_id), result)
     }
 }
 

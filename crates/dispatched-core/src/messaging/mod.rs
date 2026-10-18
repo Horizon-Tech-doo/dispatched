@@ -24,6 +24,7 @@ mod transport;
 
 pub use connection::ServiceBusConnection;
 pub use dlq::{DLQ_SUMMARY_CAP, DlqSummary, ReasonGroup};
+pub(crate) use management::is_session_required;
 pub use management::{ManagementLink, MgmtResponse};
 pub use message::{
     MessageBody, MessageState, PeekedMessage, PropValue, decode_bytes, decode_message, ttl_ms,
