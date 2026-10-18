@@ -79,7 +79,6 @@ fn check_id(name: &str, v: &Option<String>) -> Result<()> {
 }
 
 // Used by the send operation (a later M2a task); tested here.
-#[allow(dead_code)]
 fn json_to_amqp(v: &serde_json::Value) -> Value {
     match v {
         serde_json::Value::Null => Value::Null,
@@ -99,7 +98,6 @@ fn json_to_amqp(v: &serde_json::Value) -> Value {
 }
 
 // Used by the send operation (a later M2a task); tested here.
-#[allow(dead_code)]
 fn timestamp(t: OffsetDateTime) -> Timestamp {
     Timestamp::from(
         i64::try_from(t.unix_timestamp_nanos().div_euclid(1_000_000)).unwrap_or(i64::MAX),
@@ -138,7 +136,6 @@ impl OutgoingMessage {
 
     /// Encode as an AMQP message; `now` is the creation time.
     // Used by the send operation (a later M2a task); tested here.
-    #[allow(dead_code)]
     pub(crate) fn to_amqp(&self, now: OffsetDateTime) -> Result<Message<Body<Value>>> {
         self.validate()?;
         let mut props = Properties::builder();

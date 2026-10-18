@@ -778,6 +778,7 @@ pub(crate) async fn run_many<B: MessagingBackend + ?Sized>(
         cancelled,
         items,
         notes,
+        not_attempted: 0,
     })
 }
 

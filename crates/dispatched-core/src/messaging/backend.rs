@@ -5,9 +5,6 @@
 //! `explorer::ExplorerPlane` (the cached AMQP connection) and, in tests,
 //! `messaging::fake::FakeBroker`.
 
-// The operations (Task 12 on) are the callers; until then only the fake's tests use this.
-#![allow(dead_code)]
-
 use super::outgoing::OutgoingMessage;
 use super::receiver::{AmqpReceiver, Closed, LockToken, ReceivedMessage, ReceiverSpec, Settlement};
 use super::scan::PeekSource;
@@ -80,8 +77,6 @@ pub(crate) trait MessageSender: Send {
 /// A receiver link (peek-lock or receive-and-delete, with or without a session).
 #[async_trait]
 pub(crate) trait LockReceiver: Send {
-    /// The link name.
-    fn name(&self) -> &str;
     /// The accepted session, for session receivers.
     fn session_id(&self) -> Option<&str>;
     /// Receive up to `max` messages within `wait` (plus the drain grace time). Cancel
@@ -132,9 +127,6 @@ impl MessageSender for AmqpSender {
 
 #[async_trait]
 impl LockReceiver for AmqpReceiver {
-    fn name(&self) -> &str {
-        AmqpReceiver::name(self)
-    }
     fn session_id(&self) -> Option<&str> {
         AmqpReceiver::session_id(self)
     }

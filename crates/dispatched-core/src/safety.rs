@@ -599,6 +599,37 @@ impl Operation {
         text
     }
 
+    /// Every entity the operation changes, each named once: the source, and for a move or a
+    /// resubmit the entity the copies go to.
+    pub fn entities(&self) -> Vec<String> {
+        let mut out = vec![self.target.entity.base()];
+        if let Effect::Move { to, .. } | Effect::Resubmit { to, .. } = &self.effect
+            && !out.contains(to)
+        {
+            out.push(to.clone());
+        }
+        out
+    }
+
+    /// The requests a policy confirms, in order. Off production, one: the source. On
+    /// production, one per entity in [`Operation::entities`] (the move or resubmit target
+    /// included), each naming that entity as its target with the same sentence, so the typed
+    /// confirmation [`require`] enforces covers every production entity the operation changes.
+    pub fn confirm_requests(&self, actor: &Actor) -> Vec<ConfirmRequest> {
+        let first = self.confirm_request(actor);
+        if !actor.profile.production {
+            return vec![first];
+        }
+        let mut out = vec![first];
+        for entity in self.entities().into_iter().skip(1) {
+            out.push(ConfirmRequest {
+                target: entity,
+                ..out[0].clone()
+            });
+        }
+        out
+    }
+
     /// The request a policy confirms: the entity base as target, the exact sentence as summary.
     pub fn confirm_request(&self, actor: &Actor) -> ConfirmRequest {
         ConfirmRequest {
@@ -779,10 +810,17 @@ impl Gate {
         Fut: Future<Output = Result<T>>,
     {
         let op_id = format!("op-{}", uuid::Uuid::new_v4().simple());
-        let request = op.confirm_request(&self.actor);
-        let summary = request.summary.clone();
+        let requests = op.confirm_requests(&self.actor);
+        let summary = requests[0].summary.clone();
 
-        if let Err(denied) = require(self.policy.as_ref(), &request).await {
+        let mut confirmed = Ok(());
+        for request in &requests {
+            confirmed = require(self.policy.as_ref(), request).await;
+            if confirmed.is_err() {
+                break;
+            }
+        }
+        if let Err(denied) = confirmed {
             let error: Error = denied.into();
             let mut entry = self.entry(op, &op_id, Phase::Finished, Outcome::Denied, &summary);
             entry.error = Some(error.to_string());
@@ -1201,6 +1239,67 @@ mod tests {
         (g, audit)
     }
 
+    /// Records each request and confirms only the typed `allow` targets.
+    struct TypedFor {
+        allow: Vec<String>,
+        seen: std::sync::Mutex<Vec<String>>,
+    }
+    #[async_trait]
+    impl Policy for TypedFor {
+        async fn confirm(&self, req: &ConfirmRequest) -> Decision {
+            self.seen.lock().unwrap().push(req.target.clone());
+            if self.allow.contains(&req.target) {
+                Decision::ConfirmedTyped(req.target.clone())
+            } else {
+                Decision::Deny(format!("{} not confirmed", req.target))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn on_production_the_gate_confirms_every_entity_the_operation_touches() {
+        let mv = Operation::move_to(dlq("orders"), "archive", 2);
+        assert_eq!(mv.entities(), ["orders", "archive"]);
+        assert_eq!(
+            Operation::resubmit(dlq("orders"), "orders", 1, false).entities(),
+            ["orders"],
+            "an entity is named once"
+        );
+        assert_eq!(purge_op().entities(), ["orders"]);
+        let run = |allow: &[&str], production: bool| {
+            let policy = Arc::new(TypedFor {
+                allow: allow.iter().map(|s| s.to_string()).collect(),
+                seen: Default::default(),
+            });
+            let g = Gate::new(
+                policy.clone(),
+                Arc::new(MemoryAudit::new()),
+                Actor {
+                    origin: Origin::Cli,
+                    profile: ProfileRef {
+                        name: "prod-weu".into(),
+                        production,
+                    },
+                },
+            );
+            let op = mv.clone();
+            async move {
+                let ran = g.run(&op, |_| async { Ok(()) }).await.is_ok();
+                let seen = policy.seen.lock().unwrap().clone();
+                (ran, seen)
+            }
+        };
+        // Only the source named: the move target is refused, nothing runs.
+        let (ran, seen) = run(&["orders"], true).await;
+        assert!(!ran);
+        assert_eq!(seen, ["orders", "archive"]);
+        let (ran, _) = run(&["orders", "archive"], true).await;
+        assert!(ran, "both named");
+        // Not production: one request (one prompt), for the source.
+        let (_, seen) = run(&[], false).await;
+        assert_eq!(seen, ["orders"]);
+    }
+
     fn purge_op() -> Operation {
         Operation::purge(dlq("orders"), CountEstimate::Exact(3))
     }
@@ -1246,6 +1345,7 @@ mod tests {
             cancelled: false,
             items,
             notes: vec![],
+            not_attempted: 0,
         }
     }
 

@@ -1186,9 +1186,14 @@ mod tests {
         use dispatched_core::{Operation, Target};
         let t = |q| Target::new(EntityPath::queue("q"), q);
         for (planned, op) in [
+            (DELETE, Operation::delete(t(SubQueue::Active), &[1])),
             (
                 planned_delete(PeekView::DeadLetter),
                 Operation::delete(t(SubQueue::DeadLetter), &[1]),
+            ),
+            (
+                DELETE_SCHEDULED,
+                Operation::cancel_scheduled(t(SubQueue::Active), 1),
             ),
             (
                 planned_delete(PeekView::Scheduled),
@@ -1558,6 +1563,7 @@ mod tests {
             cancelled: false,
             items,
             notes: Vec::new(),
+            not_attempted: 0,
         }
     }
 

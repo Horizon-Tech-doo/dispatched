@@ -7,7 +7,7 @@ use crate::context::Ctx;
 use crate::jobs::{JobExit, print_done};
 use crate::output::sanitize;
 use crate::resolve::Selection;
-use crate::safety::{MutateArgs, Planned};
+use crate::safety::{ConfirmArgs, MutateArgs, Planned};
 use anyhow::Context as _;
 use base64::Engine as _;
 use clap::{ArgGroup, Args, Subcommand};
@@ -72,7 +72,7 @@ pub struct SetArgs {
     #[arg(long)]
     pub allow_large: bool,
     #[command(flatten)]
-    pub mutate: MutateArgs,
+    pub confirm: ConfirmArgs,
 }
 
 /// `session state clear`.
@@ -83,7 +83,7 @@ pub struct ClearArgs {
     /// The session id.
     pub session: String,
     #[command(flatten)]
-    pub mutate: MutateArgs,
+    pub confirm: ConfirmArgs,
 }
 
 /// Refuse a state over 256 KiB unless `allow_large`.
@@ -228,7 +228,7 @@ async fn set(ctx: &Ctx, sel: &Selection<'_>, args: &SetArgs) -> anyhow::Result<J
     change(
         ctx,
         sel,
-        &args.mutate,
+        &args.confirm.mutate(),
         SET_STATE,
         &entity,
         &args.session,
@@ -247,7 +247,7 @@ async fn clear(ctx: &Ctx, sel: &Selection<'_>, args: &ClearArgs) -> anyhow::Resu
     change(
         ctx,
         sel,
-        &args.mutate,
+        &args.confirm.mutate(),
         CLEAR_STATE,
         &entity,
         &args.session,
@@ -313,6 +313,48 @@ mod tests {
     }
 
     #[test]
+    fn planned_kinds_match_the_operations() {
+        use dispatched_core::{Operation, SubQueue, Target};
+        let t = || Target::new(EntityPath::queue("q"), SubQueue::Active);
+        for (planned, op) in [
+            (SET_STATE, Operation::set_session_state(t(), "s", true)),
+            (CLEAR_STATE, Operation::set_session_state(t(), "s", false)),
+        ] {
+            assert_eq!((planned.kind, planned.verb), (op.mutation, op.verb()));
+        }
+    }
+
+    #[test]
+    fn set_and_clear_take_no_report_file() {
+        // They change one value and run no per-message job: nothing to report.
+        assert!(
+            try_parse([
+                "session", "state", "clear", "q", "s", "--yes", "--report", "r.json"
+            ])
+            .is_err()
+        );
+        assert!(
+            try_parse([
+                "session", "state", "set", "q", "s", "--value", "x", "--report", "r.json"
+            ])
+            .is_err()
+        );
+        assert!(
+            try_parse([
+                "session",
+                "state",
+                "clear",
+                "q",
+                "s",
+                "--yes",
+                "--confirm-prod",
+                "q"
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn get_json_has_text_base64_and_nulls() {
         let j = state_json("RMA-1", Some(b"{\"step\":2}"));
         assert_eq!(j["session_id"], "RMA-1");
@@ -356,7 +398,7 @@ mod tests {
             value: None,
             file: Some(path.clone()),
             allow_large,
-            mutate: MutateArgs::default(),
+            confirm: ConfirmArgs::default(),
         };
         assert!(
             new_state(&args(false))

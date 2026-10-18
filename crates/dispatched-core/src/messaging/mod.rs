@@ -5,7 +5,9 @@ mod connection;
 pub mod dlq;
 #[cfg(test)]
 pub(crate) mod fake;
-pub mod lockops;
+// Request builders for mutating management calls: crate-private, so only the gated
+// operations can send them.
+pub(crate) mod lockops;
 mod management;
 mod message;
 pub mod outgoing;
@@ -22,7 +24,9 @@ pub mod testing;
 mod tokens_ledger;
 mod transport;
 
-pub use connection::ServiceBusConnection;
+// Crate-private: a connection can mutate without the gate. The emulator tests reach it
+// through `testing` (feature `test-support`).
+pub(crate) use connection::ServiceBusConnection;
 pub use dlq::{DLQ_SUMMARY_CAP, DlqSummary, ReasonGroup};
 pub(crate) use management::is_session_required;
 pub use management::{ManagementLink, MgmtResponse};

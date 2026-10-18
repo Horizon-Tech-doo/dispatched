@@ -34,6 +34,29 @@ pub struct MutateArgs {
     pub force_report: bool,
 }
 
+/// The confirmation flags alone, for a mutating command that runs no per-message job and so
+/// writes no report (`session state set|clear`).
+#[derive(Args, Debug, Default, Clone)]
+pub struct ConfirmArgs {
+    /// Do not ask for confirmation.
+    #[arg(long)]
+    pub yes: bool,
+    /// Confirm an operation on a production profile by naming its entity.
+    #[arg(long = "confirm-prod", value_name = "ENTITY")]
+    pub confirm_prod: Vec<String>,
+}
+
+impl ConfirmArgs {
+    /// The same flags as [`MutateArgs`], without a report.
+    pub fn mutate(&self) -> MutateArgs {
+        MutateArgs {
+            yes: self.yes,
+            confirm_prod: self.confirm_prod.clone(),
+            ..MutateArgs::default()
+        }
+    }
+}
+
 /// What a mutating command will do, known before any I/O: the same kind and verb as the
 /// [`dispatched_core::Operation`] it builds later (`Operation.mutation`, `Operation::verb()`).
 /// Each command declares its own as a constant, e.g. `Planned { kind: Mutation::Purge, verb:
@@ -59,6 +82,9 @@ pub struct CliPolicy {
     profile: String,
     /// Shows what `--yes` confirmed (stderr).
     echo: Echo,
+    /// The sentence last shown: on production the gate asks once per entity with the same
+    /// sentence, and it is shown once.
+    echoed: std::sync::Mutex<Option<String>>,
 }
 
 /// Shows a line to the user.
@@ -85,7 +111,17 @@ impl CliPolicy {
             prompt,
             profile: profile.to_string(),
             echo: Box::new(|line| eprintln!("{line}")),
+            echoed: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Show what `--yes` confirmed, once per sentence.
+    fn echo_confirmed(&self, summary: &str) {
+        let mut last = self.echoed.lock().unwrap_or_else(|e| e.into_inner());
+        if last.as_deref() != Some(summary) {
+            (self.echo)(&confirmed_text(summary));
+            *last = Some(summary.to_string());
+        }
     }
 
     /// The same policy, showing what `--yes` confirmed through `echo` instead of stderr.
@@ -167,7 +203,7 @@ impl Policy for CliPolicy {
         if req.production {
             // No interactive way around it: both flags, naming this entity.
             return if self.yes && names(&self.confirm_prod, &req.target) {
-                (self.echo)(&confirmed_text(&req.summary));
+                self.echo_confirmed(&req.summary);
                 Decision::ConfirmedTyped(req.target.clone())
             } else {
                 Decision::Deny(production_refusal(&req.target, &self.profile))
@@ -176,7 +212,7 @@ impl Policy for CliPolicy {
         if self.yes {
             // No prompt shows the sentence, so say what was confirmed (a partial match says
             // "run again for the rest").
-            (self.echo)(&confirmed_text(&req.summary));
+            self.echo_confirmed(&req.summary);
             return Decision::Allow;
         }
         if !self.interactive {
@@ -401,9 +437,36 @@ fn cli_gate_with(
     Ok((gate_with(ctx, resolved, Arc::new(policy))?, cancel))
 }
 
+/// The activity log for the gate, saying on stderr when it could not record how an operation
+/// ended (the gate itself only logs that through `tracing`, which the CLI does not show).
+struct WarningAudit {
+    inner: Arc<dyn Audit>,
+    warn: Echo,
+}
+
+impl Audit for WarningAudit {
+    fn record(&self, entry: &dispatched_core::ActivityEntry) -> dispatched_core::Result<i64> {
+        let written = self.inner.record(entry);
+        if let Err(e) = &written
+            && entry.phase == dispatched_core::Phase::Finished
+        {
+            (self.warn)(&format!(
+                "warning: the activity log could not record how {} on {} ended: {}",
+                sanitize(&entry.action),
+                sanitize(entry.entity.as_deref().unwrap_or("-")),
+                sanitize(&e.to_string())
+            ));
+        }
+        written
+    }
+}
+
 /// A gate over `policy`, the activity log and origin `cli`.
 fn gate_with(ctx: &Ctx, resolved: &Resolved, policy: Arc<dyn Policy>) -> anyhow::Result<Gate> {
-    let audit: Arc<dyn Audit> = ctx.activity()?.clone();
+    let audit: Arc<dyn Audit> = Arc::new(WarningAudit {
+        inner: ctx.activity()?.clone(),
+        warn: Box::new(|line| eprintln!("{line}")),
+    });
     Ok(Gate::new(
         policy,
         audit,
@@ -613,6 +676,97 @@ mod tests {
         );
         assert!(shown[0].ends_with("run again for the rest"));
         assert!(shown[1].contains("Remove 3 messages from orders/$DeadLetterQueue on prod-weu"));
+    }
+
+    #[tokio::test]
+    async fn a_finished_entry_that_cannot_be_written_is_a_warning() {
+        use dispatched_core::safety::{Actor, Gate, ProfileRef};
+        use dispatched_core::{MemoryAudit, Operation, SubQueue, Target};
+        use std::sync::Mutex;
+        let shown = Arc::new(Mutex::new(Vec::<String>::new()));
+        let memory = Arc::new(MemoryAudit::new());
+        let sink = shown.clone();
+        let audit = WarningAudit {
+            inner: memory.clone(),
+            warn: Box::new(move |l| sink.lock().unwrap().push(l.to_string())),
+        };
+        let gate = Gate::new(
+            Arc::new(CliPolicy::for_test(true, &[], false, "n")),
+            Arc::new(audit),
+            Actor {
+                origin: horizon_azure_kit::safety::Origin::Cli,
+                profile: ProfileRef {
+                    name: "dev".into(),
+                    production: false,
+                },
+            },
+        );
+        let op = Operation::purge(
+            Target::new(EntityPath::queue("orders"), SubQueue::Active),
+            dispatched_core::CountEstimate::Exact(1),
+        );
+        let fail = memory.clone();
+        gate.run(&op, |_| async move {
+            // The started entry is written; the finished one fails.
+            fail.fail_next();
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let shown = shown.lock().unwrap();
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert!(
+            shown[0].starts_with(
+                "warning: the activity log could not record how purge on orders ended"
+            ),
+            "{}",
+            shown[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_gate_needs_confirm_prod_for_a_move_target_too() {
+        use dispatched_core::safety::{Actor, Gate, ProfileRef};
+        use dispatched_core::{MemoryAudit, Operation, SubQueue, Target};
+        use std::sync::Mutex;
+        let shown = Arc::new(Mutex::new(Vec::<String>::new()));
+        let gate = |prod: &[&str]| {
+            let sink = shown.clone();
+            let policy = CliPolicy::for_test(true, prod, false, "n")
+                .with_echo(Box::new(move |l| sink.lock().unwrap().push(l.to_string())));
+            Gate::new(
+                Arc::new(policy),
+                Arc::new(MemoryAudit::new()),
+                Actor {
+                    origin: horizon_azure_kit::safety::Origin::Cli,
+                    profile: ProfileRef {
+                        name: "prod-weu".into(),
+                        production: true,
+                    },
+                },
+            )
+        };
+        let mv = Operation::move_to(
+            Target::new(EntityPath::queue("orders"), SubQueue::DeadLetter),
+            "archive",
+            2,
+        );
+        let e = gate(&["orders"])
+            .run(&mv, |_| async { Ok(()) })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("--confirm-prod archive"), "{e}");
+        shown.lock().unwrap().clear();
+        gate(&["orders", "archive"])
+            .run(&mv, |_| async { Ok(()) })
+            .await
+            .unwrap();
+        assert_eq!(
+            shown.lock().unwrap().len(),
+            1,
+            "one confirmation line, not one per entity"
+        );
     }
 
     #[test]

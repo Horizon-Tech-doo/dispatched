@@ -102,6 +102,9 @@ pub struct JobReport {
     pub cancelled: bool,
     pub items: Vec<ItemResult>,
     pub notes: Vec<String>,
+    /// Messages a cancelled job never attempted and has no item for (its total minus the items
+    /// recorded); 0 unless cancelled.
+    pub not_attempted: u64,
 }
 
 fn not_reached_text(why: NotReached) -> &'static str {
@@ -233,9 +236,27 @@ impl JobReport {
 
     fn summary_line_inner(&self) -> String {
         let verb = self.kind.verb();
-        let place = match &self.target {
-            Some(t) => format!("from {} to {t}", self.entity),
-            None => format!("from {}", self.entity),
+        let place = match (&self.target, self.kind) {
+            (Some(t), _) => format!("from {} to {t}", self.entity),
+            // Sends put messages on the entity.
+            (None, JobKind::Send | JobKind::Import) => format!("to {}", self.entity),
+            (None, _) => format!("from {}", self.entity),
+        };
+        let unreached = self.not_attempted.saturating_add(self.count(|o| {
+            matches!(
+                o,
+                ItemOutcome::NotReached {
+                    why: NotReached::Cancelled
+                }
+            )
+        }));
+        let cancelled = match (self.cancelled, unreached) {
+            (false, _) => String::new(),
+            (true, 0) => " (cancelled)".into(),
+            (true, n) => format!(
+                " (cancelled; {} not attempted)",
+                crate::safety::count_text(n)
+            ),
         };
         let failed = self.failed();
         // What else was not done: incomplete work must never read as complete.
@@ -254,7 +275,7 @@ impl JobReport {
         if failed == 0 {
             let n = self.succeeded();
             let noun = if n == 1 { "message" } else { "messages" };
-            return format!("{verb} {n} {noun} {place}{others}");
+            return format!("{verb} {n} {noun} {place}{cancelled}{others}");
         }
         let list: Vec<String> = self
             .failures()
@@ -272,7 +293,7 @@ impl JobReport {
             list.push_str(&format!(", and {} more", failed - 5));
         }
         format!(
-            "{verb} {} of {} messages {place}; {failed} failed ({list}){others}",
+            "{verb} {} of {} messages {place}{cancelled}; {failed} failed ({list}){others}",
             self.succeeded(),
             self.items.len()
         )
@@ -293,6 +314,7 @@ impl JobReport {
             "started_at": rfc3339(self.started_at),
             "finished_at": rfc3339(self.finished_at),
             "cancelled": self.cancelled,
+            "not_attempted": self.not_attempted,
             "succeeded": self.succeeded(),
             "failed": self.failed_json(),
             "skipped": self.skipped(),
@@ -400,7 +422,7 @@ impl JobReport {
 impl Serialize for Scrubbed<'_> {
     fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
         let this = self.0;
-        let mut st = s.serialize_struct("JobReport", 12)?;
+        let mut st = s.serialize_struct("JobReport", 13)?;
         st.serialize_field("op_id", &this.op_id)?;
         st.serialize_field("kind", &this.kind)?;
         st.serialize_field("entity", &this.entity)?;
@@ -408,6 +430,7 @@ impl Serialize for Scrubbed<'_> {
         st.serialize_field("started_at", &rfc3339(this.started_at))?;
         st.serialize_field("finished_at", &rfc3339(this.finished_at))?;
         st.serialize_field("cancelled", &this.cancelled)?;
+        st.serialize_field("not_attempted", &this.not_attempted)?;
         st.serialize_field("succeeded", &this.succeeded())?;
         st.serialize_field("failed", &this.failed_json())?;
         st.serialize_field("skipped", &this.skipped())?;
@@ -418,11 +441,20 @@ impl Serialize for Scrubbed<'_> {
 }
 
 /// A progress event from a running job.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum JobEvent {
-    Started { kind: JobKind, total: Option<u64> },
+    Started {
+        kind: JobKind,
+        total: Option<u64>,
+    },
     Item(ItemResult),
-    Progress { done: u64, total: Option<u64> },
+    /// A message a receive took, in full, as its item is recorded (for receive-and-delete it
+    /// is already removed), so a surface can keep a copy even if the job never returns.
+    Received(Box<PeekedMessage>),
+    Progress {
+        done: u64,
+        total: Option<u64>,
+    },
     Note(String),
 }
 
@@ -465,7 +497,6 @@ impl Progress for RecordingProgress {
 }
 
 /// Builds a [`JobReport`] while emitting progress events.
-#[allow(dead_code)] // used by the ops that follow in this milestone
 /// Copies a job sent without some custom properties (their type cannot be copied), for the
 /// per-job note "k copies lost properties: …".
 #[derive(Debug, Default)]
@@ -521,7 +552,6 @@ pub(crate) struct JobRun<'a> {
     notes: Vec<String>,
 }
 
-#[allow(dead_code)]
 impl<'a> JobRun<'a> {
     pub(crate) fn new(
         kind: JobKind,
@@ -553,6 +583,12 @@ impl<'a> JobRun<'a> {
         });
     }
 
+    /// Emit a message a receive took ([`JobEvent::Received`]).
+    pub(crate) fn received(&mut self, m: &PeekedMessage) {
+        self.progress
+            .event(&JobEvent::Received(Box::new(m.clone())));
+    }
+
     /// Record a note for the report and emit it.
     pub(crate) fn note(&mut self, note: String) {
         self.progress.event(&JobEvent::Note(note.clone()));
@@ -561,6 +597,12 @@ impl<'a> JobRun<'a> {
 
     /// Close the run.
     pub(crate) fn finish(self, cancelled: bool) -> JobReport {
+        // Only where the total is a list of messages: a receive's or a purge's is a bound.
+        let listed = !matches!(self.kind, JobKind::Receive | JobKind::Purge);
+        let not_attempted = match (cancelled && listed, self.total) {
+            (true, Some(total)) => total.saturating_sub(self.items.len() as u64),
+            _ => 0,
+        };
         JobReport {
             op_id: None,
             kind: self.kind,
@@ -571,6 +613,7 @@ impl<'a> JobRun<'a> {
             cancelled,
             items: self.items,
             notes: self.notes,
+            not_attempted,
         }
     }
 }
@@ -627,6 +670,7 @@ mod tests {
             cancelled: false,
             items: items.to_vec(),
             notes: vec![],
+            not_attempted: 0,
         }
     }
     fn report(items: &[ItemResult]) -> JobReport {
@@ -759,6 +803,56 @@ mod tests {
         );
         assert_eq!(JobReport::reason(&r.items[2]), "already there");
         assert_eq!(JobReport::reason(&r.items[3]), "not found");
+    }
+
+    #[test]
+    fn sends_say_to_and_a_cancelled_job_says_what_it_never_attempted() {
+        for kind in [JobKind::Send, JobKind::Import] {
+            let mut r = report_kind(kind, &[ok(1), ok(2)]);
+            r.entity = "orders".into();
+            r.target = None;
+            assert_eq!(
+                r.summary_line(),
+                format!("{} 2 messages to orders", kind.verb())
+            );
+        }
+        let mut r = report_kind(JobKind::Send, &[ok(1), ok(2), ok(3)]);
+        r.entity = "orders".into();
+        r.target = None;
+        r.cancelled = true;
+        r.not_attempted = 97;
+        assert_eq!(
+            r.summary_line(),
+            "Sent 3 messages to orders (cancelled; 97 not attempted)"
+        );
+        // Items recorded as not reached because of the cancel count too.
+        let mut r = report(&[ok(1), not_reached(2, NotReached::Cancelled)]);
+        r.cancelled = true;
+        assert_eq!(
+            r.summary_line(),
+            "Moved 1 of 2 messages from orders/$DeadLetterQueue to orders (cancelled; 1 not attempted); 1 failed (sequence 2: not reached: cancelled)"
+        );
+        let mut r = report(&[ok(1)]);
+        r.cancelled = true;
+        assert!(
+            r.summary_line().ends_with(" (cancelled)"),
+            "{}",
+            r.summary_line()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_run_counts_what_it_never_reached() {
+        let mut run = JobRun::new(JobKind::Send, "orders".into(), None, &NoProgress, Some(5));
+        run.item(ok(1));
+        let r = run.finish(true);
+        assert_eq!(r.not_attempted, 4);
+        let run = JobRun::new(JobKind::Send, "orders".into(), None, &NoProgress, Some(5));
+        assert_eq!(
+            run.finish(false).not_attempted,
+            0,
+            "only a cancel leaves them"
+        );
     }
 
     #[test]

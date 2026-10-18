@@ -5,12 +5,14 @@ use crate::Format;
 use crate::output::{sanitize, table};
 use crate::safety::MutateArgs;
 use dispatched_core::{
-    ExportFormat, ExportedMessage, ItemOutcome, JobEvent, JobReport, PeekedMessage, Progress,
+    ExportFormat, ExportedMessage, ItemOutcome, ItemResult, JobEvent, JobKind, JobReport,
+    PeekedMessage, Progress,
 };
 use horizon_azure_kit::safety::CancellationToken;
 use std::future::Future;
 use std::io::{IsTerminal, Write};
 use std::path::Path;
+use std::sync::Mutex;
 
 /// How a job ended, for the exit code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +22,126 @@ pub enum JobExit {
     /// Some item failed, was not reached, was missing or was skipped, or the job was cancelled
     /// (exit code 2).
     Incomplete,
+}
+
+/// Progress for a receive that also keeps every item and message as it arrives, so a second
+/// Ctrl-C (which ends the process before the job returns) can still write what a
+/// receive-and-delete removed ([`ReceiveKeeper::write_interrupted`]).
+pub struct ReceiveKeeper {
+    progress: StderrProgress,
+    entity: String,
+    kept: Mutex<(Vec<ItemResult>, Vec<PeekedMessage>)>,
+}
+
+impl ReceiveKeeper {
+    /// A keeper for a receive from `entity`.
+    pub fn new(entity: String) -> Self {
+        Self {
+            progress: StderrProgress::new(),
+            entity,
+            kept: Mutex::new((Vec::new(), Vec::new())),
+        }
+    }
+
+    /// Write the `--report` file with what was kept (or, without one, say what was lost) on
+    /// `err`. Never fails: the process is ending.
+    pub fn write_interrupted(&self, args: &MutateArgs, err: &mut dyn Write) {
+        let (items, messages) = {
+            let kept = self.kept.lock().unwrap_or_else(|e| e.into_inner());
+            (kept.0.clone(), kept.1.clone())
+        };
+        let n = messages.len();
+        let removed = if n == 1 {
+            "1 message was removed".to_string()
+        } else {
+            format!("{n} messages were removed")
+        };
+        let Some(path) = &args.report else {
+            let _ = writeln!(
+                err,
+                "warning: interrupted; {removed} and not kept (pass --report FILE to keep them)"
+            );
+            return;
+        };
+        let now = time::OffsetDateTime::now_utc();
+        let report = JobReport {
+            op_id: None,
+            kind: JobKind::Receive,
+            entity: self.entity.clone(),
+            target: None,
+            started_at: now,
+            finished_at: now,
+            cancelled: true,
+            items,
+            notes: vec![
+                "interrupted by a second Ctrl-C before the receive finished; it may have removed more than this report lists"
+                    .into(),
+            ],
+            not_attempted: 0,
+        };
+        let shown = sanitize(&path.display().to_string());
+        match report.write_with_messages(path, report_format(path), args.force_report, &messages) {
+            Ok(()) => {
+                let _ = writeln!(err, "interrupted; {removed}, written to {shown}");
+            }
+            Err(e) => {
+                let _ = writeln!(
+                    err,
+                    "warning: interrupted; {removed} and the report could not be written to {shown}: {}",
+                    sanitize(&e.to_string())
+                );
+            }
+        }
+    }
+}
+
+impl Progress for ReceiveKeeper {
+    fn event(&self, e: &JobEvent) {
+        match e {
+            JobEvent::Item(i) => self
+                .kept
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .0
+                .push(i.clone()),
+            JobEvent::Received(m) => self
+                .kept
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .1
+                .push((**m).clone()),
+            _ => {}
+        }
+        self.progress.event(e);
+    }
+}
+
+/// What a second Ctrl-C runs before the process ends.
+type Hook = Box<dyn FnOnce() + Send>;
+static ON_SECOND_PRESS: Mutex<Option<Hook>> = Mutex::new(None);
+
+/// Run `f` on a second Ctrl-C, before the process ends (replaces an earlier one).
+pub fn on_second_press(f: impl FnOnce() + Send + 'static) {
+    *ON_SECOND_PRESS.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(f));
+}
+
+/// Forget the hook (the job it guarded has returned).
+pub fn clear_second_press() {
+    ON_SECOND_PRESS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+}
+
+/// Run the hook, if any, once.
+fn run_second_press_hook() {
+    let hook = ON_SECOND_PRESS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    if let Some(f) = hook {
+        f();
+    }
 }
 
 /// Progress on stderr: a line per 100 items and one at the end, only when stderr is a terminal.
@@ -299,13 +421,17 @@ pub fn cancel_on_ctrl_c() -> CancellationToken {
     token
 }
 
-/// From now on, the first Ctrl-C cancels `token` and a second ends the process (exit 130).
+/// From now on, the first Ctrl-C cancels `token` and a second ends the process (exit 130),
+/// after the hook a job set with [`on_second_press`].
 /// The handler is registered before this returns. Mutating commands call this once the gate
 /// confirmed ([`crate::safety::cli_gate`]), so a Ctrl-C at the confirmation prompt still ends
 /// the process.
 pub fn arm_ctrl_c(token: &CancellationToken) {
     if let Some(presses) = ctrl_c_presses() {
-        watch(token.clone(), presses, || std::process::exit(130));
+        watch(token.clone(), presses, || {
+            run_second_press_hook();
+            std::process::exit(130)
+        });
     }
 }
 
@@ -352,6 +478,7 @@ mod tests {
             cancelled: false,
             items,
             notes: Vec::new(),
+            not_attempted: 0,
         }
     }
 
@@ -723,6 +850,44 @@ mod tests {
                 "{err}"
             );
         }
+    }
+
+    #[test]
+    fn a_second_ctrl_c_during_a_receive_writes_what_was_removed_first() {
+        let keeper = ReceiveKeeper::new("orders".into());
+        keeper.event(&JobEvent::Received(Box::new(received(7, "removed"))));
+        keeper.event(&JobEvent::Item(item(
+            7,
+            ItemOutcome::Succeeded { detail: None },
+        )));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("removed.json");
+        let mut err = Vec::new();
+        keeper.write_interrupted(&to_file(&path, false), &mut err);
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["messages"][0]["sequence_number"], 7);
+        assert_eq!(v["cancelled"], true);
+        assert_eq!(v["succeeded"], 1);
+        let err = String::from_utf8(err).unwrap();
+        assert!(err.contains(&path.display().to_string()), "{err}");
+        // Without --report the user is told what was lost.
+        let mut err = Vec::new();
+        keeper.write_interrupted(&MutateArgs::default(), &mut err);
+        let err = String::from_utf8(err).unwrap();
+        assert!(
+            err.contains("1 message was removed") && err.contains("--report"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn the_second_press_hook_runs_once() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        on_second_press(move || tx.send(()).unwrap());
+        run_second_press_hook();
+        run_second_press_hook();
+        assert_eq!(rx.try_iter().count(), 1);
     }
 
     /// Presses fed from a channel.

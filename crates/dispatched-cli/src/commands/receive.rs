@@ -4,7 +4,10 @@ use super::browse::{ViewArgs, messages_table, peek};
 use super::operator_for;
 use crate::Format;
 use crate::context::Ctx;
-use crate::jobs::{Extras, JobExit, StderrProgress, finish_job, finish_job_with};
+use crate::jobs::{
+    Extras, JobExit, ReceiveKeeper, StderrProgress, clear_second_press, finish_job,
+    finish_job_with, on_second_press,
+};
 use crate::resolve::Selection;
 use crate::safety::{MutateArgs, Planned};
 use clap::{ArgGroup, Args, Subcommand, ValueEnum};
@@ -215,9 +218,22 @@ pub async fn receive(
         planned,
         std::slice::from_ref(&req.entity),
     )?;
-    let result = operator.receive(req, &StderrProgress::new(), &cancel).await;
+    // A second Ctrl-C ends the process before the receive returns: what a receive-and-delete
+    // removed by then is written first.
+    let keeper = std::sync::Arc::new(ReceiveKeeper::new(req.entity.address(req.sub_queue)));
+    if args.delete {
+        let (keeper, mutate) = (keeper.clone(), args.mutate.clone());
+        on_second_press(move || keeper.write_interrupted(&mutate, &mut std::io::stderr().lock()));
+    }
+    let result = operator.receive(req, keeper.as_ref(), &cancel).await;
     operator.explorer().close().await;
-    let outcome = result?;
+    let outcome = match result {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            clear_second_press();
+            return Err(e.into());
+        }
+    };
     let mut extras = Extras::default();
     if let Format::Table = format {
         extras.before = Some(messages_table(&outcome.messages, view));
@@ -229,13 +245,15 @@ pub async fn receive(
     }
     // The --report file (the messages in full) is written before the table or the JSON
     // document (one document with the messages in the `peek --format json` shape) is printed.
-    Ok(finish_job_with(
+    let exit = finish_job_with(
         &outcome.report,
         format,
         &args.mutate,
         Some(&outcome.messages),
         &extras,
-    ))
+    );
+    clear_second_press();
+    Ok(exit)
 }
 
 /// The table shortens bodies: a receive-and-delete without --report says how to keep full

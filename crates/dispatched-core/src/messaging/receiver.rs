@@ -21,10 +21,12 @@ use super::message::{PeekedMessage, decode_message};
 use crate::{Error, Result};
 use fe2o3_amqp::link::receiver::CreditMode;
 use fe2o3_amqp::session::SessionHandle;
-use fe2o3_amqp::types::definitions::{
-    Error as AmqpError, ErrorCondition, Fields, ReceiverSettleMode, SenderSettleMode,
-};
-use fe2o3_amqp::types::messaging::{Body, FilterSet, Modified, Source};
+#[cfg(any(test, feature = "test-support"))]
+use fe2o3_amqp::types::definitions::{Error as AmqpError, ErrorCondition};
+use fe2o3_amqp::types::definitions::{Fields, ReceiverSettleMode, SenderSettleMode};
+#[cfg(feature = "test-support")]
+use fe2o3_amqp::types::messaging::Modified;
+use fe2o3_amqp::types::messaging::{Body, FilterSet, Source};
 use fe2o3_amqp::types::primitives::{OrderedMap, Symbol, Value};
 use fe2o3_amqp::{Delivery, Receiver};
 use std::collections::{HashMap, VecDeque};
@@ -253,8 +255,8 @@ fn accepted_session(source: Option<&Source>) -> Option<String> {
     }
 }
 
-/// A link-level settlement outcome.
-#[cfg_attr(not(feature = "test-support"), allow(dead_code))] // only the emulator probe settles on the link
+/// A link-level settlement outcome (only the emulator probe settles on the link).
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug)]
 enum LinkOutcome {
     Accepted,
@@ -265,7 +267,7 @@ enum LinkOutcome {
     Rejected(AmqpError),
 }
 
-#[cfg_attr(not(feature = "test-support"), allow(dead_code))] // only the emulator probe settles on the link
+#[cfg(any(test, feature = "test-support"))]
 fn outcome_for(how: &Settlement) -> LinkOutcome {
     match how {
         Settlement::Complete => LinkOutcome::Accepted,
@@ -438,8 +440,6 @@ impl Intake {
 
 /// A receiver link with its own management link on the same session.
 pub(crate) struct AmqpReceiver {
-    #[allow(dead_code)] // read by `address()`, which no operation needs yet
-    address: String,
     mode: ReceiveMode,
     receiver: Receiver,
     management: ManagementLink,
@@ -530,7 +530,6 @@ impl AmqpReceiver {
             },
         };
         Ok(Some(Self {
-            address: spec.address.clone(),
             mode: spec.mode,
             receiver,
             management,
@@ -539,17 +538,6 @@ impl AmqpReceiver {
             unkeyed: Vec::new(),
             intake: Intake::default(),
         }))
-    }
-
-    /// The data link's name (sent as `associated-link-name`).
-    pub(crate) fn name(&self) -> &str {
-        self.receiver.name()
-    }
-
-    /// The entity address.
-    #[allow(dead_code)] // no operation needs it yet
-    pub(crate) fn address(&self) -> &str {
-        &self.address
     }
 
     /// The accepted session, for session receivers.
@@ -745,8 +733,8 @@ impl AmqpReceiver {
     }
 
     /// Settle over the link (fire-and-forget: no outcome is reported). Only
-    /// for callers that ignore the outcome.
-    #[cfg_attr(not(feature = "test-support"), allow(dead_code))] // only the emulator probe settles on the link
+    /// for callers that ignore the outcome (the emulator probe).
+    #[cfg(feature = "test-support")]
     pub(crate) async fn settle_on_link(
         &mut self,
         token: LockToken,

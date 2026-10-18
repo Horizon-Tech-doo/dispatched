@@ -337,7 +337,7 @@ impl ManagementLink {
     }
 
     /// Send `operation` with a map body and wait for its correlated response.
-    pub async fn call(
+    pub(crate) async fn call(
         &mut self,
         operation: &str,
         body: OrderedMap<String, Value>,
@@ -348,7 +348,7 @@ impl ManagementLink {
     /// [`call`](Self::call) on behalf of a receiver link: `associated_link`
     /// (the receiver link's name) is sent as `associated-link-name`, which
     /// lock and session operations need.
-    pub async fn call_for_link(
+    pub(crate) async fn call_for_link(
         &mut self,
         operation: &str,
         body: OrderedMap<String, Value>,

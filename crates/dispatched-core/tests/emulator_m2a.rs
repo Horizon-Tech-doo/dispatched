@@ -7,9 +7,10 @@
 
 use dispatched_core::activity::{ActivityQuery, Outcome, Phase};
 use dispatched_core::filter::{FilterSpec, MessageFilter};
+use dispatched_core::messaging::testing::ServiceBusConnection;
 use dispatched_core::messaging::{
-    MessageIdSource, OutgoingBody, OutgoingMessage, PeekedMessage, PropValue, ServiceBusConnection,
-    Settlement, TypedValue, testing,
+    MessageIdSource, OutgoingBody, OutgoingMessage, PeekedMessage, PropValue, Settlement,
+    TypedValue, testing,
 };
 use dispatched_core::ops::{
     ImportOptions, LocateLimits, MessageSelection, ResubmitSpec, SelectSpec,

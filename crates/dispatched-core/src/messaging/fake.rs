@@ -4,9 +4,6 @@
 //! and fault injection. Time follows the tokio clock, so tests drive lock expiry and
 //! receive delays with `tokio::time::pause()` / `advance()`.
 
-// The operations' tests (Task 12 on) use most of the inspection and fault helpers.
-#![allow(dead_code)]
-
 use super::backend::{Each, LockReceiver, MessageSender, MessagingBackend};
 use super::message::{MessageBody, MessageState, PeekedMessage, PropValue, dead_letter_fields};
 use super::message::{decode_bytes, decode_message, test_message};
@@ -151,7 +148,6 @@ struct State {
     session_renewals: u32,
     /// The renew_lock call (1 = the next one) that fails with this error.
     renew_fails_on: Option<(u32, Error)>,
-    receivers: u64,
     /// Senders opened and not yet closed.
     open_senders: usize,
     /// Receivers opened and not yet closed.
@@ -187,7 +183,6 @@ impl Default for State {
             session_locks: HashMap::new(),
             session_renewals: 0,
             renew_fails_on: None,
-            receivers: 0,
             open_senders: 0,
             open_receivers: 0,
         }
@@ -807,14 +802,9 @@ impl MessagingBackend for FakeBroker {
                 }
             }
         };
-        let n = self.with(|s| {
-            s.receivers += 1;
-            s.open_receivers += 1;
-            s.receivers
-        });
+        self.with(|s| s.open_receivers += 1);
         Ok(Some(Box::new(FakeReceiver {
             broker: self.clone(),
-            name: format!("fake-rx-{n}"),
             address,
             mode: spec.mode,
             session,
@@ -940,7 +930,6 @@ impl MessageSender for FakeSender {
 /// leave it only on return, so a dropped `receive` loses nothing (as `AmqpReceiver`).
 struct FakeReceiver {
     broker: FakeBroker,
-    name: String,
     address: String,
     mode: ReceiveMode,
     session: Option<String>,
@@ -1002,10 +991,6 @@ impl FakeReceiver {
 
 #[async_trait]
 impl LockReceiver for FakeReceiver {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
     fn session_id(&self) -> Option<&str> {
         self.session.as_deref()
     }

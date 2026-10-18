@@ -171,7 +171,6 @@ impl ServiceBusConnection {
 
     /// Open a sender to a queue or topic `address`: put a token for it, then
     /// attach the data link. Subscription paths are refused before any I/O.
-    #[allow(dead_code)] // callers arrive with the operations (Task 12)
     pub(crate) async fn open_sender(&mut self, address: &str) -> Result<AmqpSender> {
         let target = send_target(address)?.base();
         self.ensure_authorized(&target).await?;
@@ -195,7 +194,6 @@ impl ServiceBusConnection {
     /// messages and every later one are reported with that error, which is also
     /// returned; earlier chunks stay scheduled and were already reported. A
     /// message without a message id gets a new UUID.
-    #[allow(dead_code)] // callers arrive with the operations (Task 12)
     pub(crate) async fn schedule(
         &mut self,
         address: &str,
@@ -225,7 +223,6 @@ impl ServiceBusConnection {
     /// Cancel scheduled messages by sequence number, 100 per request.
     /// `each(index, result)` reports every sequence number; a failed request
     /// reports its numbers and all later ones with the error, which is returned.
-    #[allow(dead_code)] // callers arrive with the operations (Task 12)
     pub(crate) async fn cancel_scheduled(
         &mut self,
         address: &str,

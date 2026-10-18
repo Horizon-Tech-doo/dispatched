@@ -269,8 +269,8 @@ struct Hints {
 
 /// One-line, terminal-safe error text. A not-signed-in root cause gets the
 /// login hint appended; a rejected credential on a `--namespace` selection
-/// gets the other-tenant hint; control characters from remote text are
-/// neutralised.
+/// gets the other-tenant hint; secrets are redacted and control characters
+/// from remote text are neutralised.
 fn format_error(e: &anyhow::Error, hints: Hints) -> String {
     let mut text = format!("{e:#}");
     let not_signed_in = matches!(
@@ -297,7 +297,7 @@ fn format_error(e: &anyhow::Error, hints: Hints) -> String {
         text.push_str("; ");
         text.push_str(TENANT_HINT);
     }
-    output::sanitize(&text)
+    output::sanitize(&dispatched_core::activity::redact(&text))
 }
 
 /// Run the command; on failure also report which hints apply.
@@ -813,6 +813,15 @@ mod tests {
         // Other failures on a namespace selection get none.
         let e = anyhow::Error::from(CoreError::Network("down".into()));
         assert!(!format_error(&e, on).contains("tenant"));
+    }
+
+    #[test]
+    fn error_text_is_redacted() {
+        let e = anyhow::anyhow!(
+            "broker said Endpoint=sb://x.servicebus.windows.net/;SharedAccessKeyName=k;SharedAccessKey=topsecretvalue"
+        );
+        let text = format_error(&e, Hints::default());
+        assert!(!text.contains("topsecretvalue"), "{text}");
     }
 
     #[test]

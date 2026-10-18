@@ -207,7 +207,6 @@ impl AmqpSender {
     /// `Error::Protocol("the broker refused the message: ...")`. A failure of
     /// the link fails every message not yet reported with that error and
     /// returns it.
-    #[allow(dead_code)] // callers arrive with the operations (Task 12)
     pub(crate) async fn send_all(
         &mut self,
         batch: &[OutgoingMessage],
@@ -224,7 +223,6 @@ impl AmqpSender {
     }
 
     /// Detach the link (best effort, bounded).
-    #[allow(dead_code)] // callers arrive with the operations (Task 12)
     pub(crate) async fn close(self) {
         if tokio::time::timeout(CLOSE_TIMEOUT, self.sender.close())
             .await

@@ -162,9 +162,8 @@ fn scheduled_skip(kind: JobKind) -> ItemOutcome {
 }
 
 /// Resubmit the messages `seqs` (what `resolve_selection` returned) as `JobKind::Resubmit`.
-/// The brief's entry point (the tests use it); the `Operator` goes through [`run_as`] with its
-/// kind.
-#[allow(dead_code)]
+/// The tests' entry point; the `Operator` goes through [`run_as`] with its kind.
+#[cfg(test)]
 pub(crate) async fn run(
     plane: &mut dyn MessagingBackend,
     spec: &ResubmitSpec,

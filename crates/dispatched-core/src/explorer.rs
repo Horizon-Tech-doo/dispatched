@@ -361,7 +361,6 @@ impl Explorer {
     }
 
     /// The message plane over the cached connection (see [`ExplorerPlane`]).
-    #[allow(dead_code)] // callers arrive with the operations (Task 12)
     pub(crate) fn plane(&self) -> ExplorerPlane<'_> {
         ExplorerPlane(self)
     }
@@ -692,7 +691,6 @@ pub fn retry_after(err: &Error, attempt: u32) -> bool {
 }
 
 /// A message-plane call, for the retry policy.
-#[allow(dead_code)] // callers arrive with the operations (Task 12)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PlaneOp {
     /// Attach a sender link.
@@ -708,7 +706,6 @@ pub(crate) enum PlaneOp {
 /// Whether `op` may run once more on a fresh connection.
 /// Only opening a link (no broker side effect) is retried; a mutation that failed on a broken
 /// connection is reported, never repeated.
-#[allow(dead_code)] // callers arrive with the operations (Task 12)
 pub(crate) fn retry_open_only(op: PlaneOp) -> bool {
     match op {
         PlaneOp::OpenSender | PlaneOp::OpenReceiver => true,
@@ -971,9 +968,12 @@ mod tests {
 
     fn assert_send<T: Send>(_: &T) {}
 
+    // Naming the compile-time checks keeps them built (and not dead code).
+    const _: fn(&Explorer, &EntityPath, &PeekOptions) = browse_futures_are_send;
+    const _: fn(&Explorer) = the_plane_is_an_object_safe_backend;
+
     /// Compile-time check: the browse futures can run on a multi-threaded runtime (Tauri
     /// commands require it). Never called; nothing touches the network.
-    #[allow(dead_code)]
     fn browse_futures_are_send(e: &Explorer, p: &EntityPath, o: &PeekOptions) {
         assert_send(&e.peek_tail(p, PeekView::Active, o));
         assert_send(&e.peek_message(p, PeekView::Active, 1, Some("s")));
@@ -1343,7 +1343,6 @@ mod tests {
 
     /// Compile-time check: the plane is a `MessagingBackend` the jobs can take as a trait
     /// object. Never called.
-    #[allow(dead_code)]
     fn the_plane_is_an_object_safe_backend(e: &Explorer) {
         let mut plane = e.plane();
         let _: &mut dyn MessagingBackend = &mut plane;

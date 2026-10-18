@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// Largest page a query may ask for.
 pub const MAX_QUERY_LIMIT: u32 = 10_000;
@@ -178,7 +178,63 @@ impl ActivityLog {
         };
         log.migrate()?;
         log.prune(limits)?;
+        log.mark_interrupted()?;
         Ok(log)
+    }
+
+    /// Finish every started entry that has no finished one and whose process has ended (a
+    /// second Ctrl-C, a kill or a crash), as `cancelled` ("interrupted before it finished"),
+    /// so the log never shows an operation as still pending forever. An entry whose process is
+    /// still running (this one included) is left alone; one from before pids were recorded is
+    /// finished once it is a day old.
+    fn mark_interrupted(&self) -> Result<()> {
+        let started = enum_text(Phase::Started)?;
+        let finished = enum_text(Phase::Finished)?;
+        let cutoff = stored_at(OffsetDateTime::now_utc() - time::Duration::days(1))?;
+        let me = std::process::id();
+        let conn = self.conn.lock().expect("activity db poisoned");
+        let open: Vec<(i64, String, Option<i64>)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, at, pid FROM activity s WHERE phase = ?1 AND NOT EXISTS \
+                     (SELECT 1 FROM activity f WHERE f.op_id = s.op_id AND f.phase = ?2)",
+                )
+                .map_err(|e| self.err(e))?;
+            let rows = stmt
+                .query_map(params![started, finished], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })
+                .map_err(|e| self.err(e))?;
+            rows.collect::<std::result::Result<_, _>>()
+                .map_err(|e| self.err(e))?
+        };
+        let now = stored_at(OffsetDateTime::now_utc())?;
+        for (id, at, pid) in open {
+            let ended = match pid.and_then(|p| u32::try_from(p).ok()) {
+                Some(pid) => pid != me && !process_alive(pid),
+                None => at < cutoff,
+            };
+            if !ended {
+                continue;
+            }
+            conn.execute(
+                "INSERT INTO activity (op_id, at, origin, profile, entity, action, kind, phase, \
+                    outcome, count, summary, error, note, pid) \
+                 SELECT op_id, ?2, origin, profile, entity, action, kind, ?3, ?4, count, \
+                    summary, ?5, ?6, ?7 FROM activity WHERE id = ?1",
+                params![
+                    id,
+                    now,
+                    finished,
+                    enum_text(Outcome::Cancelled)?,
+                    "interrupted before it finished",
+                    "its process ended first; found when the activity log was next opened",
+                    me,
+                ],
+            )
+            .map_err(|e| self.err(e))?;
+        }
+        Ok(())
     }
 
     /// In-memory log (tests).
@@ -242,6 +298,15 @@ impl ActivityLog {
             tx.execute_batch(
                 "ALTER TABLE activity ADD COLUMN note TEXT;
                 PRAGMA user_version = 2;",
+            )
+            .map_err(|e| self.err(e))?;
+        }
+        if version < 3 {
+            // The writing process, so an entry left pending by one that ended can be told
+            // from a job another process is still running.
+            tx.execute_batch(
+                "ALTER TABLE activity ADD COLUMN pid INTEGER;
+                PRAGMA user_version = 3;",
             )
             .map_err(|e| self.err(e))?;
         }
@@ -371,15 +436,49 @@ impl ActivityLog {
     }
 }
 
+/// Whether process `pid` is still running. Unknown counts as running, so a pending entry is
+/// never finished while its job might still go on. Asked with `kill -0` (signal 0 sends
+/// nothing), only when the log holds an unfinished entry.
+#[cfg(unix)]
+fn process_alive(pid: u32) -> bool {
+    let checked = std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output();
+    match checked {
+        Ok(out) if out.status.success() => true,
+        // A process owned by another user exists too.
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr).to_ascii_lowercase();
+            !(err.contains("no such process") || err.contains("no such pid"))
+        }
+        Err(_) => true,
+    }
+}
+
+#[cfg(not(unix))]
+fn process_alive(_pid: u32) -> bool {
+    true
+}
+
 impl Audit for ActivityLog {
     fn record(&self, entry: &ActivityEntry) -> Result<i64> {
+        self.insert(entry, std::process::id())
+    }
+}
+
+impl ActivityLog {
+    /// Write `entry` as written by process `pid`.
+    fn insert(&self, entry: &ActivityEntry, pid: u32) -> Result<i64> {
         let at = stored_at(entry.at)?;
         let kind = serde_json::to_string(&entry.kind).expect("OpKind serializes");
         let conn = self.conn.lock().expect("activity db poisoned");
         conn.execute(
             "INSERT INTO activity (op_id, at, origin, profile, entity, action, kind, phase, \
-                outcome, count, succeeded, failed, skipped, summary, error, note) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                outcome, count, succeeded, failed, skipped, summary, error, note, pid) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 plain(&entry.op_id),
                 at,
@@ -397,6 +496,7 @@ impl Audit for ActivityLog {
                 bounded(&entry.summary),
                 entry.error.as_deref().map(bounded),
                 entry.note.as_deref().map(bounded),
+                pid,
             ],
         )
         .map_err(|e| self.err(e))?;
@@ -549,7 +649,7 @@ fn bounded(s: &str) -> String {
 
 /// Defense in depth: callers must never pass secrets, but if one slips in
 /// (a broker error echoing a connection string, say) it is not persisted.
-pub(crate) fn redact(s: &str) -> String {
+pub fn redact(s: &str) -> String {
     static PATTERNS: std::sync::OnceLock<Vec<regex::Regex>> = std::sync::OnceLock::new();
     let patterns = PATTERNS.get_or_init(|| {
         [
@@ -611,6 +711,78 @@ mod tests {
             error: None,
             note: None,
         }
+    }
+
+    /// The pid of a process that has exited.
+    fn dead_pid() -> u32 {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    }
+
+    #[test]
+    fn an_entry_left_pending_by_a_process_that_ended_is_marked_interrupted_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("activity.db");
+        {
+            let log = ActivityLog::open(&path).unwrap();
+            log.insert(
+                &entry("op-gone", Phase::Started, Outcome::Pending),
+                dead_pid(),
+            )
+            .unwrap();
+            // This process is still running its job: left alone.
+            log.record(&entry("op-mine", Phase::Started, Outcome::Pending))
+                .unwrap();
+            // Another live process (pid 1 always runs): left alone.
+            log.insert(&entry("op-live", Phase::Started, Outcome::Pending), 1)
+                .unwrap();
+            // Finished: nothing to do.
+            log.insert(
+                &entry("op-done", Phase::Started, Outcome::Pending),
+                dead_pid(),
+            )
+            .unwrap();
+            log.insert(
+                &entry("op-done", Phase::Finished, Outcome::Succeeded),
+                dead_pid(),
+            )
+            .unwrap();
+        }
+        let log = ActivityLog::open(&path).unwrap();
+        let of = |op: &str| {
+            log.list(&ActivityQuery {
+                op_id: Some(op.into()),
+                ..Default::default()
+            })
+            .unwrap()
+        };
+        let gone = of("op-gone");
+        assert_eq!(gone.len(), 2, "{gone:?}");
+        assert_eq!(gone[0].phase, Phase::Finished);
+        assert_eq!(gone[0].outcome, Outcome::Cancelled);
+        assert_eq!(
+            gone[0].error.as_deref(),
+            Some("interrupted before it finished")
+        );
+        assert_eq!(gone[0].summary, gone[1].summary);
+        for op in ["op-mine", "op-live"] {
+            assert_eq!(of(op).len(), 1, "{op} still runs");
+        }
+        assert_eq!(of("op-done").len(), 2);
+        drop(log);
+        // Opening again marks nothing twice.
+        let log = ActivityLog::open(&path).unwrap();
+        assert_eq!(
+            log.list(&ActivityQuery {
+                op_id: Some("op-gone".into()),
+                ..Default::default()
+            })
+            .unwrap()
+            .len(),
+            2
+        );
     }
 
     #[test]

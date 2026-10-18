@@ -934,9 +934,11 @@ mod tests {
 
     fn assert_send<T: Send>(_: &T) {}
 
+    // Naming the compile-time check keeps it built (and not dead code).
+    const _: fn(&Operator, &EntityPath, &CancellationToken) = operator_futures_are_send;
+
     /// Compile-time check: the operator's futures can run on a multi-threaded runtime.
     /// Never called; nothing touches the network.
-    #[allow(dead_code)]
     fn operator_futures_are_send(o: &Operator, e: &EntityPath, c: &CancellationToken) {
         assert_send(&o.send(three_texts(), &NoProgress, c));
         assert_send(&o.cancel_scheduled(e, &[1], &NoProgress, c));

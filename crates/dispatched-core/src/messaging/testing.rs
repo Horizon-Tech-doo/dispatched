@@ -1,7 +1,9 @@
-//! Seeding helpers for integration tests. NOT a product API: real send,
-//! receive and settle (with policy confirmation) arrive in M2.
+//! Seeding, draining and probing helpers for the emulator gates (feature `test-support`).
+//! NOT a product API: they send, receive and settle without the safety gate. Products go
+//! through `ops::Operator`, whose every mutation is confirmed and audited.
 
-use super::connection::ServiceBusConnection;
+/// The raw connection, for the emulator gates only (it can mutate without the gate).
+pub use super::connection::ServiceBusConnection;
 use super::message::{PeekedMessage, PropValue};
 use super::receiver::{AmqpReceiver, LockToken, ReceivedMessage, ReceiverSpec, Settlement};
 use crate::{Error, Result};

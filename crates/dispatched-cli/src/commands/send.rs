@@ -773,6 +773,7 @@ mod tests {
             cancelled: false,
             items,
             notes: Vec::new(),
+            not_attempted: 0,
         }
     }
 

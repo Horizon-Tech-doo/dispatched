@@ -240,6 +240,7 @@ fn record_removed(
     removed: Vec<ReceivedMessage>,
 ) {
     for m in removed {
+        run.received(&m.message);
         run.item(item(
             address,
             m.message.sequence_number,
@@ -383,6 +384,7 @@ async fn record(
                 "a peek-lock delivery came without a lock token".into(),
             )),
         };
+        run.received(&m.message);
         run.item(item(
             address,
             m.message.sequence_number,
@@ -591,6 +593,31 @@ mod tests {
         assert_eq!(out.messages.len(), 3);
         assert_eq!(out.report.succeeded(), 3);
         assert!(out.report.notes.is_empty(), "{:?}", out.report.notes);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn each_received_message_is_emitted_in_full_as_it_is_recorded() {
+        let b = FakeBroker::default();
+        b.add("q", FakeMsg::active("one"));
+        b.add_at_close("q", FakeMsg::active("late"));
+        let events = crate::jobs::RecordingProgress::default();
+        receive::run(
+            &mut b.clone(),
+            &recv("q", 5, ReceiveAction::Delete),
+            &events,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let bodies: Vec<String> = events
+            .events()
+            .into_iter()
+            .filter_map(|e| match e {
+                crate::jobs::JobEvent::Received(m) => m.body.as_text(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bodies, ["one", "late"], "the close's messages too");
     }
 
     #[tokio::test(start_paused = true)]
