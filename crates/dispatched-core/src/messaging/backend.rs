@@ -12,9 +12,9 @@ use super::outgoing::OutgoingMessage;
 use super::receiver::{AmqpReceiver, LockToken, ReceivedMessage, ReceiverSpec, Settlement};
 use super::scan::PeekSource;
 use super::sender::AmqpSender;
-use crate::Result;
 use crate::mgmt::EntityCounts;
 use crate::namespace::EntityPath;
+use crate::{Error, Result};
 use async_trait::async_trait;
 use std::time::Duration;
 use time::OffsetDateTime;
@@ -91,6 +91,9 @@ pub(crate) trait LockReceiver: Send {
     fn drain_shortfall(&self) -> u32;
     /// Messages taken off the link but not yet returned.
     fn buffered(&self) -> usize;
+    /// A failure the last receive held back while it returned what it had taken (the next
+    /// receive would report it); taking it clears it.
+    fn take_error(&mut self) -> Option<Error>;
     /// Settle a peek-lock message; a lost lock is `LockLost`.
     async fn settle(&mut self, token: LockToken, how: &Settlement) -> Result<()>;
     /// Unlock a held message without raising its delivery count.
@@ -142,6 +145,9 @@ impl LockReceiver for AmqpReceiver {
     }
     fn buffered(&self) -> usize {
         AmqpReceiver::buffered(self)
+    }
+    fn take_error(&mut self) -> Option<Error> {
+        AmqpReceiver::take_error(self)
     }
     async fn settle(&mut self, token: LockToken, how: &Settlement) -> Result<()> {
         AmqpReceiver::settle(self, token, how).await

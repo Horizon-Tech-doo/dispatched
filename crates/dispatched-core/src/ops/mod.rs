@@ -107,8 +107,9 @@ impl Operator {
         progress: &dyn Progress,
         cancel: &CancellationToken,
     ) -> Result<JobReport> {
-        let target = Target::new(entity.clone(), SubQueue::Active);
-        let op = Operation::cancel_scheduled(target, seqs.len() as u64);
+        // Refused before the confirmation: scheduled messages live on the queue or topic.
+        let target = Target::new(send_target(&entity.base())?, SubQueue::Active);
+        let op = Operation::cancel_scheduled(target, send::distinct(seqs).len() as u64);
         gated(&self.gate, &op, || {
             let explorer = self.explorer.clone();
             let address = entity.base();
@@ -158,7 +159,8 @@ impl Operator {
         cancel: &CancellationToken,
     ) -> Result<JobReport> {
         let target = Target::new(entity.clone(), sub_queue);
-        let op = Operation::settle_deferred(target, seqs.len() as u64, settle_verb(&how));
+        let n = send::distinct(seqs).len() as u64;
+        let op = Operation::settle_deferred(target, n, settle_verb(&how));
         gated(&self.gate, &op, || {
             let explorer = self.explorer.clone();
             let address = entity.address(sub_queue);

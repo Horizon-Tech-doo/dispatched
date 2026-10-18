@@ -2,6 +2,7 @@
 
 use super::failed;
 use super::send::distinct;
+use crate::diagnostics::error_kind;
 use crate::jobs::{ItemOutcome, ItemResult, JobKind, JobReport, JobRun, NotReached, Progress};
 use crate::messaging::backend::{LockReceiver, MessagingBackend};
 use crate::messaging::sender::{chunks, copy_error};
@@ -64,6 +65,19 @@ impl Audited for ReceiveOutcome {
     }
 }
 
+/// The report note for credit a receive-and-delete link left unaccounted when a receive
+/// stopped early (cancelled or failed) instead of at the wait.
+pub(crate) fn stopped_drain_note(n: u32) -> String {
+    if n == 1 {
+        "up to 1 more message may have been removed after the receive stopped and is not in this result".into()
+    } else {
+        format!(
+            "up to {} more messages may have been removed after the receive stopped and are not in this result",
+            count_text(u64::from(n))
+        )
+    }
+}
+
 /// The report note for credit a receive-and-delete link left unaccounted after the wait.
 pub(crate) fn drain_note(n: u32) -> String {
     if n == 1 {
@@ -109,9 +123,11 @@ struct Ended {
 }
 
 /// Run a receive job. Peek-lock takes one message per call and settles it at once, so no
-/// lock waits; receive-and-delete asks for everything still allowed. Both stop at `max`,
-/// when a call ends at `wait` with less than it asked for, or on cancel. The receiver is
-/// always closed; receive-and-delete messages it removed without returning are noted.
+/// lock waits; receive-and-delete asks for everything still allowed. `wait` is an idle
+/// timeout: both stop at `max`, on cancel, on a call that returns nothing within `wait`, or on
+/// one that ends with credit unaccounted. The receiver is always closed; receive-and-delete
+/// messages it removed without returning are noted. A link failure after some messages were
+/// received (or removed) keeps them and adds a failed item, so the job reads as incomplete.
 pub(crate) async fn run<B: MessagingBackend + ?Sized>(
     b: &mut B,
     req: &ReceiveRequest,
@@ -153,15 +169,32 @@ pub(crate) async fn run<B: MessagingBackend + ?Sized>(
     let mut messages = Vec::new();
     let ended = take_all(rx.as_mut(), req, &address, &mut run, &mut messages, cancel).await;
     let unreturned = rx.close().await;
+    let stopped = ended.cancelled || ended.error.is_some();
     if let Some(e) = ended.error {
         let nothing_lost = !delete || (ended.shortfall == 0 && unreturned == 0);
         if messages.is_empty() && nothing_lost {
             return Err(e);
         }
-        run.note(format!("the receive stopped early: {e}"));
+        let reason = format!("the receive stopped early: {e}");
+        run.item(ItemResult {
+            sequence_number: None,
+            message_id: None,
+            session_id: req.session.clone(),
+            entity: address.clone(),
+            new_sequence_number: None,
+            outcome: ItemOutcome::Failed {
+                kind: error_kind(&e),
+                reason: reason.clone(),
+            },
+        });
+        run.note(reason);
     }
     if delete && ended.shortfall > 0 {
-        run.note(drain_note(ended.shortfall));
+        run.note(if stopped {
+            stopped_drain_note(ended.shortfall)
+        } else {
+            drain_note(ended.shortfall)
+        });
     }
     if unreturned > 0 {
         run.note(unreturned_note(unreturned));
@@ -192,6 +225,8 @@ async fn take_all(
             break;
         }
         let ask = match req.action {
+            // One lock at a time: a settle that hangs lasts about as long as a lock, so
+            // prefetched messages would lose theirs. Do not raise this.
             ReceiveAction::Settle(_) => 1,
             ReceiveAction::Delete => req.max - got,
         };
@@ -225,10 +260,14 @@ async fn take_all(
         let n = u32::try_from(batch.len()).unwrap_or(u32::MAX);
         record(rx, req, address, run, messages, batch).await;
         got = got.saturating_add(n);
-        if n < ask {
-            // The call ended at `wait` with less than it asked for.
+        if n == 0 || ended.shortfall > 0 {
+            // `wait` passed without a delivery, or the drain left credit unaccounted.
             break;
         }
+    }
+    if ended.error.is_none() {
+        // A failure the receiver held back while returning what it had taken.
+        ended.error = rx.take_error();
     }
     ended
 }
@@ -533,7 +572,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_cancelled_receive_releases_its_locks_and_says_cancelled() {
+    async fn a_cancelled_peek_lock_receive_closes_and_says_cancelled() {
         let b = FakeBroker::default().with_receive_delay(Duration::from_secs(10));
         b.add("q", FakeMsg::active("x"));
         let cancel = CancellationToken::new();
@@ -578,10 +617,105 @@ mod tests {
         assert_eq!(b.all("q").len(), 1);
         assert!(b.credit_granted_max() <= 2);
         assert!(
-            out.report.notes.contains(&drain_note(1)),
+            out.report.notes.contains(&stopped_drain_note(1)),
             "credit was out when it stopped: {:?}",
             out.report.notes
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_is_an_idle_timeout_so_a_steady_trickle_is_all_received() {
+        // A message arrives every second; the wait is 1.5 s. The whole run takes longer than
+        // the wait, but no gap is as long as it, so every message is received.
+        for action in [
+            ReceiveAction::Delete,
+            ReceiveAction::Settle(Settlement::Complete),
+        ] {
+            let b = FakeBroker::default().with_receive_delay(Duration::from_millis(1));
+            let feed = b.clone();
+            tokio::spawn(async move {
+                for _ in 0..3 {
+                    feed.add("q", FakeMsg::active("x"));
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            });
+            let mut req = recv("q", 5, action.clone());
+            req.wait = Duration::from_millis(1_500);
+            let out = receive::run(&mut b.clone(), &req, &NoProgress, &CancellationToken::new())
+                .await
+                .unwrap();
+            assert_eq!(out.messages.len(), 3, "{action:?}");
+            assert!(b.all("q").is_empty());
+            assert!(out.report.notes.is_empty(), "{:?}", out.report.notes);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn messages_removed_but_never_returned_are_noted_and_not_an_error() {
+        // One message is taken, then the receive is cancelled and getting the buffered
+        // message back fails: it stays on the receiver, and `close` counts it.
+        let b = FakeBroker::default().with_receive_delay(Duration::from_secs(1));
+        for _ in 0..2 {
+            b.add("q", FakeMsg::active("x"));
+        }
+        let cancel = CancellationToken::new();
+        let stop = cancel.clone();
+        let fail = b.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1_500)).await;
+            fail.fail_next(FakeOp::Receive, Error::Timeout("receive".into()));
+            stop.cancel();
+        });
+        let mut req = recv("q", 2, ReceiveAction::Delete);
+        req.wait = Duration::from_secs(60);
+        let out = receive::run(&mut b.clone(), &req, &NoProgress, &cancel)
+            .await
+            .expect("something was removed: a report, not an error");
+        assert!(out.report.cancelled);
+        assert!(out.messages.is_empty());
+        assert_eq!(b.all("q").len(), 1);
+        let notes = &out.report.notes;
+        assert!(notes.contains(&unreturned_note(1)), "{notes:?}");
+        assert!(notes.contains(&stopped_drain_note(1)), "{notes:?}");
+        assert!(
+            notes
+                .iter()
+                .any(|n| n == "the receive stopped early: timed out: receive"),
+            "{notes:?}"
+        );
+        assert_eq!(out.report.failed(), 1, "the job reads as incomplete");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_link_failure_held_back_by_the_receiver_is_reported_as_failed() {
+        // The link fails after two deliveries: the receiver returns them and holds the error
+        // back. The job keeps the two and records the failure.
+        let b = FakeBroker::default();
+        for _ in 0..3 {
+            b.add("q", FakeMsg::active("x"));
+        }
+        b.fail_receive_after(2, Error::Protocol("link detached".into()));
+        let out = receive::run(
+            &mut b.clone(),
+            &recv("q", 5, ReceiveAction::Delete),
+            &NoProgress,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.messages.len(), 2);
+        assert_eq!((out.report.succeeded(), out.report.failed()), (2, 1));
+        assert_ne!(out.report.outcome(), crate::activity::Outcome::Succeeded);
+        assert!(matches!(
+            &out.report.items[2].outcome,
+            ItemOutcome::Failed { reason, .. } if reason == "the receive stopped early: protocol error: link detached"
+        ));
+        assert!(
+            out.report.notes.contains(&stopped_drain_note(3)),
+            "{:?}",
+            out.report.notes
+        );
+        assert_eq!(b.all("q").len(), 1);
     }
 
     #[tokio::test(start_paused = true)]
@@ -712,6 +846,10 @@ mod tests {
 
     #[test]
     fn notes_count_with_separators_and_singulars() {
+        assert_eq!(
+            stopped_drain_note(2),
+            "up to 2 more messages may have been removed after the receive stopped and are not in this result"
+        );
         assert_eq!(
             drain_note(2),
             "up to 2 more messages may have been removed after the wait and are not in this result"

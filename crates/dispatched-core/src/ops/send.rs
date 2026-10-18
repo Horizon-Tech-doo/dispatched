@@ -4,7 +4,7 @@ use super::failed;
 use crate::jobs::{ItemOutcome, ItemResult, JobKind, JobReport, JobRun, NotReached, Progress};
 use crate::messaging::backend::MessagingBackend;
 use crate::messaging::outgoing::{BodySource, MessageIdSource, OutgoingMessage};
-use crate::messaging::sender::{chunks, copy_error, send_target};
+use crate::messaging::sender::{REQUEST_CHUNK, chunks, copy_error, send_target};
 use crate::messaging::{PeekedMessage, collect_sequences};
 use crate::namespace::PeekView;
 use crate::{Error, Result};
@@ -124,16 +124,7 @@ async fn send_each<B: MessagingBackend + ?Sized>(
                 Err(e) if !attempted => return Err(e),
                 Err(e) => {
                     // The link broke and cannot be opened again: the rest fail with it.
-                    run.item(send_item(entity, Some(&m), failed(&e)));
-                    for rest in index + 1..req.count {
-                        let mut item = send_item(entity, None, failed(&e));
-                        item.message_id = req
-                            .ids
-                            .id_for(rest)
-                            .or_else(|| req.template.message_id.clone());
-                        item.session_id = req.template.session_id.clone();
-                        run.item(item);
-                    }
+                    fail_rest(run, req, entity, index, &e);
                     return Ok(false);
                 }
             },
@@ -170,7 +161,25 @@ async fn close_sender(s: Box<dyn crate::messaging::backend::MessageSender>) {
     s.close().await;
 }
 
-/// Every message through one `send_all` call (pipelined, not atomic).
+/// Messages a batch send passes to one `send_all` call; cancel is checked between slices.
+const BATCH_SLICE: u64 = 1_000;
+
+/// The rest of the messages, from `from`, fail with `e` (a link that cannot be opened again).
+fn fail_rest(run: &mut JobRun<'_>, req: &SendRequest, entity: &str, from: u64, e: &Error) {
+    for rest in from..req.count {
+        let mut item = send_item(entity, None, failed(e));
+        item.message_id = req
+            .ids
+            .id_for(rest)
+            .or_else(|| req.template.message_id.clone());
+        item.session_id = req.template.session_id.clone();
+        run.item(item);
+    }
+}
+
+/// Every message over one sender link, pipelined (not atomic), in slices of [`BATCH_SLICE`]
+/// so a cancel stops between slices and bodies are read per slice. A link failure fails the
+/// rest of its slice; the next slice opens a new link.
 async fn send_batch<B: MessagingBackend + ?Sized>(
     b: &mut B,
     req: &SendRequest,
@@ -178,36 +187,68 @@ async fn send_batch<B: MessagingBackend + ?Sized>(
     run: &mut JobRun<'_>,
     cancel: &CancellationToken,
 ) -> Result<bool> {
-    if cancel.is_cancelled() {
-        return Ok(true);
+    let mut sender = None;
+    let mut attempted = false;
+    let mut start = 0;
+    while start < req.count {
+        if cancel.is_cancelled() {
+            if let Some(s) = sender.take() {
+                close_sender(s).await;
+            }
+            return Ok(true);
+        }
+        let end = (start + BATCH_SLICE).min(req.count);
+        let (messages, mut outcomes) = build_range(req, start, end);
+        let ready: Vec<usize> = (0..messages.len())
+            .filter(|i| outcomes[*i].is_none())
+            .collect();
+        if !ready.is_empty() {
+            let mut link = match sender.take() {
+                Some(s) => s,
+                None => match b.open_sender(entity).await {
+                    Ok(s) => s,
+                    Err(e) if !attempted => return Err(e),
+                    Err(e) => {
+                        fail_rest(run, req, entity, start, &e);
+                        return Ok(false);
+                    }
+                },
+            };
+            attempted = true;
+            let batch: Vec<OutgoingMessage> = ready.iter().map(|i| messages[*i].clone()).collect();
+            let call = link
+                .send_all(&batch, &mut |j, r| {
+                    outcomes[ready[j]] = Some(match r {
+                        Ok(()) => ItemOutcome::Succeeded { detail: None },
+                        Err(e) => failed(&e),
+                    });
+                })
+                .await;
+            fill_unreported(&mut outcomes, &ready, call.as_ref().err());
+            if call.is_err() {
+                close_sender(link).await;
+            } else {
+                sender = Some(link);
+            }
+        }
+        for (m, outcome) in messages.iter().zip(outcomes) {
+            run.item(send_item(entity, Some(m), outcome.expect("filled")));
+        }
+        start = end;
     }
-    let (messages, mut outcomes) = build_all(req);
-    let ready: Vec<usize> = (0..messages.len())
-        .filter(|i| outcomes[*i].is_none())
-        .collect();
-    let batch: Vec<OutgoingMessage> = ready.iter().map(|i| messages[*i].clone()).collect();
-    if !batch.is_empty() {
-        let mut link = b.open_sender(entity).await?;
-        let call = link
-            .send_all(&batch, &mut |j, r| {
-                outcomes[ready[j]] = Some(match r {
-                    Ok(()) => ItemOutcome::Succeeded { detail: None },
-                    Err(e) => failed(&e),
-                });
-            })
-            .await;
-        link.close().await;
-        fill_unreported(&mut outcomes, &ready, call.as_ref().err());
-    }
-    for (m, outcome) in messages.iter().zip(outcomes) {
-        run.item(send_item(entity, Some(m), outcome.expect("filled")));
+    if let Some(s) = sender {
+        close_sender(s).await;
     }
     Ok(false)
 }
 
-/// Every message of `req`, with the failure of those that could not be built.
-fn build_all(req: &SendRequest) -> (Vec<OutgoingMessage>, Vec<Option<ItemOutcome>>) {
-    (0..req.count)
+/// Messages `start..end` of `req`, with the failure of those that could not be built.
+fn build_range(
+    req: &SendRequest,
+    start: u64,
+    end: u64,
+) -> (Vec<OutgoingMessage>, Vec<Option<ItemOutcome>>) {
+    (start..end)
         .map(|i| {
             let (m, unreadable) = build(req, i);
             (m, unreadable.as_ref().map(failed))
@@ -228,8 +269,9 @@ fn fill_unreported(outcomes: &mut [Option<ItemOutcome>], wanted: &[usize], err: 
     }
 }
 
-/// Schedule every message for `at`, one `schedule` call per chunk; a failed chunk fails only
-/// its messages. Returns whether it was cancelled.
+/// Schedule every message for `at`, one `schedule` call per chunk of [`REQUEST_CHUNK`]
+/// (bodies read per chunk); a failed chunk fails only its messages. Returns whether it was
+/// cancelled.
 async fn schedule_all<B: MessagingBackend + ?Sized>(
     b: &mut B,
     req: &SendRequest,
@@ -238,17 +280,17 @@ async fn schedule_all<B: MessagingBackend + ?Sized>(
     run: &mut JobRun<'_>,
     cancel: &CancellationToken,
 ) -> bool {
-    let (messages, outcomes) = build_all(req);
-    let mut cancelled = false;
-    let mut offset = 0;
-    for chunk in chunks(&messages) {
-        let start = offset;
-        offset += chunk.len();
+    let mut start = 0;
+    while start < req.count {
         if cancel.is_cancelled() {
-            cancelled = true;
-            break;
+            return true;
         }
-        let ready: Vec<usize> = (start..offset).filter(|i| outcomes[*i].is_none()).collect();
+        let end = (start + REQUEST_CHUNK as u64).min(req.count);
+        let (messages, outcomes) = build_range(req, start, end);
+        start = end;
+        let ready: Vec<usize> = (0..messages.len())
+            .filter(|i| outcomes[*i].is_none())
+            .collect();
         let batch: Vec<OutgoingMessage> = ready.iter().map(|i| messages[*i].clone()).collect();
         let mut got: Vec<Option<Result<i64>>> = (0..batch.len()).map(|_| None).collect();
         let call = if batch.is_empty() {
@@ -257,19 +299,18 @@ async fn schedule_all<B: MessagingBackend + ?Sized>(
             b.schedule(entity, &batch, at, &mut |j, r| got[j] = Some(r))
                 .await
         };
-        let mut by_index: Vec<Option<Result<i64>>> = (start..offset).map(|_| None).collect();
+        let mut by_index: Vec<Option<Result<i64>>> = (0..messages.len()).map(|_| None).collect();
         for (j, r) in got.into_iter().enumerate() {
-            by_index[ready[j] - start] = Some(r.unwrap_or_else(|| {
+            by_index[ready[j]] = Some(r.unwrap_or_else(|| {
                 Err(call.as_ref().err().map_or_else(
                     || Error::Protocol("the broker reported no sequence number".into()),
                     copy_error,
                 ))
             }));
         }
-        for (k, i) in (start..offset).enumerate() {
-            let m = &messages[i];
+        for (k, m) in messages.iter().enumerate() {
             let mut item = send_item(entity, Some(m), ItemOutcome::Succeeded { detail: None });
-            match (&outcomes[i], by_index[k].take()) {
+            match (&outcomes[k], by_index[k].take()) {
                 (Some(o), _) => item.outcome = o.clone(),
                 (None, Some(Ok(seq))) => item.new_sequence_number = Some(seq),
                 (None, Some(Err(e))) => item.outcome = failed(&e),
@@ -282,7 +323,7 @@ async fn schedule_all<B: MessagingBackend + ?Sized>(
             run.item(item);
         }
     }
-    cancelled
+    false
 }
 
 /// The item for a sequence-number job.
@@ -457,6 +498,25 @@ mod tests {
             .unwrap();
         assert_eq!((r.succeeded(), r.failed()), (2, 1));
         assert_eq!(b.sent("q").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_batch_send_goes_in_slices_and_a_broken_link_fails_only_its_slice() {
+        let b = FakeBroker::default();
+        // A connection-level error breaks the link: the rest of the first slice fails with it,
+        // and the next slice goes over a new link.
+        b.fail_next(FakeOp::Send, Error::Protocol("link detached".into()));
+        let req = SendRequest {
+            batch: true,
+            count: 1_500,
+            ..three_texts()
+        };
+        let r = send::run(&mut b.clone(), &req, &NoProgress, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!((r.succeeded(), r.failed()), (500, 1_000));
+        assert_eq!(r.items.len(), 1_500);
+        assert_eq!(b.sent("q").len(), 500);
     }
 
     #[tokio::test]

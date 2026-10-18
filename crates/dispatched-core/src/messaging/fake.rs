@@ -131,6 +131,8 @@ struct State {
     session_states: HashMap<(String, String), Vec<u8>>,
     late: u32,
     stall: u32,
+    /// After this many more deliveries a receive fails, holding the error back (as `Intake`).
+    fail_after: Option<(u32, Error)>,
     credit_max: u32,
     renewals: u32,
     receivers: u64,
@@ -155,6 +157,7 @@ impl Default for State {
             session_states: HashMap::new(),
             late: 0,
             stall: 0,
+            fail_after: None,
             credit_max: 0,
             renewals: 0,
             receivers: 0,
@@ -525,6 +528,12 @@ impl FakeBroker {
         self.with(|s| s.late = n);
     }
 
+    /// After `k` more deliveries, a receive fails with `e` the way the real receiver does:
+    /// the call returns what it took and holds `e` back for the next call (or `take_error`).
+    pub(crate) fn fail_receive_after(&self, k: u32, e: Error) {
+        self.with(|s| s.fail_after = Some((k, e)));
+    }
+
     /// The next drain ends by the grace time with `n` credit unaccounted. It waits
     /// `DRAIN_GRACE` on the tokio clock: pause the clock in tests that use it.
     pub(crate) fn stall_drain(&self, n: u32) {
@@ -692,6 +701,7 @@ impl MessagingBackend for FakeBroker {
             session,
             tokens: HashSet::new(),
             buffer: VecDeque::new(),
+            pending: None,
             shortfall: 0,
         })))
     }
@@ -814,6 +824,8 @@ struct FakeReceiver {
     tokens: HashSet<LockToken>,
     buffer: VecDeque<ReceivedMessage>,
     shortfall: u32,
+    /// A failure held back while buffered messages were returned (as `Intake::pending_error`).
+    pending: Option<Error>,
 }
 
 impl FakeReceiver {
@@ -830,6 +842,21 @@ impl FakeReceiver {
             }
             None => false,
         }
+    }
+
+    /// Count a delivery against `fail_receive_after`; whether the receive fails now.
+    fn tripped(&mut self) -> bool {
+        let e = self.broker.with(|s| match s.fail_after.take() {
+            Some((k, e)) if k <= 1 => Some(e),
+            Some((k, e)) => {
+                s.fail_after = Some((k - 1, e));
+                None
+            }
+            None => None,
+        });
+        let hit = e.is_some();
+        self.pending = e.or(self.pending.take());
+        hit
     }
 
     fn forget(&mut self, token: LockToken) {
@@ -861,6 +888,13 @@ impl LockReceiver for FakeReceiver {
 
     async fn receive(&mut self, max: u32, wait: Duration) -> Result<Vec<ReceivedMessage>> {
         self.broker.fault(FakeOp::Receive)?;
+        if let Some(e) = self.pending.take() {
+            if self.buffer.is_empty() {
+                return Err(e);
+            }
+            self.pending = Some(e);
+            return Ok(self.take(max));
+        }
         let buffered = u32::try_from(self.buffer.len()).unwrap_or(u32::MAX);
         let mut outstanding = max.saturating_sub(buffered);
         self.broker
@@ -880,6 +914,9 @@ impl LockReceiver for FakeReceiver {
                 if self.take_one() {
                     outstanding -= 1;
                     self.shortfall = outstanding;
+                    if self.tripped() {
+                        return Ok(self.take(max));
+                    }
                     continue;
                 }
             }
@@ -912,6 +949,10 @@ impl LockReceiver for FakeReceiver {
 
     fn buffered(&self) -> usize {
         self.buffer.len()
+    }
+
+    fn take_error(&mut self) -> Option<Error> {
+        self.pending.take()
     }
 
     async fn settle(&mut self, token: LockToken, how: &Settlement) -> Result<()> {

@@ -691,6 +691,13 @@ impl AmqpReceiver {
         self.intake.ready.len()
     }
 
+    /// A failure the last `receive` held back while returning what it had
+    /// taken (see [`Intake::stop`]); taking it clears it, so the next
+    /// `receive` does not report it again.
+    pub(crate) fn take_error(&mut self) -> Option<Error> {
+        self.intake.pending_error.take()
+    }
+
     /// Settle a peek-lock message through `update-disposition` (the only
     /// settlement answer fe2o3 surfaces). A lost lock is `LockLost`. Any
     /// other failure (timeout, network) leaves the outcome unknown: the
