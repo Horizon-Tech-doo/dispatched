@@ -18,6 +18,7 @@ pub mod jobs;
 pub mod messaging;
 pub mod mgmt;
 pub mod namespace;
+pub mod ops;
 pub mod paths;
 pub mod profiles;
 pub mod safety;
@@ -51,6 +52,7 @@ pub use mgmt::{
 pub use namespace::{
     EmulatorPorts, EntityPath, Namespace, PeekView, ProxyConfig, SubQueue, Transport,
 };
+pub use ops::{Operator, ReceiveAction, ReceiveOutcome, ReceiveRequest, SendRequest};
 pub use safety::{
     Actor, CountEstimate, Mutation, OpKind, Operation, ProfileRef, SettleVerb, Target, count_text,
 };

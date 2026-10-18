@@ -10,10 +10,6 @@
 //!   reports the drain finishing, so after it the receiver reads until its
 //!   credit is spent or [`DRAIN_GRACE`] passes without a delivery.
 
-// The operations (Task 12 on) are the callers of most of this; until then only
-// the emulator probe (test-support) uses it.
-#![allow(dead_code)]
-
 use super::lockops::{
     self, DispositionStatus, GET_SESSION_STATE, RECEIVE_BY_SEQUENCE, RENEW_LOCK,
     RENEW_SESSION_LOCK, SET_SESSION_STATE, UPDATE_DISPOSITION, update_disposition_request,
@@ -189,6 +185,7 @@ impl CreditPlan {
         self.outstanding = self.outstanding.saturating_sub(n);
     }
 
+    #[cfg(test)]
     fn outstanding_max(&self) -> u32 {
         self.outstanding_max
     }
@@ -248,6 +245,7 @@ fn accepted_session(source: Option<&Source>) -> Option<String> {
 }
 
 /// A link-level settlement outcome.
+#[cfg_attr(not(feature = "test-support"), allow(dead_code))] // only the emulator probe settles on the link
 #[derive(Debug)]
 enum LinkOutcome {
     Accepted,
@@ -258,6 +256,7 @@ enum LinkOutcome {
     Rejected(AmqpError),
 }
 
+#[cfg_attr(not(feature = "test-support"), allow(dead_code))] // only the emulator probe settles on the link
 fn outcome_for(how: &Settlement) -> LinkOutcome {
     match how {
         Settlement::Complete => LinkOutcome::Accepted,
@@ -419,6 +418,7 @@ impl Intake {
 
 /// A receiver link with its own management link on the same session.
 pub(crate) struct AmqpReceiver {
+    #[allow(dead_code)] // read by `address()`, which no operation needs yet
     address: String,
     mode: ReceiveMode,
     receiver: Receiver,
@@ -527,6 +527,7 @@ impl AmqpReceiver {
     }
 
     /// The entity address.
+    #[allow(dead_code)] // no operation needs it yet
     pub(crate) fn address(&self) -> &str {
         &self.address
     }
@@ -716,6 +717,7 @@ impl AmqpReceiver {
 
     /// Settle over the link (fire-and-forget: no outcome is reported). Only
     /// for callers that ignore the outcome.
+    #[cfg_attr(not(feature = "test-support"), allow(dead_code))] // only the emulator probe settles on the link
     pub(crate) async fn settle_on_link(
         &mut self,
         token: LockToken,

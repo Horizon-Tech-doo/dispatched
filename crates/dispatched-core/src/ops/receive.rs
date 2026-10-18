@@ -1,0 +1,732 @@
+//! Receive (peek-lock and settle, or receive-and-delete) and settling deferred messages.
+
+use super::failed;
+use super::send::distinct;
+use crate::jobs::{ItemOutcome, ItemResult, JobKind, JobReport, JobRun, NotReached, Progress};
+use crate::messaging::backend::{LockReceiver, MessagingBackend};
+use crate::messaging::sender::{chunks, copy_error};
+use crate::messaging::{
+    PeekedMessage, ReceiveMode, ReceivedMessage, ReceiverSpec, SessionChoice, Settlement,
+};
+use crate::namespace::{EntityPath, SubQueue};
+use crate::safety::{AuditFacts, Audited, count_text};
+use crate::{Error, Result};
+use horizon_azure_kit::safety::CancellationToken;
+use serde::Serialize;
+use std::collections::HashMap;
+use std::time::Duration;
+
+/// The most messages one receive may take.
+pub const MAX_RECEIVE: u32 = 5_000;
+
+/// What happens to each received message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReceiveAction {
+    /// Peek-lock, then settle each message this way.
+    Settle(Settlement),
+    /// Receive-and-delete: messages are removed as they are delivered.
+    Delete,
+}
+
+/// What to receive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiveRequest {
+    /// Queue or subscription.
+    pub entity: EntityPath,
+    /// Which sub-queue.
+    pub sub_queue: SubQueue,
+    /// Accept this session (session-enabled entities).
+    pub session: Option<String>,
+    /// At most this many messages (1 to 5,000).
+    pub max: u32,
+    /// Stop when this passes without a delivery.
+    pub wait: Duration,
+    /// Settle or delete.
+    pub action: ReceiveAction,
+}
+
+/// The received messages and the job report.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReceiveOutcome {
+    /// Every message received, in order.
+    pub messages: Vec<PeekedMessage>,
+    /// One item per message.
+    pub report: JobReport,
+}
+
+impl Audited for ReceiveOutcome {
+    fn audit_outcome(&self) -> AuditFacts {
+        self.report.audit_outcome()
+    }
+
+    fn set_op_id(&mut self, op_id: String) {
+        self.report.set_op_id(op_id);
+    }
+}
+
+/// The report note for credit a receive-and-delete link left unaccounted after the wait.
+pub(crate) fn drain_note(n: u32) -> String {
+    if n == 1 {
+        "up to 1 more message may have been removed after the wait and is not in this result".into()
+    } else {
+        format!(
+            "up to {} more messages may have been removed after the wait and are not in this result",
+            count_text(u64::from(n))
+        )
+    }
+}
+
+/// The report note for receive-and-delete messages a closing receiver had taken but not returned.
+pub(crate) fn unreturned_note(n: usize) -> String {
+    if n == 1 {
+        "1 message was removed but is not in this result".into()
+    } else {
+        format!(
+            "{} messages were removed but are not in this result",
+            count_text(n as u64)
+        )
+    }
+}
+
+/// The item for a received or settled message.
+fn item(entity: &str, seq: i64, m: Option<&PeekedMessage>, outcome: ItemOutcome) -> ItemResult {
+    ItemResult {
+        sequence_number: Some(seq),
+        message_id: m.and_then(|m| m.message_id.clone()),
+        session_id: m.and_then(|m| m.session_id.clone()),
+        entity: entity.to_string(),
+        new_sequence_number: None,
+        outcome,
+    }
+}
+
+/// How the receive loop ended.
+struct Ended {
+    cancelled: bool,
+    /// The last receive's unaccounted credit.
+    shortfall: u32,
+    error: Option<Error>,
+}
+
+/// Run a receive job. Peek-lock takes one message per call and settles it at once, so no
+/// lock waits; receive-and-delete asks for everything still allowed. Both stop at `max`,
+/// when a call ends at `wait` with less than it asked for, or on cancel. The receiver is
+/// always closed; receive-and-delete messages it removed without returning are noted.
+pub(crate) async fn run<B: MessagingBackend + ?Sized>(
+    b: &mut B,
+    req: &ReceiveRequest,
+    progress: &dyn Progress,
+    cancel: &CancellationToken,
+) -> Result<ReceiveOutcome> {
+    if req.max == 0 || req.max > MAX_RECEIVE {
+        return Err(Error::Invalid(format!(
+            "receive 1 to {} messages at a time",
+            count_text(u64::from(MAX_RECEIVE))
+        )));
+    }
+    let address = req.entity.address(req.sub_queue);
+    let delete = req.action == ReceiveAction::Delete;
+    let spec = ReceiverSpec {
+        address: address.clone(),
+        mode: if delete {
+            ReceiveMode::ReceiveAndDelete
+        } else {
+            ReceiveMode::PeekLock
+        },
+        session: match &req.session {
+            Some(id) => SessionChoice::Id(id.clone()),
+            None => SessionChoice::None,
+        },
+    };
+    let Some(mut rx) = b.open_receiver(&spec, req.wait).await? else {
+        return Err(Error::Protocol(format!(
+            "no receiver was opened on {address}"
+        )));
+    };
+    let mut run = JobRun::new(
+        JobKind::Receive,
+        address.clone(),
+        None,
+        progress,
+        Some(u64::from(req.max)),
+    );
+    let mut messages = Vec::new();
+    let ended = take_all(rx.as_mut(), req, &address, &mut run, &mut messages, cancel).await;
+    let unreturned = rx.close().await;
+    if let Some(e) = ended.error {
+        let nothing_lost = !delete || (ended.shortfall == 0 && unreturned == 0);
+        if messages.is_empty() && nothing_lost {
+            return Err(e);
+        }
+        run.note(format!("the receive stopped early: {e}"));
+    }
+    if delete && ended.shortfall > 0 {
+        run.note(drain_note(ended.shortfall));
+    }
+    if unreturned > 0 {
+        run.note(unreturned_note(unreturned));
+    }
+    Ok(ReceiveOutcome {
+        messages,
+        report: run.finish(ended.cancelled),
+    })
+}
+
+async fn take_all(
+    rx: &mut dyn LockReceiver,
+    req: &ReceiveRequest,
+    address: &str,
+    run: &mut JobRun<'_>,
+    messages: &mut Vec<PeekedMessage>,
+    cancel: &CancellationToken,
+) -> Ended {
+    let mut ended = Ended {
+        cancelled: false,
+        shortfall: 0,
+        error: None,
+    };
+    let mut got = 0u32;
+    while got < req.max {
+        if cancel.is_cancelled() {
+            ended.cancelled = true;
+            break;
+        }
+        let ask = match req.action {
+            ReceiveAction::Settle(_) => 1,
+            ReceiveAction::Delete => req.max - got,
+        };
+        // `receive` is cancel safe: what it took stays buffered on the receiver.
+        let batch = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => None,
+            r = rx.receive(ask, req.wait) => Some(r),
+        };
+        ended.shortfall = rx.drain_shortfall();
+        let batch = match batch {
+            Some(Ok(batch)) => batch,
+            Some(Err(e)) => {
+                ended.error = Some(e);
+                break;
+            }
+            None => {
+                ended.cancelled = true;
+                if req.action == ReceiveAction::Delete && rx.buffered() > 0 {
+                    // Already removed from the entity: return them rather than lose them.
+                    // Asking for no more than is buffered grants no credit.
+                    let n = u32::try_from(rx.buffered()).unwrap_or(u32::MAX);
+                    match rx.receive(n, Duration::ZERO).await {
+                        Ok(batch) => record(rx, req, address, run, messages, batch).await,
+                        Err(e) => ended.error = Some(e),
+                    }
+                }
+                break;
+            }
+        };
+        let n = u32::try_from(batch.len()).unwrap_or(u32::MAX);
+        record(rx, req, address, run, messages, batch).await;
+        got = got.saturating_add(n);
+        if n < ask {
+            // The call ended at `wait` with less than it asked for.
+            break;
+        }
+    }
+    ended
+}
+
+/// Settle (peek-lock) and record each received message.
+async fn record(
+    rx: &mut dyn LockReceiver,
+    req: &ReceiveRequest,
+    address: &str,
+    run: &mut JobRun<'_>,
+    messages: &mut Vec<PeekedMessage>,
+    batch: Vec<ReceivedMessage>,
+) {
+    for m in batch {
+        let outcome = match (&req.action, m.lock_token) {
+            (ReceiveAction::Delete, _) => ItemOutcome::Succeeded { detail: None },
+            (ReceiveAction::Settle(how), Some(token)) => match rx.settle(token, how).await {
+                Ok(()) => ItemOutcome::Succeeded { detail: None },
+                Err(e) => failed(&e),
+            },
+            (ReceiveAction::Settle(_), None) => failed(&Error::Protocol(
+                "a peek-lock delivery came without a lock token".into(),
+            )),
+        };
+        run.item(item(
+            address,
+            m.message.sequence_number,
+            Some(&m.message),
+            outcome,
+        ));
+        messages.push(m.message);
+    }
+}
+
+/// Receive deferred messages of `address` by sequence number (chunks of 100) and settle each
+/// one with `how`. Numbers the broker does not return are `missing`. Every message received is
+/// settled (received deferred messages are not held, so nothing else would unlock them).
+pub(crate) async fn settle_deferred<B: MessagingBackend + ?Sized>(
+    b: &mut B,
+    address: &str,
+    seqs: &[i64],
+    session: Option<&str>,
+    how: &Settlement,
+    progress: &dyn Progress,
+    cancel: &CancellationToken,
+) -> Result<JobReport> {
+    let seqs = distinct(seqs);
+    let mut run = JobRun::new(
+        JobKind::SettleDeferred,
+        address.to_string(),
+        None,
+        progress,
+        Some(seqs.len() as u64),
+    );
+    if cancel.is_cancelled() {
+        not_reached(&mut run, address, &seqs);
+        return Ok(run.finish(true));
+    }
+    let spec = ReceiverSpec {
+        address: address.to_string(),
+        mode: ReceiveMode::PeekLock,
+        session: match session {
+            Some(id) => SessionChoice::Id(id.to_string()),
+            None => SessionChoice::None,
+        },
+    };
+    let Some(mut rx) = b.open_receiver(&spec, Duration::ZERO).await? else {
+        return Err(Error::Protocol(format!(
+            "no receiver was opened on {address}"
+        )));
+    };
+    let mut cancelled = false;
+    let mut done = 0;
+    for chunk in chunks(&seqs) {
+        if cancel.is_cancelled() {
+            not_reached(&mut run, address, &seqs[done..]);
+            cancelled = true;
+            break;
+        }
+        done += chunk.len();
+        settle_chunk(rx.as_mut(), address, chunk, how, &mut run).await;
+    }
+    rx.close().await;
+    Ok(run.finish(cancelled))
+}
+
+fn not_reached(run: &mut JobRun<'_>, address: &str, seqs: &[i64]) {
+    for seq in seqs {
+        run.item(item(
+            address,
+            *seq,
+            None,
+            ItemOutcome::NotReached {
+                why: NotReached::Cancelled,
+            },
+        ));
+    }
+}
+
+/// Receive one chunk by sequence number and settle what came back. The broker refuses the
+/// whole request when one number is unknown, so then each number is received on its own.
+async fn settle_chunk(
+    rx: &mut dyn LockReceiver,
+    address: &str,
+    chunk: &[i64],
+    how: &Settlement,
+    run: &mut JobRun<'_>,
+) {
+    let mut received = Vec::new();
+    let mut errors: HashMap<i64, Error> = HashMap::new();
+    match rx.receive_deferred(chunk).await {
+        Ok(got) => received = got,
+        Err(Error::NotFound(_)) if chunk.len() > 1 => {
+            for seq in chunk {
+                match rx.receive_deferred(std::slice::from_ref(seq)).await {
+                    Ok(got) => received.extend(got),
+                    Err(Error::NotFound(_)) => {}
+                    Err(e) => {
+                        errors.insert(*seq, e);
+                    }
+                }
+            }
+        }
+        Err(Error::NotFound(_)) => {}
+        Err(e) => {
+            for seq in chunk {
+                errors.insert(*seq, copy_error(&e));
+            }
+        }
+    }
+    let mut settled: HashMap<i64, (PeekedMessage, ItemOutcome)> = HashMap::new();
+    for m in received {
+        let outcome = match m.lock_token {
+            Some(token) => match rx.settle(token, how).await {
+                Ok(()) => ItemOutcome::Succeeded { detail: None },
+                Err(e) => failed(&e),
+            },
+            None => failed(&Error::Protocol(
+                "a deferred message came without a lock token".into(),
+            )),
+        };
+        settled.insert(m.message.sequence_number, (m.message, outcome));
+    }
+    for seq in chunk {
+        let result = match (settled.remove(seq), errors.remove(seq)) {
+            (Some((m, outcome)), _) => item(address, *seq, Some(&m), outcome),
+            (None, Some(e)) => item(address, *seq, None, failed(&e)),
+            (None, None) => item(address, *seq, None, ItemOutcome::Missing),
+        };
+        run.item(result);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Error;
+    use crate::jobs::NoProgress;
+    use crate::messaging::MessageState;
+    use crate::messaging::fake::{FakeBroker, FakeMsg, FakeOp};
+    use crate::ops::receive;
+    use crate::ops::testkit::recv;
+
+    #[tokio::test(start_paused = true)]
+    async fn peek_lock_receive_settles_each_message_and_stops_at_max() {
+        let b = FakeBroker::default();
+        for _ in 0..5 {
+            b.add("q", FakeMsg::active("x"));
+        }
+        let out = receive::run(
+            &mut b.clone(),
+            &recv("q", 3, ReceiveAction::Settle(Settlement::Complete)),
+            &NoProgress,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.messages.len(), 3);
+        assert_eq!(b.all("q").len(), 2);
+        assert_eq!(b.held_locks(), 0);
+        assert!(b.credit_granted_max() <= 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn receive_and_delete_reports_messages_drained_after_the_wait() {
+        let b = FakeBroker::default();
+        for _ in 0..4 {
+            b.add("q", FakeMsg::active("x"));
+        }
+        b.deliver_late(2);
+        let out = receive::run(
+            &mut b.clone(),
+            &recv("q", 4, ReceiveAction::Delete),
+            &NoProgress,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            out.messages.len(),
+            4,
+            "late deliveries are already removed, so they are returned"
+        );
+        assert!(b.credit_granted_max() <= 4);
+        assert!(
+            out.report.notes.is_empty(),
+            "the drain was confirmed: no shortfall note"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unconfirmed_drain_is_noted_in_the_report() {
+        let b = FakeBroker::default();
+        b.add("q", FakeMsg::active("x"));
+        b.stall_drain(2);
+        let out = receive::run(
+            &mut b.clone(),
+            &recv("q", 3, ReceiveAction::Delete),
+            &NoProgress,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.messages.len(), 1);
+        assert!(
+            out.report.notes.iter().any(|n| n
+                == "up to 2 more messages may have been removed after the wait and are not in this result"),
+            "{:?}",
+            out.report.notes
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dead_letter_receive_carries_the_reason() {
+        let b = FakeBroker::default();
+        let seq = b.add("q", FakeMsg::active("x"));
+        let how = Settlement::DeadLetter {
+            reason: "Manual".into(),
+            description: "bad".into(),
+        };
+        let out = receive::run(
+            &mut b.clone(),
+            &recv("q", 1, ReceiveAction::Settle(how)),
+            &NoProgress,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.report.succeeded(), 1);
+        assert!(b.all("q").is_empty());
+        let dl = b.all("q/$DeadLetterQueue");
+        assert_eq!(dl[0].sequence_number, seq);
+        assert_eq!(
+            (
+                dl[0].dead_letter_reason.as_deref(),
+                dl[0].dead_letter_description.as_deref()
+            ),
+            (Some("Manual"), Some("bad"))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_settle_fails_its_item_and_the_receive_goes_on() {
+        let b = FakeBroker::default();
+        for _ in 0..3 {
+            b.add("q", FakeMsg::active("x"));
+        }
+        b.expire_lock_on_next_settle();
+        let out = receive::run(
+            &mut b.clone(),
+            &recv("q", 2, ReceiveAction::Settle(Settlement::Complete)),
+            &NoProgress,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!((out.report.succeeded(), out.report.failed()), (1, 1));
+        assert!(matches!(
+            &out.report.items[0].outcome,
+            ItemOutcome::Failed {
+                kind: "lock_lost",
+                ..
+            }
+        ));
+        assert_eq!(b.held_locks(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn receive_stops_when_the_wait_passes_without_a_delivery() {
+        let b = FakeBroker::default();
+        b.add("q", FakeMsg::active("x"));
+        let out = receive::run(
+            &mut b.clone(),
+            &recv("q", 10, ReceiveAction::Settle(Settlement::Complete)),
+            &NoProgress,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.messages.len(), 1);
+        assert!(!out.report.cancelled);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_receive_releases_its_locks_and_says_cancelled() {
+        let b = FakeBroker::default().with_receive_delay(Duration::from_secs(10));
+        b.add("q", FakeMsg::active("x"));
+        let cancel = CancellationToken::new();
+        let stop = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            stop.cancel();
+        });
+        let mut req = recv("q", 5, ReceiveAction::Settle(Settlement::Complete));
+        req.wait = Duration::from_secs(60);
+        let out = receive::run(&mut b.clone(), &req, &NoProgress, &cancel)
+            .await
+            .unwrap();
+        assert!(out.report.cancelled);
+        assert!(out.messages.is_empty());
+        assert_eq!(b.held_locks(), 0);
+        assert_eq!(b.all("q")[0].delivery_count, 0, "closed, not dropped");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_receive_and_delete_returns_what_the_link_already_delivered() {
+        // One message is taken off the link, then the receive is cancelled while it waits
+        // for the second: the first is already removed, so it is returned, not lost.
+        let b = FakeBroker::default().with_receive_delay(Duration::from_secs(1));
+        for _ in 0..2 {
+            b.add("q", FakeMsg::active("x"));
+        }
+        let cancel = CancellationToken::new();
+        let stop = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1_500)).await;
+            stop.cancel();
+        });
+        let mut req = recv("q", 2, ReceiveAction::Delete);
+        req.wait = Duration::from_secs(60);
+        let out = receive::run(&mut b.clone(), &req, &NoProgress, &cancel)
+            .await
+            .unwrap();
+        assert!(out.report.cancelled);
+        assert_eq!(out.messages.len(), 1);
+        assert_eq!(out.report.succeeded(), 1);
+        assert_eq!(b.all("q").len(), 1);
+        assert!(b.credit_granted_max() <= 2);
+        assert!(
+            out.report.notes.contains(&drain_note(1)),
+            "credit was out when it stopped: {:?}",
+            out.report.notes
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_receive_that_cannot_open_is_an_error() {
+        let b = FakeBroker::default();
+        b.fail_next(FakeOp::OpenReceiver, Error::Conflict("locked".into()));
+        let r = receive::run(
+            &mut b.clone(),
+            &recv("q", 1, ReceiveAction::Delete),
+            &NoProgress,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(r, Err(Error::Conflict(_))));
+    }
+
+    #[tokio::test]
+    async fn receive_limits_are_checked_first() {
+        let b = FakeBroker::default();
+        b.add("q", FakeMsg::active("x"));
+        for max in [0, MAX_RECEIVE + 1] {
+            let r = receive::run(
+                &mut b.clone(),
+                &recv("q", max, ReceiveAction::Delete),
+                &NoProgress,
+                &CancellationToken::new(),
+            )
+            .await;
+            assert!(matches!(r, Err(Error::Invalid(_))));
+        }
+        assert_eq!(b.all("q").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn deferred_messages_settle_by_sequence_number_and_missing_ones_are_reported() {
+        let b = FakeBroker::default();
+        let d = b.add("q", FakeMsg::active("x").deferred());
+        let r = receive::settle_deferred(
+            &mut b.clone(),
+            "q",
+            &[d, 999],
+            None,
+            &Settlement::Complete,
+            &NoProgress,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!((r.succeeded(), r.skipped()), (1, 1));
+        assert!(matches!(r.items[1].outcome, ItemOutcome::Missing));
+        assert!(b.all("q").is_empty());
+    }
+
+    #[tokio::test]
+    async fn every_deferred_message_received_is_settled_and_a_failed_settle_is_its_item() {
+        let b = FakeBroker::default();
+        let seqs: Vec<i64> = (0..3)
+            .map(|_| b.add("q", FakeMsg::active("x").deferred()))
+            .collect();
+        b.fail_next(FakeOp::Settle, Error::Timeout("settle".into()));
+        let r = receive::settle_deferred(
+            &mut b.clone(),
+            "q",
+            &seqs,
+            None,
+            &Settlement::Complete,
+            &NoProgress,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!((r.succeeded(), r.failed()), (2, 1));
+        assert_eq!(r.failed_sequences(), [seqs[0]]);
+        assert_eq!(b.all("q").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn deferred_settle_defers_to_the_dead_letter_queue_with_a_reason() {
+        let b = FakeBroker::default();
+        let d = b.add("q", FakeMsg::active("x").deferred());
+        let how = Settlement::DeadLetter {
+            reason: "Manual".into(),
+            description: "stale".into(),
+        };
+        let r = receive::settle_deferred(
+            &mut b.clone(),
+            "q",
+            &[d],
+            None,
+            &how,
+            &NoProgress,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.succeeded(), 1);
+        let dl = b.all("q/$DeadLetterQueue");
+        assert_eq!(dl[0].sequence_number, d);
+        assert_eq!(dl[0].state, MessageState::Active);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_deferred_settle_reports_the_rest_not_reached() {
+        let b = FakeBroker::default();
+        let d = b.add("q", FakeMsg::active("x").deferred());
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let r = receive::settle_deferred(
+            &mut b.clone(),
+            "q",
+            &[d],
+            None,
+            &Settlement::Complete,
+            &NoProgress,
+            &cancel,
+        )
+        .await
+        .unwrap();
+        assert!(r.cancelled);
+        assert_eq!(
+            r.items[0].outcome,
+            ItemOutcome::NotReached {
+                why: NotReached::Cancelled
+            }
+        );
+        assert_eq!(b.all("q").len(), 1);
+    }
+
+    #[test]
+    fn notes_count_with_separators_and_singulars() {
+        assert_eq!(
+            drain_note(2),
+            "up to 2 more messages may have been removed after the wait and are not in this result"
+        );
+        assert_eq!(
+            drain_note(1),
+            "up to 1 more message may have been removed after the wait and is not in this result"
+        );
+        assert_eq!(
+            unreturned_note(1_200),
+            "1,200 messages were removed but are not in this result"
+        );
+        assert_eq!(
+            unreturned_note(1),
+            "1 message was removed but is not in this result"
+        );
+    }
+}

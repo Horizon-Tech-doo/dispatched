@@ -135,7 +135,6 @@ impl ServiceBusConnection {
     /// Open a receiver for `spec`: put tokens for the address and its
     /// `$management`, then attach the data link and a private management
     /// link on this connection's session.
-    #[allow(dead_code)] // callers arrive with the operations (Task 12)
     pub(crate) async fn open_receiver(&mut self, spec: &ReceiverSpec) -> Result<AmqpReceiver> {
         if spec.session == SessionChoice::NextAvailable {
             return Err(Error::Invalid(
@@ -152,7 +151,6 @@ impl ServiceBusConnection {
     /// `wait`; `Ok(None)` when no session is available. `spec.session` must
     /// be `None` or `NextAvailable` (a named session is opened with
     /// [`open_receiver`](Self::open_receiver)).
-    #[allow(dead_code)] // callers arrive with the operations (Task 12)
     pub(crate) async fn try_accept_next(
         &mut self,
         spec: &ReceiverSpec,
