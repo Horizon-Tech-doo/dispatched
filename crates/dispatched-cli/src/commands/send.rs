@@ -3,7 +3,7 @@
 use super::operator_for;
 use crate::Format;
 use crate::context::Ctx;
-use crate::jobs::{JobExit, StderrProgress, finish_job};
+use crate::jobs::{Extras, JobExit, StderrProgress, finish_job, finish_job_with};
 use crate::output::{sanitize, table, thousands};
 use crate::resolve::Selection;
 use crate::safety::{MutateArgs, Planned};
@@ -358,12 +358,12 @@ pub async fn send(
     let mut report = result?;
     report.notes.extend(note.map(str::to_string));
     report.notes.extend(link_failure_notes(&report));
-    let exit = finish_job(&report, format, &args.mutate);
-    if scheduled
-        && matches!(format, Format::Table)
-        && let Some(t) = scheduled_table(&report)
-    {
-        println!("{t}");
+    let mut extras = Extras::default();
+    if scheduled && matches!(format, Format::Table) {
+        extras.after = scheduled_table(&report);
+    }
+    let exit = finish_job_with(&report, format, &args.mutate, None, &extras);
+    if extras.after.is_some() {
         eprintln!(
             "(cancel with `dispatched scheduled cancel {} --seq N`)",
             sanitize(&report.entity)

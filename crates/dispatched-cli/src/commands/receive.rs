@@ -4,7 +4,7 @@ use super::browse::{ViewArgs, messages_table, peek};
 use super::operator_for;
 use crate::Format;
 use crate::context::Ctx;
-use crate::jobs::{JobExit, StderrProgress, finish_job, finish_job_with_messages};
+use crate::jobs::{Extras, JobExit, StderrProgress, finish_job, finish_job_with};
 use crate::resolve::Selection;
 use crate::safety::{MutateArgs, Planned};
 use clap::{ArgGroup, Args, Subcommand, ValueEnum};
@@ -218,21 +218,23 @@ pub async fn receive(
     let result = operator.receive(req, &StderrProgress::new(), &cancel).await;
     operator.explorer().close().await;
     let outcome = result?;
+    let mut extras = Extras::default();
     if let Format::Table = format {
-        println!("{}", messages_table(&outcome.messages, view));
+        extras.before = Some(messages_table(&outcome.messages, view));
         if outcome.messages.is_empty() {
             eprintln!("(no messages)");
         } else if let Some(note) = shortened_note(&args.mutate, args.delete) {
             eprintln!("{note}");
         }
     }
-    // JSON: one document with the messages in the `peek --format json` shape; the --report
-    // file holds them in full in both modes.
-    Ok(finish_job_with_messages(
+    // The --report file (the messages in full) is written before the table or the JSON
+    // document (one document with the messages in the `peek --format json` shape) is printed.
+    Ok(finish_job_with(
         &outcome.report,
         format,
         &args.mutate,
-        &outcome.messages,
+        Some(&outcome.messages),
+        &extras,
     ))
 }
 

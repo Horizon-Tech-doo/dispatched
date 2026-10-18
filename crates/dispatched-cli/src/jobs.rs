@@ -75,32 +75,28 @@ fn job_exit(report: &JobReport) -> JobExit {
     }
 }
 
-/// Print the result (the summary line, a table of failures and every note; or the report as
-/// JSON with `--format json`), write the `--report` file when asked (replacing it only with
-/// `--force-report`), and say how the job ended. Everything printed or written is the scrubbed
-/// report. The job already ran, so nothing here fails the command: a result or report that
-/// cannot be written is a warning on stderr and the exit is [`JobExit::Incomplete`] (exit 2).
+/// Write the `--report` file when asked (replacing it only with `--force-report`), then print
+/// the result (the summary line, a table of the items that did not succeed and every note; or
+/// the report as JSON with `--format json`), and say how the job ended. Everything printed or
+/// written is the scrubbed report. The report file comes first: it may be the only full copy of
+/// what a destructive read removed, so a closed stdout (`| head`) must never lose it. The job
+/// already ran, so nothing here fails the command: a result or report that cannot be written
+/// is a warning on stderr and the exit is [`JobExit::Incomplete`] (exit 2).
 pub fn finish_job(report: &JobReport, format: Format, args: &MutateArgs) -> JobExit {
-    finish_job_to(
-        &mut std::io::stdout().lock(),
-        &mut std::io::stderr().lock(),
-        report,
-        format,
-        args,
-        None,
-    )
+    finish_job_with(report, format, args, None, &Extras::default())
 }
 
-/// [`finish_job`] for a job that received messages (`receive`): the JSON result is one
-/// document with a `messages` array in the `peek --format json` shape, and the `--report` file
-/// holds the messages in full too ([`JobReport::write_with_messages`]), so a receive that
-/// removed messages can always keep a full copy of them. The table output is unchanged (the
-/// caller prints the messages table first).
-pub fn finish_job_with_messages(
+/// [`finish_job`] with the messages a job received (`receive`) and table text around the
+/// result. With messages, the JSON result is one document with a `messages` array in the
+/// `peek --format json` shape, and the `--report` file holds the messages in full too
+/// ([`JobReport::write_with_messages`]), so a receive that removed messages can always keep a
+/// full copy of them.
+pub fn finish_job_with(
     report: &JobReport,
     format: Format,
     args: &MutateArgs,
-    messages: &[PeekedMessage],
+    messages: Option<&[PeekedMessage]>,
+    extras: &Extras,
 ) -> JobExit {
     finish_job_to(
         &mut std::io::stdout().lock(),
@@ -108,8 +104,18 @@ pub fn finish_job_with_messages(
         report,
         format,
         args,
-        Some(messages),
+        messages,
+        extras,
     )
+}
+
+/// Table-format text a command prints around the job result (already terminal-safe).
+#[derive(Default)]
+pub struct Extras {
+    /// Before the summary line (`receive`: the messages table).
+    pub before: Option<String>,
+    /// After the notes (`send --schedule`: the scheduled sequence numbers).
+    pub after: Option<String>,
 }
 
 fn finish_job_to(
@@ -119,13 +125,11 @@ fn finish_job_to(
     format: Format,
     args: &MutateArgs,
     messages: Option<&[PeekedMessage]>,
+    extras: &Extras,
 ) -> JobExit {
     let report = report.scrubbed();
     let mut exit = job_exit(&report);
-    if let Err(e) = print_result(out, &report, format, messages) {
-        let _ = writeln!(err, "warning: the result could not be printed: {e}");
-        exit = JobExit::Incomplete;
-    }
+    // The report first (see `finish_job`).
     if let Some(path) = &args.report
         && let Err(e) = match messages {
             Some(m) => report.write_with_messages(path, report_format(path), args.force_report, m),
@@ -140,6 +144,10 @@ fn finish_job_to(
         );
         exit = JobExit::Incomplete;
     }
+    if let Err(e) = print_result(out, &report, format, messages, extras) {
+        let _ = writeln!(err, "warning: the result could not be printed: {e}");
+        exit = JobExit::Incomplete;
+    }
     exit
 }
 
@@ -148,9 +156,13 @@ fn print_result(
     report: &JobReport,
     format: Format,
     messages: Option<&[PeekedMessage]>,
+    extras: &Extras,
 ) -> anyhow::Result<()> {
     match format {
         Format::Table => {
+            if let Some(text) = &extras.before {
+                writeln!(out, "{text}")?;
+            }
             writeln!(out, "{}", sanitize(&report.summary_line()))?;
             let rows: Vec<Vec<String>> = report
                 .failures()
@@ -173,6 +185,9 @@ fn print_result(
             for note in &report.notes {
                 writeln!(out, "note: {}", sanitize(note))?;
             }
+            if let Some(text) = &extras.after {
+                writeln!(out, "{text}")?;
+            }
         }
         // `--format ndjson` is refused before a job runs; the report prints as JSON.
         Format::Json | Format::Ndjson => {
@@ -186,6 +201,26 @@ fn print_result(
     }
     out.flush()?;
     Ok(())
+}
+
+/// Print the one-line result of a mutating command that runs no job (`session state set`).
+/// The change was made, so a closed stdout is a warning and exit 2, never a panic.
+pub fn print_done(line: &str) -> JobExit {
+    print_done_to(
+        &mut std::io::stdout().lock(),
+        &mut std::io::stderr().lock(),
+        line,
+    )
+}
+
+fn print_done_to(out: &mut dyn Write, err: &mut dyn Write, line: &str) -> JobExit {
+    match writeln!(out, "{line}").and_then(|()| out.flush()) {
+        Ok(()) => JobExit::Ok,
+        Err(e) => {
+            let _ = writeln!(err, "warning: the result could not be printed: {e}");
+            JobExit::Incomplete
+        }
+    }
 }
 
 /// NDJSON for `.ndjson` and `.jsonl`, JSON otherwise.
@@ -326,6 +361,7 @@ mod tests {
             Format::Table,
             &MutateArgs::default(),
             None,
+            &Extras::default(),
         )
     }
 
@@ -346,6 +382,7 @@ mod tests {
             Format::Table,
             &MutateArgs::default(),
             None,
+            &Extras::default(),
         );
         String::from_utf8(out).unwrap()
     }
@@ -435,6 +472,7 @@ mod tests {
             Format::Json,
             &MutateArgs::default(),
             None,
+            &Extras::default(),
         );
         let json = String::from_utf8(json).unwrap();
         assert!(!json.contains("topsecretvalue"));
@@ -451,6 +489,7 @@ mod tests {
                 Format::Table,
                 &to_file(&path, false),
                 None,
+                &Extras::default(),
             );
             assert_eq!(exit, JobExit::Incomplete);
             let text = std::fs::read_to_string(&path).unwrap();
@@ -504,6 +543,7 @@ mod tests {
             Format::Json,
             &MutateArgs::default(),
             Some(&messages),
+            &Extras::default(),
         );
         let v: serde_json::Value = serde_json::from_slice(&out).expect("one JSON document");
         assert_eq!(v["messages"][0]["sequence_number"], 7);
@@ -517,6 +557,7 @@ mod tests {
             Format::Table,
             &MutateArgs::default(),
             Some(&messages),
+            &Extras::default(),
         );
         assert!(!String::from_utf8(out).unwrap().contains("hello"));
     }
@@ -535,6 +576,7 @@ mod tests {
                 Format::Table,
                 &to_file(&path, false),
                 Some(&messages),
+                &Extras::default(),
             );
             assert_eq!(exit, JobExit::Ok);
             let text = std::fs::read_to_string(&path).unwrap();
@@ -549,10 +591,96 @@ mod tests {
             Format::Table,
             &to_file(&path, false),
             None,
+            &Extras::default(),
         );
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(v.get("messages").is_none());
+    }
+
+    /// A stdout whose reader went away: every write fails as a closed pipe does. Without
+    /// SIGPIPE ignored the process would die at the first write, so it notes whether the
+    /// report file existed by then.
+    struct ClosedPipe<'a> {
+        report: &'a Path,
+        report_at_first_write: Option<bool>,
+    }
+
+    impl Write for ClosedPipe<'_> {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            self.report_at_first_write
+                .get_or_insert_with(|| self.report.exists());
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+    }
+
+    #[test]
+    fn a_closed_stdout_after_a_change_is_a_warning() {
+        let path = Path::new("unused");
+        let mut out = ClosedPipe {
+            report: path,
+            report_at_first_write: None,
+        };
+        let mut err = Vec::new();
+        assert_eq!(
+            print_done_to(&mut out, &mut err, "Set it"),
+            JobExit::Incomplete
+        );
+        assert!(
+            String::from_utf8(err)
+                .unwrap()
+                .starts_with("warning: the result")
+        );
+        let mut out = Vec::new();
+        assert_eq!(
+            print_done_to(&mut out, &mut Vec::new(), "Set it"),
+            JobExit::Ok
+        );
+        assert_eq!(out, b"Set it\n");
+    }
+
+    #[test]
+    fn a_closed_stdout_never_loses_the_report_file() {
+        // `receive --delete --report removed.json | head`: the report is the only full copy of
+        // what was removed, so it is written before anything goes to stdout.
+        let messages = [received(7, "only copy")];
+        let dir = tempfile::tempdir().unwrap();
+        for (i, format) in [Format::Table, Format::Json].into_iter().enumerate() {
+            let path = dir.path().join(format!("r{i}.json"));
+            let mut out = ClosedPipe {
+                report: &path,
+                report_at_first_write: None,
+            };
+            let mut err = Vec::new();
+            let exit = finish_job_to(
+                &mut out,
+                &mut err,
+                &report(1, 0),
+                format,
+                &to_file(&path, false),
+                Some(&messages),
+                &Extras {
+                    before: Some("SEQUENCE ...".into()),
+                    after: None,
+                },
+            );
+            assert_eq!(
+                out.report_at_first_write,
+                Some(true),
+                "the report is on disk before stdout is touched"
+            );
+            assert_eq!(exit, JobExit::Incomplete, "the result was not printed");
+            let text = std::fs::read_to_string(&path).expect("the report exists");
+            assert!(text.contains("only copy"), "{text}");
+            let err = String::from_utf8(err).unwrap();
+            assert!(
+                err.starts_with("warning: the result could not be printed"),
+                "{err}"
+            );
+        }
     }
 
     /// Presses fed from a channel.
@@ -617,6 +745,7 @@ mod tests {
             Format::Table,
             &to_file(&existing, false),
             None,
+            &Extras::default(),
         );
         assert_eq!(exit, JobExit::Incomplete);
         let err = String::from_utf8(err).unwrap();
@@ -636,6 +765,7 @@ mod tests {
             Format::Table,
             &to_file(&dir.path().join("gone/r.json"), false),
             None,
+            &Extras::default(),
         );
         assert_eq!(exit, JobExit::Incomplete);
         // --force-report replaces it.
@@ -646,6 +776,7 @@ mod tests {
             Format::Table,
             &to_file(&existing, true),
             None,
+            &Extras::default(),
         );
         assert_eq!(exit, JobExit::Ok);
         assert!(

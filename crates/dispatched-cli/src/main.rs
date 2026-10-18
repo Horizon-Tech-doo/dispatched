@@ -187,8 +187,8 @@ enum RuleCmd {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    restore_sigpipe();
     let cli = Cli::parse();
+    set_sigpipe(mutates(&cli.command));
     match run(cli).await {
         Ok(JobExit::Ok) => ExitCode::SUCCESS,
         // A job ran but did not finish every item (plan decision 17).
@@ -200,15 +200,58 @@ async fn main() -> ExitCode {
     }
 }
 
-/// Rust ignores SIGPIPE, so `println!` panics when the reader of a pipe
-/// exits early (`dispatched peek q | head`). Restore the default so the
-/// process ends quietly, like other command-line tools.
-fn restore_sigpipe() {
+/// Rust ignores SIGPIPE, so `println!` panics when the reader of a pipe exits early
+/// (`dispatched peek q | head`). For reads, restore the default so the process ends quietly,
+/// like other command-line tools. A mutating command keeps ignoring it: it has already changed
+/// the broker, so a closed stdout must not kill it before its `--report` file and activity
+/// entry are written. Its output goes through writers that turn the broken pipe into the
+/// "result could not be printed" warning and exit 2.
+fn set_sigpipe(mutating: bool) {
     #[cfg(unix)]
     // SAFETY: setting a signal disposition is process-wide and thread-safe;
     // this runs once, before anything is written.
     unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        libc::signal(
+            libc::SIGPIPE,
+            if mutating {
+                libc::SIG_IGN
+            } else {
+                libc::SIG_DFL
+            },
+        );
+    }
+    #[cfg(not(unix))]
+    let _ = mutating;
+}
+
+/// Whether the command can change the broker (its output must survive a closed pipe).
+fn mutates(command: &Command) -> bool {
+    match command {
+        Command::Send(_)
+        | Command::Scheduled { .. }
+        | Command::Import(_)
+        | Command::Receive(_)
+        | Command::Delete(_)
+        | Command::Move(_)
+        | Command::Resubmit(_)
+        | Command::Purge(_) => true,
+        Command::Deferred { cmd } => !matches!(cmd, commands::receive::DeferredCmd::Ls(_)),
+        Command::Dlq { cmd } => !matches!(cmd, commands::repair::DlqCmd::Summary(_)),
+        Command::Session {
+            cmd: SessionCmd::State { cmd },
+        } => !matches!(cmd, commands::state::StateCmd::Get(_)),
+        Command::Login { .. }
+        | Command::Logout
+        | Command::Whoami
+        | Command::Namespaces { .. }
+        | Command::Ls { .. }
+        | Command::Peek { .. }
+        | Command::Export { .. }
+        | Command::Show { .. }
+        | Command::Session { .. }
+        | Command::Rule { .. }
+        | Command::Profile { .. }
+        | Command::Activity { .. } => false,
     }
 }
 
@@ -414,6 +457,42 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn mutating_commands_survive_a_closed_pipe_and_reads_do_not() {
+        let mutates_line = |args: &[&str]| {
+            let cli =
+                Cli::try_parse_from(std::iter::once("dispatched").chain(args.iter().copied()))
+                    .unwrap();
+            mutates(&cli.command)
+        };
+        for args in [
+            &["receive", "q", "--delete"][..],
+            &["send", "q", "--body", "x"],
+            &["purge", "q"],
+            &["delete", "q", "--seq", "1"],
+            &["move", "q", "--seq", "1", "--to", "r"],
+            &[
+                "deferred", "receive", "q", "--seq", "1", "--then", "complete",
+            ],
+            &["dlq", "purge", "q"],
+            &["scheduled", "cancel", "q", "--all"],
+            &["session", "state", "clear", "q", "s"],
+        ] {
+            assert!(mutates_line(args), "{args:?}");
+        }
+        for args in [
+            &["peek", "q"][..],
+            &["ls"],
+            &["deferred", "ls", "q"],
+            &["dlq", "summary", "q"],
+            &["session", "state", "get", "q", "s"],
+            &["session", "ls", "q"],
+            &["activity", "ls"],
+        ] {
+            assert!(!mutates_line(args), "{args:?}");
+        }
     }
 
     #[test]

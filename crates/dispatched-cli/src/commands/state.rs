@@ -4,7 +4,7 @@ use super::browse::{check_output, explorer_for};
 use super::operator_for;
 use crate::Format;
 use crate::context::Ctx;
-use crate::jobs::JobExit;
+use crate::jobs::{JobExit, print_done};
 use crate::output::sanitize;
 use crate::resolve::Selection;
 use crate::safety::{MutateArgs, Planned};
@@ -147,11 +147,13 @@ pub async fn run(
     format: Format,
 ) -> anyhow::Result<JobExit> {
     match cmd {
-        StateCmd::Get(a) => get(ctx, sel, a, format).await?,
-        StateCmd::Set(a) => set(ctx, sel, a).await?,
-        StateCmd::Clear(a) => clear(ctx, sel, a).await?,
+        StateCmd::Get(a) => {
+            get(ctx, sel, a, format).await?;
+            Ok(JobExit::Ok)
+        }
+        StateCmd::Set(a) => set(ctx, sel, a).await,
+        StateCmd::Clear(a) => clear(ctx, sel, a).await,
     }
-    Ok(JobExit::Ok)
 }
 
 /// A read: not gated, not audited.
@@ -218,7 +220,7 @@ fn write_state(path: &std::path::Path, bytes: &[u8], force: bool) -> anyhow::Res
         .with_context(|| format!("writing {shown}"))
 }
 
-async fn set(ctx: &Ctx, sel: &Selection<'_>, args: &SetArgs) -> anyhow::Result<()> {
+async fn set(ctx: &Ctx, sel: &Selection<'_>, args: &SetArgs) -> anyhow::Result<JobExit> {
     // The size check comes before any I/O (profile, keychain, network).
     let state = new_state(args)?;
     let entity = EntityPath::parse(&args.entity)?;
@@ -233,15 +235,14 @@ async fn set(ctx: &Ctx, sel: &Selection<'_>, args: &SetArgs) -> anyhow::Result<(
         Some(state),
     )
     .await?;
-    println!(
+    Ok(print_done(&format!(
         "Set the state of session {} on {} ({bytes} byte(s))",
         sanitize(&args.session),
         sanitize(&entity.base())
-    );
-    Ok(())
+    )))
 }
 
-async fn clear(ctx: &Ctx, sel: &Selection<'_>, args: &ClearArgs) -> anyhow::Result<()> {
+async fn clear(ctx: &Ctx, sel: &Selection<'_>, args: &ClearArgs) -> anyhow::Result<JobExit> {
     let entity = EntityPath::parse(&args.entity)?;
     change(
         ctx,
@@ -253,12 +254,11 @@ async fn clear(ctx: &Ctx, sel: &Selection<'_>, args: &ClearArgs) -> anyhow::Resu
         None,
     )
     .await?;
-    println!(
+    Ok(print_done(&format!(
         "Cleared the state of session {} on {}",
         sanitize(&args.session),
         sanitize(&entity.base())
-    );
-    Ok(())
+    )))
 }
 
 /// The gated change: resolve, precheck (production, report path), confirmable, gate, then the
