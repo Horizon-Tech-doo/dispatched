@@ -188,6 +188,29 @@ impl Explorer {
         Ok(d)
     }
 
+    /// The kind of a pinned or `EntityPath` entity (Decision 16, R23). A subscription path is
+    /// a subscription with no call. Otherwise one ATOM GET says queue or topic; when the
+    /// identity may not read descriptions (`Forbidden`), a one-message `peek-message` probe
+    /// decides. `Ok(None)` means it cannot be told; a missing entity stays `NotFound`.
+    pub async fn resolve_kind(&self, entity: &EntityPath) -> Result<Option<EntityKind>> {
+        if entity.subscription.is_some() {
+            return Ok(Some(EntityKind::Subscription));
+        }
+        match self.mgmt.entity_kind(&entity.entity).await {
+            Ok(kind) => Ok(Some(kind)),
+            Err(Error::Forbidden { .. }) => {
+                let mut opts = PeekOptions::new(1);
+                opts.scan_limit = 1;
+                let probe = self
+                    .peek(entity, PeekView::Active, &opts)
+                    .await
+                    .map(|page| page.messages);
+                Ok(kind_from_probe(&probe))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// The rules of a subscription.
     pub async fn list_rules(&self, topic: &str, subscription: &str) -> Result<Vec<RuleInfo>> {
         self.mgmt.list_rules(topic, subscription).await
@@ -718,6 +741,27 @@ where
 
 /// The entity to count by peeking for `kind` at `path`. The known kind decides, so a queue named
 /// like a subscription path stays a queue. Topics have nothing to peek.
+/// What a `peek-message` probe of a name says about it: a successful peek (even of an empty
+/// entity) means a queue; a service refusal of the peek means a topic, which has no messages
+/// to peek. Anything that could be the caller's rights, the network or load says nothing.
+pub(crate) fn kind_from_probe(result: &Result<Vec<PeekedMessage>>) -> Option<EntityKind> {
+    match result {
+        Ok(_) => Some(EntityKind::Queue),
+        Err(Error::Unsupported { .. } | Error::Conflict(_) | Error::LockLost(_)) => {
+            Some(EntityKind::Topic)
+        }
+        Err(Error::Protocol(text)) => {
+            // `MgmtResponse::error` writes `... returned {status}: ...`.
+            let status = text
+                .split_once(" returned ")
+                .and_then(|(_, rest)| rest.split(':').next())
+                .and_then(|s| s.trim().parse::<u16>().ok())?;
+            (400..500).contains(&status).then_some(EntityKind::Topic)
+        }
+        Err(_) => None,
+    }
+}
+
 fn peek_target(kind: EntityKind, path: &str) -> Result<EntityPath> {
     match kind {
         EntityKind::Queue => Ok(EntityPath::queue(path)),
@@ -748,6 +792,37 @@ mod tests {
         assert_eq!(s, EntityPath::subscription("events", "audit"));
         assert!(peek_target(EntityKind::Subscription, "events").is_err());
         assert!(peek_target(EntityKind::Topic, "events").is_err());
+    }
+
+    #[test]
+    fn probe_results_map_to_kinds() {
+        assert_eq!(kind_from_probe(&Ok(vec![])), Some(EntityKind::Queue));
+        assert_eq!(
+            kind_from_probe(&Err(Error::Protocol(
+                "com.microsoft:peek-message returned 400: cannot peek a topic".into()
+            ))),
+            Some(EntityKind::Topic)
+        );
+        // A healthy service refusing the peek: since Task 8, 409 maps to Conflict and 410 to LockLost.
+        assert_eq!(
+            kind_from_probe(&Err(Error::Conflict("x".into()))),
+            Some(EntityKind::Topic)
+        );
+        assert_eq!(
+            kind_from_probe(&Err(Error::LockLost("x".into()))),
+            Some(EntityKind::Topic)
+        );
+        for e in [
+            Error::Forbidden {
+                needed: None,
+                detail: "x".into(),
+            },
+            Error::Throttled { retry_after: None },
+            Error::Network("down".into()),
+            Error::NotFound("x".into()),
+        ] {
+            assert_eq!(kind_from_probe(&Err(e)), None);
+        }
     }
 
     fn assert_send<T: Send>(_: &T) {}

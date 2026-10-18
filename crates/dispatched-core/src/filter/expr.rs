@@ -384,6 +384,15 @@ fn opt_str(v: &Option<String>) -> FieldValue {
     v.clone().map(FieldValue::Str).unwrap_or(FieldValue::Null)
 }
 
+/// A user property by exact name, else the first whose name equals it ignoring ASCII case.
+fn user_property<'a>(msg: &'a PeekedMessage, name: &str) -> Option<&'a PropValue> {
+    msg.application_properties.get(name).or_else(|| {
+        msg.application_properties
+            .iter()
+            .find_map(|(k, v)| k.eq_ignore_ascii_case(name).then_some(v))
+    })
+}
+
 fn field_value(msg: &PeekedMessage, field: &Field) -> FieldValue {
     match field {
         Field::Sys(f) => match f {
@@ -410,7 +419,7 @@ fn field_value(msg: &PeekedMessage, field: &Field) -> FieldValue {
             SysField::State => FieldValue::Str(msg.state.as_str().to_string()),
             SysField::Size => FieldValue::Num(msg.body.len() as f64),
         },
-        Field::User(name) => match msg.application_properties.get(name) {
+        Field::User(name) => match user_property(msg, name) {
             None | Some(PropValue::Null) => FieldValue::Null,
             Some(PropValue::Bool(b)) => FieldValue::Bool(*b),
             Some(PropValue::Int(n)) => FieldValue::Num(f64::from(*n)),
@@ -521,6 +530,32 @@ mod tests {
     use crate::messaging::test_message;
     use crate::messaging::{MessageBody, MessageState, PropValue};
     use time::OffsetDateTime;
+
+    #[test]
+    fn user_property_names_match_ignoring_case_after_an_exact_match() {
+        let mut m = test_message(1);
+        m.application_properties
+            .insert("OrderType".into(), PropValue::String("rush".into()));
+        assert!(
+            PropertyFilter::parse("user.ordertype = 'rush'")
+                .unwrap()
+                .matches(&m)
+        );
+        m.application_properties
+            .insert("ordertype".into(), PropValue::String("slow".into()));
+        assert!(
+            PropertyFilter::parse("user.ordertype = 'slow'")
+                .unwrap()
+                .matches(&m),
+            "exact name wins"
+        );
+        assert!(
+            PropertyFilter::parse("user.ORDERTYPE = 'rush'")
+                .unwrap()
+                .matches(&m),
+            "first in map order: OrderType < ordertype"
+        );
+    }
 
     fn msg() -> PeekedMessage {
         let mut m = test_message(42);
