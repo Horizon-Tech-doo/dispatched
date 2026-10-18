@@ -18,7 +18,32 @@
               "DeadLetteringOnMessageExpiration": false, "DefaultMessageTimeToLive": "PT1H",
               "DuplicateDetectionHistoryTimeWindow": "PT20S", "ForwardDeadLetteredMessagesTo": "",
               "ForwardTo": "", "LockDuration": "PT1M", "MaxDeliveryCount": 10,
-              "RequiresDuplicateDetection": false, "RequiresSession": true } }
+              "RequiresDuplicateDetection": false, "RequiresSession": true } },
+          { "Name": "m2a-ops", "Properties": {
+              "DeadLetteringOnMessageExpiration": false, "DefaultMessageTimeToLive": "PT1H",
+              "DuplicateDetectionHistoryTimeWindow": "PT20S", "ForwardDeadLetteredMessagesTo": "",
+              "ForwardTo": "", "LockDuration": "PT30S", "MaxDeliveryCount": 10,
+              "RequiresDuplicateDetection": false, "RequiresSession": false } },
+          { "Name": "m2a-target", "Properties": {
+              "DeadLetteringOnMessageExpiration": false, "DefaultMessageTimeToLive": "PT1H",
+              "DuplicateDetectionHistoryTimeWindow": "PT20S", "ForwardDeadLetteredMessagesTo": "",
+              "ForwardTo": "", "LockDuration": "PT30S", "MaxDeliveryCount": 10,
+              "RequiresDuplicateDetection": false, "RequiresSession": false } },
+          { "Name": "m2a-sessions", "Properties": {
+              "DeadLetteringOnMessageExpiration": false, "DefaultMessageTimeToLive": "PT1H",
+              "DuplicateDetectionHistoryTimeWindow": "PT20S", "ForwardDeadLetteredMessagesTo": "",
+              "ForwardTo": "", "LockDuration": "PT30S", "MaxDeliveryCount": 10,
+              "RequiresDuplicateDetection": false, "RequiresSession": true } },
+          { "Name": "m2a-purge-a", "Properties": {
+              "DeadLetteringOnMessageExpiration": false, "DefaultMessageTimeToLive": "PT1H",
+              "DuplicateDetectionHistoryTimeWindow": "PT20S", "ForwardDeadLetteredMessagesTo": "",
+              "ForwardTo": "", "LockDuration": "PT30S", "MaxDeliveryCount": 10,
+              "RequiresDuplicateDetection": false, "RequiresSession": false } },
+          { "Name": "m2a-purge-b", "Properties": {
+              "DeadLetteringOnMessageExpiration": false, "DefaultMessageTimeToLive": "PT1H",
+              "DuplicateDetectionHistoryTimeWindow": "PT20S", "ForwardDeadLetteredMessagesTo": "",
+              "ForwardTo": "", "LockDuration": "PT30S", "MaxDeliveryCount": 10,
+              "RequiresDuplicateDetection": false, "RequiresSession": false } }
         ],
         "Topics": [
           { "Name": "events",
@@ -28,6 +53,15 @@
               { "Name": "all", "Properties": {
                   "DeadLetteringOnMessageExpiration": false, "DefaultMessageTimeToLive": "PT1H",
                   "LockDuration": "PT1M", "MaxDeliveryCount": 3,
+                  "ForwardDeadLetteredMessagesTo": "", "ForwardTo": "", "RequiresSession": false } }
+            ] },
+          { "Name": "m2a-topic",
+            "Properties": { "DefaultMessageTimeToLive": "PT1H",
+              "DuplicateDetectionHistoryTimeWindow": "PT20S", "RequiresDuplicateDetection": false },
+            "Subscriptions": [
+              { "Name": "m2a-sub", "Properties": {
+                  "DeadLetteringOnMessageExpiration": false, "DefaultMessageTimeToLive": "PT1H",
+                  "LockDuration": "PT30S", "MaxDeliveryCount": 10,
                   "ForwardDeadLetteredMessagesTo": "", "ForwardTo": "", "RequiresSession": false } }
             ] }
         ]

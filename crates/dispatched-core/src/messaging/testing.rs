@@ -578,3 +578,50 @@ pub async fn probe_m2a_link_semantics(
         removed_unreturned,
     })
 }
+
+/// Receive one message of `address` (peek-lock), renew its lock through the management link
+/// (`renew-lock`), check that the new expiry is later than the one the delivery came with,
+/// then abandon it. A wrong lock-token byte order makes the broker refuse the renewal, so this
+/// passing proves the token mapping. Returns the old and the new expiry.
+pub async fn renew_lock_once(
+    conn: &mut ServiceBusConnection,
+    address: &str,
+) -> Result<(OffsetDateTime, OffsetDateTime)> {
+    let mut rx = conn
+        .open_receiver(&ReceiverSpec::peek_lock(address))
+        .await?;
+    let outcome = async {
+        let m = rx
+            .receive(1, Duration::from_secs(10))
+            .await?
+            .pop()
+            .ok_or_else(|| Error::Timeout(format!("no message arrived in {address} to renew")))?;
+        let token = token_of(&m)?;
+        let before = m.message.locked_until.ok_or_else(|| {
+            Error::Protocol("a peek-lock delivery came without a locked-until time".into())
+        })?;
+        // Let the clock move on, so a renewed lock ends measurably later.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let renewed = rx.renew_lock(&[token]).await;
+        let abandoned = rx.settle(token, &Settlement::Abandon).await;
+        let after = match renewed?.as_slice() {
+            [after] => *after,
+            other => {
+                return Err(Error::Protocol(format!(
+                    "renew-lock answered {} expiries for 1 lock",
+                    other.len()
+                )));
+            }
+        };
+        abandoned?;
+        if after <= before {
+            return Err(Error::Protocol(format!(
+                "the renewed lock ends at {after}, not after {before}"
+            )));
+        }
+        Ok((before, after))
+    }
+    .await;
+    rx.close().await;
+    outcome
+}
