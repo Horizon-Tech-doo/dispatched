@@ -1,9 +1,6 @@
 //! The CLI's side of the safety gate: `--yes`, `--confirm-prod`, the production pre-check and
 //! the gate every mutating command runs through.
 
-// Wired into the mutating commands by Tasks 19-21; until then only the tests use most of it.
-#![allow(dead_code)]
-
 use crate::context::Ctx;
 use crate::output::sanitize;
 use crate::resolve::Resolved;
@@ -14,7 +11,7 @@ use dispatched_core::safety::Gate;
 use dispatched_core::{
     ActivityEntry, Actor, Audit, EntityPath, Mutation, OpKind, Outcome, Phase, ProfileRef,
 };
-use horizon_azure_kit::safety::{ConfirmRequest, Decision, Origin, Policy};
+use horizon_azure_kit::safety::{CancellationToken, ConfirmRequest, Decision, Origin, Policy};
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -105,8 +102,8 @@ impl CliPolicy {
     }
 }
 
-/// Show `question` on stderr and read one line from stdin. Commands arm
-/// [`crate::jobs::cancel_on_ctrl_c`] only after the gate confirmed, so a Ctrl-C at this prompt
+/// Show `question` on stderr and read one line from stdin. [`cli_gate`] arms Ctrl-C
+/// ([`crate::jobs::arm_ctrl_c`]) only after the gate confirmed, so a Ctrl-C at this prompt
 /// ends the process (the default signal handling) instead of only cancelling a token.
 fn ask_on_terminal(question: &str) -> io::Result<String> {
     let mut err = io::stderr().lock();
@@ -291,18 +288,53 @@ pub fn precheck_production(
     anyhow::bail!(refusal)
 }
 
+/// A policy that runs `on_confirm` once, the first time `inner` lets an operation proceed.
+struct ArmOnConfirm<P> {
+    inner: P,
+    on_confirm: Box<dyn Fn() + Send + Sync>,
+    armed: std::sync::Once,
+}
+
+#[async_trait]
+impl<P: Policy> Policy for ArmOnConfirm<P> {
+    async fn confirm(&self, req: &ConfirmRequest) -> Decision {
+        let decision = self.inner.confirm(req).await;
+        if !matches!(decision, Decision::Deny(_)) {
+            self.armed.call_once(|| (self.on_confirm)());
+        }
+        decision
+    }
+}
+
 /// The gate for a mutating command: [`CliPolicy`] for this terminal, the activity log, origin
 /// `cli`. The profile comes from [`Resolved`] only, so production cannot be set by hand.
-pub fn cli_gate(ctx: &Ctx, resolved: &Resolved, args: &MutateArgs) -> anyhow::Result<Gate> {
-    let profile = resolved.profile.clone();
-    let policy = CliPolicy::for_terminal(args, &profile.name)?;
+///
+/// Also returns the job's cancel token. Ctrl-C cancels it only from the first confirmation
+/// on ([`crate::jobs::arm_ctrl_c`]): a Ctrl-C at the prompt still ends the process.
+pub fn cli_gate(
+    ctx: &Ctx,
+    resolved: &Resolved,
+    args: &MutateArgs,
+) -> anyhow::Result<(Gate, CancellationToken)> {
+    let cancel = CancellationToken::new();
+    let token = cancel.clone();
+    let policy = ArmOnConfirm {
+        inner: CliPolicy::for_terminal(args, &resolved.profile.name)?,
+        on_confirm: Box::new(move || crate::jobs::arm_ctrl_c(&token)),
+        armed: std::sync::Once::new(),
+    };
+    Ok((gate_with(ctx, resolved, Arc::new(policy))?, cancel))
+}
+
+/// A gate over `policy`, the activity log and origin `cli`.
+fn gate_with(ctx: &Ctx, resolved: &Resolved, policy: Arc<dyn Policy>) -> anyhow::Result<Gate> {
     let audit: Arc<dyn Audit> = ctx.activity()?.clone();
     Ok(Gate::new(
-        Arc::new(policy),
+        policy,
         audit,
         Actor {
             origin: Origin::Cli,
-            profile,
+            profile: resolved.profile.clone(),
         },
     ))
 }
@@ -573,7 +605,7 @@ mod tests {
         let ctx = Ctx::for_test_with_profiles(&[("prod-weu", "prod.servicebus.windows.net", true)]);
         let resolved = prod_resolved(&ctx);
         assert!(resolved.profile.production);
-        let gate = cli_gate(&ctx, &resolved, &MutateArgs::default()).unwrap();
+        let (gate, _cancel) = cli_gate(&ctx, &resolved, &MutateArgs::default()).unwrap();
         let op = Operation::purge(
             Target::new(EntityPath::queue("orders"), SubQueue::DeadLetter),
             CountEstimate::Exact(3),
@@ -772,6 +804,42 @@ mod tests {
                 "{e}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_is_armed_only_once_the_gate_confirmed() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let armed = Arc::new(AtomicUsize::new(0));
+        let policy = |answer: &str| {
+            let seen = armed.clone();
+            ArmOnConfirm {
+                inner: CliPolicy::for_test(false, &[], true, answer),
+                on_confirm: Box::new(move || {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                }),
+                armed: std::sync::Once::new(),
+            }
+        };
+        let denied = policy("n");
+        assert!(matches!(
+            denied.confirm(&req("orders", false)).await,
+            Decision::Deny(_)
+        ));
+        assert_eq!(armed.load(Ordering::SeqCst), 0, "a denial arms nothing");
+        let allowed = policy("y");
+        assert_eq!(
+            allowed.confirm(&req("orders", false)).await,
+            Decision::Allow
+        );
+        assert_eq!(
+            allowed.confirm(&req("events", false)).await,
+            Decision::Allow
+        );
+        assert_eq!(
+            armed.load(Ordering::SeqCst),
+            1,
+            "armed once, on the first confirmation"
+        );
     }
 
     #[tokio::test]

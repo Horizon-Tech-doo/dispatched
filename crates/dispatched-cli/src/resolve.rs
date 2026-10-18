@@ -93,8 +93,6 @@ pub fn needs_sign_in(sel: &Selection<'_>, store: &dyn StoreSource) -> anyhow::Re
     ))
 }
 
-// Used by the mutating commands of Tasks 19-21.
-#[allow(dead_code)]
 /// The selected namespace and the profile operations on it are recorded under.
 pub struct Resolved {
     /// Where to connect.
@@ -114,8 +112,6 @@ impl std::fmt::Debug for Resolved {
     }
 }
 
-// Used by the mutating commands of Tasks 19-21.
-#[allow(dead_code)]
 /// What a selection points at, before the production check.
 enum Chosen {
     /// A connection string or `--namespace`: no profile, named by its host.
@@ -179,8 +175,6 @@ pub fn resolve_namespace(
     })
 }
 
-// Used by the mutating commands of Tasks 19-21.
-#[allow(dead_code)]
 /// The namespace and its profile, for mutating commands. Production follows the namespace,
 /// not the selection path: a connection string, `--namespace` or profile whose host is the
 /// host of a saved production profile (ASCII case-insensitive) is production too. This opens
@@ -203,8 +197,6 @@ pub fn resolve(
     })
 }
 
-// Used by the mutating commands of Tasks 19-21.
-#[allow(dead_code)]
 /// Whether any saved production profile points at `host`.
 fn host_is_production(store: &dyn StoreSource, host: &str) -> anyhow::Result<bool> {
     let check = || -> anyhow::Result<bool> {
@@ -219,8 +211,6 @@ fn host_is_production(store: &dyn StoreSource, host: &str) -> anyhow::Result<boo
     })
 }
 
-// Used by the mutating commands of Tasks 19-21.
-#[allow(dead_code)]
 /// [`resolve`] for the selection, reading the sign-in (the keychain) only when it uses Entra.
 pub fn resolve_selected(
     ctx: &crate::context::Ctx,

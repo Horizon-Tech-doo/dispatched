@@ -1,9 +1,6 @@
 //! Running jobs from the command line: progress on stderr, the result on stdout, the report
 //! file, the exit code and Ctrl-C.
 
-// Wired into the mutating commands by Tasks 19-21; until then only the tests use most of it.
-#![allow(dead_code)]
-
 use crate::Format;
 use crate::output::{sanitize, table};
 use crate::safety::MutateArgs;
@@ -82,12 +79,25 @@ fn job_exit(report: &JobReport) -> JobExit {
 /// report. The job already ran, so nothing here fails the command: a result or report that
 /// cannot be written is a warning on stderr and the exit is [`JobExit::Incomplete`] (exit 2).
 pub fn finish_job(report: &JobReport, format: Format, args: &MutateArgs) -> JobExit {
+    finish_job_with(report, format, args, serde_json::Map::new())
+}
+
+/// [`finish_job`], adding `extra` top-level fields to the JSON result (`receive` adds its
+/// `messages`), so `--format json` prints one document. The table output and the `--report`
+/// file are unchanged.
+pub fn finish_job_with(
+    report: &JobReport,
+    format: Format,
+    args: &MutateArgs,
+    extra: serde_json::Map<String, serde_json::Value>,
+) -> JobExit {
     finish_job_to(
         &mut std::io::stdout().lock(),
         &mut std::io::stderr().lock(),
         report,
         format,
         args,
+        extra,
     )
 }
 
@@ -97,10 +107,11 @@ fn finish_job_to(
     report: &JobReport,
     format: Format,
     args: &MutateArgs,
+    extra: serde_json::Map<String, serde_json::Value>,
 ) -> JobExit {
     let report = report.scrubbed();
     let mut exit = job_exit(&report);
-    if let Err(e) = print_result(out, &report, format) {
+    if let Err(e) = print_result(out, &report, format, extra) {
         let _ = writeln!(err, "warning: the result could not be printed: {e}");
         exit = JobExit::Incomplete;
     }
@@ -118,7 +129,12 @@ fn finish_job_to(
     exit
 }
 
-fn print_result(out: &mut dyn Write, report: &JobReport, format: Format) -> anyhow::Result<()> {
+fn print_result(
+    out: &mut dyn Write,
+    report: &JobReport,
+    format: Format,
+    extra: serde_json::Map<String, serde_json::Value>,
+) -> anyhow::Result<()> {
     match format {
         Format::Table => {
             writeln!(out, "{}", sanitize(&report.summary_line()))?;
@@ -146,7 +162,11 @@ fn print_result(out: &mut dyn Write, report: &JobReport, format: Format) -> anyh
         }
         // `--format ndjson` is refused before a job runs; the report prints as JSON.
         Format::Json | Format::Ndjson => {
-            writeln!(out, "{}", serde_json::to_string_pretty(report)?)?;
+            let mut value = serde_json::to_value(report)?;
+            if let Some(fields) = value.as_object_mut() {
+                fields.extend(extra);
+            }
+            writeln!(out, "{}", serde_json::to_string_pretty(&value)?)?;
         }
     }
     out.flush()?;
@@ -179,28 +199,45 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     let token = CancellationToken::new();
-    let t = token.clone();
+    cancel_token_on(token.clone(), signal);
+    token
+}
+
+/// Cancel `token` when `signal` resolves.
+fn cancel_token_on<F>(token: CancellationToken, signal: F)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
     tokio::spawn(async move {
         signal.await;
-        t.cancel();
+        token.cancel();
     });
-    token
+}
+
+/// The first Ctrl-C, then a handler that ends the process on the second.
+async fn first_ctrl_c() {
+    if tokio::signal::ctrl_c().await.is_err() {
+        // No signal handler: never cancel.
+        std::future::pending::<()>().await;
+    }
+    tokio::spawn(async {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            std::process::exit(130);
+        }
+    });
 }
 
 /// A token that the first Ctrl-C cancels (the job stops between messages and reports what it
 /// did); a second Ctrl-C ends the process at once.
 pub fn cancel_on_ctrl_c() -> CancellationToken {
-    cancel_on(async {
-        if tokio::signal::ctrl_c().await.is_err() {
-            // No signal handler: never cancel.
-            std::future::pending::<()>().await;
-        }
-        tokio::spawn(async {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                std::process::exit(130);
-            }
-        });
-    })
+    cancel_on(first_ctrl_c())
+}
+
+/// From now on, the first Ctrl-C cancels `token` and a second ends the process. Mutating
+/// commands call this once the gate confirmed ([`crate::safety::cli_gate`]), so a Ctrl-C at
+/// the confirmation prompt still ends the process.
+pub fn arm_ctrl_c(token: &CancellationToken) {
+    cancel_token_on(token.clone(), first_ctrl_c());
 }
 
 #[cfg(test)]
@@ -256,6 +293,7 @@ mod tests {
             r,
             Format::Table,
             &MutateArgs::default(),
+            Default::default(),
         )
     }
 
@@ -275,6 +313,7 @@ mod tests {
             r,
             Format::Table,
             &MutateArgs::default(),
+            Default::default(),
         );
         String::from_utf8(out).unwrap()
     }
@@ -363,6 +402,7 @@ mod tests {
             &r,
             Format::Json,
             &MutateArgs::default(),
+            Default::default(),
         );
         let json = String::from_utf8(json).unwrap();
         assert!(!json.contains("topsecretvalue"));
@@ -378,6 +418,7 @@ mod tests {
                 &r,
                 Format::Table,
                 &to_file(&path, false),
+                Default::default(),
             );
             assert_eq!(exit, JobExit::Incomplete);
             let text = std::fs::read_to_string(&path).unwrap();
@@ -391,6 +432,53 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn json_result_carries_extra_fields_in_one_document() {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "messages".into(),
+            serde_json::json!([{"sequence_number": 7}]),
+        );
+        let mut out = Vec::new();
+        finish_job_to(
+            &mut out,
+            &mut Vec::new(),
+            &report(1, 0),
+            Format::Json,
+            &MutateArgs::default(),
+            extra.clone(),
+        );
+        let v: serde_json::Value = serde_json::from_slice(&out).expect("one JSON document");
+        assert_eq!(v["messages"][0]["sequence_number"], 7);
+        assert!(v["items"].is_array() && v["succeeded"] == 1, "{v}");
+        // The table ignores them.
+        let mut out = Vec::new();
+        finish_job_to(
+            &mut out,
+            &mut Vec::new(),
+            &report(1, 0),
+            Format::Table,
+            &MutateArgs::default(),
+            extra,
+        );
+        assert!(!String::from_utf8(out).unwrap().contains("sequence_number"));
+    }
+
+    #[tokio::test]
+    async fn an_armed_token_is_the_one_ctrl_c_cancels() {
+        // `arm_ctrl_c` hands the caller's token to the same handler as `cancel_on`.
+        let token = CancellationToken::new();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        cancel_token_on(token.clone(), async move {
+            let _ = rx.await;
+        });
+        assert!(!token.is_cancelled());
+        tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), token.cancelled())
+            .await
+            .unwrap();
     }
 
     #[test]
@@ -430,6 +518,7 @@ mod tests {
             &report(2, 0),
             Format::Table,
             &to_file(&existing, false),
+            Default::default(),
         );
         assert_eq!(exit, JobExit::Incomplete);
         let err = String::from_utf8(err).unwrap();
@@ -448,6 +537,7 @@ mod tests {
             &report(2, 0),
             Format::Table,
             &to_file(&dir.path().join("gone/r.json"), false),
+            Default::default(),
         );
         assert_eq!(exit, JobExit::Incomplete);
         // --force-report replaces it.
@@ -457,6 +547,7 @@ mod tests {
             &report(2, 0),
             Format::Table,
             &to_file(&existing, true),
+            Default::default(),
         );
         assert_eq!(exit, JobExit::Ok);
         assert!(

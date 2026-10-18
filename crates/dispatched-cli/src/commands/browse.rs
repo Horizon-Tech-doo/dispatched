@@ -43,7 +43,6 @@ pub(crate) fn explorer_for(ctx: &Ctx, sel: &Selection<'_>) -> anyhow::Result<Exp
 /// The resolved target of a mutating command, with its production flag (see
 /// [`crate::resolve::resolve`]). Run [`crate::safety::preflight`] on the `Resolved` before
 /// calling `Explorer::new` on its namespace or anything else that does I/O.
-#[allow(dead_code)] // Used by the mutating commands of Tasks 19-21.
 pub(crate) fn mutating_target(ctx: &Ctx, sel: &Selection<'_>) -> anyhow::Result<Resolved> {
     resolve_selected(ctx, sel)
 }

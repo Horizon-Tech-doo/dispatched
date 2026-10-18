@@ -137,6 +137,22 @@ enum Command {
         #[command(subcommand)]
         cmd: ActivityCmd,
     },
+    /// Send messages to a queue or topic, or schedule them.
+    Send(Box<commands::send::SendArgs>),
+    /// Scheduled messages.
+    Scheduled {
+        #[command(subcommand)]
+        cmd: commands::send::ScheduledCmd,
+    },
+    /// Send the messages of an export file to a queue or topic.
+    Import(commands::send::ImportArgs),
+    /// Receive messages and settle them (--then) or delete them (--delete).
+    Receive(commands::receive::ReceiveArgs),
+    /// Deferred messages.
+    Deferred {
+        #[command(subcommand)]
+        cmd: commands::receive::DeferredCmd,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -240,6 +256,11 @@ async fn run(cli: Cli) -> Result<JobExit, (anyhow::Error, Hints)> {
                 | Command::Show { .. }
                 | Command::Session { .. }
                 | Command::Rule { .. }
+                | Command::Send(_)
+                | Command::Scheduled { .. }
+                | Command::Import(_)
+                | Command::Receive(_)
+                | Command::Deferred { .. }
         ) && resolve::select(&flags, &env).namespace.is_some(),
     };
     // Opens nothing: the profile store, activity log and keychain are touched
@@ -295,7 +316,7 @@ async fn run_command(ctx: &Ctx, cli: Cli) -> anyhow::Result<JobExit> {
         .clone()
         .or_else(|| env(resolve::ENV_PROFILE).filter(|v| !v.trim().is_empty()));
     let format = check_format(&cli)?;
-    // Commands that run jobs return their exit directly (Tasks 19-21); the rest map to `Ok`.
+    // Commands that run jobs return their exit directly; the rest map to `Ok`.
     let done: anyhow::Result<()> = match cli.command {
         Command::Login {
             device_code,
@@ -334,6 +355,17 @@ async fn run_command(ctx: &Ctx, cli: Cli) -> anyhow::Result<JobExit> {
         }
         Command::Activity { cmd } => {
             commands::activity::run(ctx, cmd, cli.format, cli.profile.as_deref())
+        }
+        Command::Send(args) => return commands::send::send(ctx, &sel, &args, format).await,
+        Command::Scheduled { cmd } => {
+            return commands::send::scheduled(ctx, &sel, &cmd, format).await;
+        }
+        Command::Import(args) => return commands::send::import(ctx, &sel, &args, format).await,
+        Command::Receive(args) => {
+            return commands::receive::receive(ctx, &sel, &args, format).await;
+        }
+        Command::Deferred { cmd } => {
+            return commands::receive::deferred(ctx, &sel, &cmd, format).await;
         }
     };
     done.map(|()| JobExit::Ok)
