@@ -316,6 +316,8 @@ struct Purge<'p, 'r, B: ?Sized> {
     cancel: &'p CancellationToken,
     /// The entity is session-enabled (from the plan, or learned from an attach refusal).
     sessions: bool,
+    /// A session was skipped because another receiver holds it.
+    locked_sessions: bool,
 }
 
 impl<B: MessagingBackend + ?Sized> Purge<'_, '_, B> {
@@ -462,8 +464,15 @@ impl<B: MessagingBackend + ?Sized> Purge<'_, '_, B> {
                 }
                 Err(Error::Conflict(_)) => {
                     let reason = format!("session {id} is locked by another receiver");
-                    self.job
-                        .item(bare(address, Some(id), ItemOutcome::Skipped { reason }));
+                    self.job.item(bare(
+                        address,
+                        Some(id),
+                        ItemOutcome::Skipped {
+                            reason,
+                            expected: false,
+                        },
+                    ));
+                    self.locked_sessions = true;
                 }
                 Err(e) => self.job.item(bare(address, Some(id), failed(&e))),
             }
@@ -540,9 +549,13 @@ impl<B: MessagingBackend + ?Sized> Purge<'_, '_, B> {
                 Err(e) => {
                     d.used += seqs.len() as u64;
                     let outcome = match (&e, &session) {
-                        (Error::Conflict(_), Some(id)) => ItemOutcome::Skipped {
-                            reason: format!("session {id} is locked by another receiver"),
-                        },
+                        (Error::Conflict(_), Some(id)) => {
+                            self.locked_sessions = true;
+                            ItemOutcome::Skipped {
+                                reason: format!("session {id} is locked by another receiver"),
+                                expected: false,
+                            }
+                        }
                         _ => failed(&e),
                     };
                     for seq in seqs {
@@ -602,6 +615,7 @@ pub(crate) async fn run<B: MessagingBackend + ?Sized>(
         ),
         cancel,
         sessions: plan.requires_session == Some(true),
+        locked_sessions: false,
     };
     let mut left = total;
     let mut cancelled = false;
@@ -676,6 +690,10 @@ pub(crate) async fn run<B: MessagingBackend + ?Sized>(
         )),
         (false, false, false) => {}
     }
+    if p.locked_sessions {
+        p.job
+            .note("sessions locked by another receiver were skipped; their messages remain".into());
+    }
     Ok(p.job.finish(cancelled))
 }
 
@@ -742,6 +760,7 @@ pub(crate) async fn run_many<B: MessagingBackend + ?Sized>(
                 let outcome = match &e {
                     Error::Denied(_) => ItemOutcome::Skipped {
                         reason: e.to_string(),
+                        expected: false,
                     },
                     _ => failed(&e),
                 };
@@ -868,7 +887,7 @@ mod tests {
         let plan = plan_with("s", PurgeScope::Active, CountEstimate::Exact(3)).sessions();
         let r = purge(&b, &plan).await;
         assert_eq!(r.succeeded(), 2);
-        assert!(r.items.iter().any(|i| matches!(&i.outcome, ItemOutcome::Skipped { reason } if reason == "session B is locked by another receiver")));
+        assert!(r.items.iter().any(|i| matches!(&i.outcome, ItemOutcome::Skipped { reason, .. } if reason == "session B is locked by another receiver")));
         assert_eq!(
             r.items
                 .iter()
@@ -880,6 +899,14 @@ mod tests {
         );
         assert_eq!(b.all("s").len(), 1);
         assert_eq!(b.open_receivers(), 0);
+        assert!(
+            r.notes
+                .iter()
+                .any(|n| n
+                    == "sessions locked by another receiver were skipped; their messages remain"),
+            "{:?}",
+            r.notes
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1198,7 +1225,7 @@ mod tests {
         assert_eq!(b.all("b").len(), 1, "denied: untouched");
         assert_eq!(r.succeeded(), 2);
         assert!(r.items.iter().any(|i| i.entity == "b"
-            && matches!(&i.outcome, ItemOutcome::Skipped { reason } if reason.starts_with("denied: "))));
+            && matches!(&i.outcome, ItemOutcome::Skipped { reason, .. } if reason.starts_with("denied: "))));
         let e = audit.entries();
         assert_eq!(
             e.iter()
@@ -1390,7 +1417,7 @@ mod tests {
         assert_eq!(r.succeeded(), 1);
         assert!(r.items.iter().any(|i| i.session_id.as_deref() == Some("B")
             && i.sequence_number.is_some()
-            && matches!(&i.outcome, ItemOutcome::Skipped { reason } if reason == "session B is locked by another receiver")));
+            && matches!(&i.outcome, ItemOutcome::Skipped { reason, .. } if reason == "session B is locked by another receiver")));
         assert_eq!(b.all("s").len(), 1);
         assert_eq!((b.held_locks(), b.open_receivers()), (0, 0));
     }

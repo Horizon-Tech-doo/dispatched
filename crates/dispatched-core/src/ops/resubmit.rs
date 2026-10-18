@@ -153,8 +153,11 @@ fn scheduled_skip(kind: JobKind) -> ItemOutcome {
     } else {
         "resubmitted"
     };
+    // Promised by the command (scheduled messages cannot be locked or moved), so it does not
+    // make the job incomplete.
     ItemOutcome::Skipped {
         reason: format!("scheduled messages are not {verb}; wait until they are enqueued"),
+        expected: true,
     }
 }
 
@@ -926,7 +929,8 @@ mod tests {
         assert_eq!(
             r.items[0].outcome,
             ItemOutcome::Skipped {
-                reason: "scheduled messages are not moved; wait until they are enqueued".into()
+                reason: "scheduled messages are not moved; wait until they are enqueued".into(),
+                expected: true,
             }
         );
         assert!(b.sent("t").is_empty());

@@ -995,7 +995,7 @@ async fn m2a_operate() {
             report.items.as_slice(),
             [i] if i.sequence_number.is_none()
                 && i.entity == PURGE_A
-                && matches!(&i.outcome, ItemOutcome::Skipped { reason } if reason.starts_with("denied: "))
+                && matches!(&i.outcome, ItemOutcome::Skipped { reason, .. } if reason.starts_with("denied: "))
         ),
         "16: one skipped item for the denial: {report:?}"
     );

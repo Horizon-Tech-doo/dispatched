@@ -1232,6 +1232,7 @@ mod tests {
                 200 + i as i64,
                 ItemOutcome::Skipped {
                     reason: "skip".into(),
+                    expected: false,
                 },
             ));
         }

@@ -687,7 +687,7 @@ fn denied_reasons(report: &JobReport) -> Vec<&str> {
         .items
         .iter()
         .filter_map(|i| match &i.outcome {
-            ItemOutcome::Skipped { reason }
+            ItemOutcome::Skipped { reason, .. }
                 if i.sequence_number.is_none() && reason.starts_with(DENIED_PREFIX) =>
             {
                 Some(reason.as_str())
@@ -1568,6 +1568,7 @@ mod tests {
                 None,
                 ItemOutcome::Skipped {
                     reason: "denied: not confirmed; nothing was changed".into(),
+                    expected: false,
                 },
             )
         };
@@ -1587,6 +1588,7 @@ mod tests {
             None,
             ItemOutcome::Skipped {
                 reason: "session locked by another receiver".into(),
+                expected: false,
             },
         );
         assert_eq!(

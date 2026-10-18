@@ -694,6 +694,7 @@ mod tests {
                     &m,
                     ItemOutcome::Skipped {
                         reason: "scheduled".into(),
+                        expected: false,
                     },
                 ),
             }
@@ -1289,6 +1290,7 @@ mod tests {
                 &m,
                 ItemOutcome::Skipped {
                     reason: "left".into(),
+                    expected: false,
                 },
             )
         }

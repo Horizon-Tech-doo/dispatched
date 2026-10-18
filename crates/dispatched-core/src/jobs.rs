@@ -66,6 +66,11 @@ pub enum ItemOutcome {
     },
     Skipped {
         reason: String,
+        /// A skip the command promised, such as scheduled messages a move leaves alone: listed
+        /// in the report, but the job is not incomplete because of it. Others (a session locked
+        /// by another receiver, a denied entity) leave work undone.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        expected: bool,
     },
     Missing,
     NotReached {
@@ -147,6 +152,29 @@ impl JobReport {
         }
     }
 
+    /// Items that leave the job incomplete: failed, not reached, missing, or skipped other than
+    /// as the command promised.
+    pub fn incomplete(&self) -> u64 {
+        self.count(|o| {
+            !matches!(
+                o,
+                ItemOutcome::Succeeded { .. } | ItemOutcome::Skipped { expected: true, .. }
+            )
+        })
+    }
+
+    /// Every item that did not succeed (failed, not reached, skipped, missing), in order.
+    pub fn not_succeeded(&self) -> impl Iterator<Item = &ItemResult> {
+        self.items
+            .iter()
+            .filter(|i| !matches!(i.outcome, ItemOutcome::Succeeded { .. }))
+    }
+
+    /// Items missing (gone before the job reached them).
+    pub fn missing(&self) -> u64 {
+        self.count(|o| matches!(o, ItemOutcome::Missing))
+    }
+
     /// The failed and not-reached items, in order.
     pub fn failures(&self) -> impl Iterator<Item = &ItemResult> {
         self.items.iter().filter(|i| {
@@ -162,12 +190,15 @@ impl JobReport {
         self.failures().filter_map(|i| i.sequence_number).collect()
     }
 
-    /// Why an item failed or was not reached (empty for other outcomes).
+    /// Why an item did not succeed (empty for a success).
     pub fn reason(i: &ItemResult) -> String {
         match &i.outcome {
-            ItemOutcome::Failed { reason, .. } => reason.clone(),
+            ItemOutcome::Failed { reason, .. } | ItemOutcome::Skipped { reason, .. } => {
+                reason.clone()
+            }
             ItemOutcome::NotReached { why } => not_reached_text(*why).into(),
-            _ => String::new(),
+            ItemOutcome::Missing => "not found".into(),
+            ItemOutcome::Succeeded { .. } => String::new(),
         }
     }
 
@@ -183,7 +214,7 @@ impl JobReport {
                         *d = redact(d);
                     }
                 }
-                ItemOutcome::Failed { reason, .. } | ItemOutcome::Skipped { reason } => {
+                ItemOutcome::Failed { reason, .. } | ItemOutcome::Skipped { reason, .. } => {
                     *reason = redact(reason);
                 }
                 ItemOutcome::Missing | ItemOutcome::NotReached { .. } => {}
@@ -207,10 +238,23 @@ impl JobReport {
             None => format!("from {}", self.entity),
         };
         let failed = self.failed();
+        // What else was not done: incomplete work must never read as complete.
+        let skipped = self.count(|o| matches!(o, ItemOutcome::Skipped { .. }));
+        let missing = self.missing();
+        let others: Vec<String> = [(skipped, "skipped"), (missing, "missing")]
+            .into_iter()
+            .filter(|(n, _)| *n > 0)
+            .map(|(n, what)| format!("{} {what}", crate::safety::count_text(n)))
+            .collect();
+        let others = if others.is_empty() {
+            String::new()
+        } else {
+            format!("; {}", others.join(", "))
+        };
         if failed == 0 {
             let n = self.succeeded();
             let noun = if n == 1 { "message" } else { "messages" };
-            return format!("{verb} {n} {noun} {place}");
+            return format!("{verb} {n} {noun} {place}{others}");
         }
         let list: Vec<String> = self
             .failures()
@@ -228,7 +272,7 @@ impl JobReport {
             list.push_str(&format!(", and {} more", failed - 5));
         }
         format!(
-            "{verb} {} of {} messages {place}; {failed} failed ({list})",
+            "{verb} {} of {} messages {place}; {failed} failed ({list}){others}",
             self.succeeded(),
             self.items.len()
         )
@@ -562,6 +606,7 @@ mod tests {
             seq,
             ItemOutcome::Skipped {
                 reason: "already there".into(),
+                expected: false,
             },
         )
     }
@@ -664,6 +709,56 @@ mod tests {
             "Moved 2 messages from orders/$DeadLetterQueue to orders",
             "all succeeded: no \"of N\""
         );
+    }
+
+    #[test]
+    fn summary_line_says_what_was_skipped_or_missing() {
+        assert_eq!(
+            report(&[ok(1), skipped(2), missing(3), missing(4)]).summary_line(),
+            "Moved 1 message from orders/$DeadLetterQueue to orders; 1 skipped, 2 missing"
+        );
+        assert_eq!(
+            report(&[
+                ok(1),
+                failed(2, "lock_lost", "the lock expired"),
+                missing(3)
+            ])
+            .summary_line(),
+            "Moved 1 of 3 messages from orders/$DeadLetterQueue to orders; 1 failed (sequence 2: the lock expired); 1 missing"
+        );
+        assert_eq!(
+            report(&[skipped(2)]).summary_line(),
+            "Moved 0 messages from orders/$DeadLetterQueue to orders; 1 skipped"
+        );
+    }
+
+    #[test]
+    fn incomplete_counts_everything_but_successes_and_skips_asked_for() {
+        let asked = item(
+            9,
+            ItemOutcome::Skipped {
+                reason: "scheduled".into(),
+                expected: true,
+            },
+        );
+        let r = report(&[
+            ok(1),
+            failed(2, "timeout", "slow"),
+            skipped(3),
+            missing(4),
+            not_reached(5, NotReached::Budget),
+            asked.clone(),
+        ]);
+        assert_eq!(r.incomplete(), 4);
+        assert_eq!(report(&[ok(1), asked]).incomplete(), 0);
+        assert_eq!(
+            r.not_succeeded()
+                .map(|i| i.sequence_number)
+                .collect::<Vec<_>>(),
+            [Some(2), Some(3), Some(4), Some(5), Some(9)]
+        );
+        assert_eq!(JobReport::reason(&r.items[2]), "already there");
+        assert_eq!(JobReport::reason(&r.items[3]), "not found");
     }
 
     #[test]

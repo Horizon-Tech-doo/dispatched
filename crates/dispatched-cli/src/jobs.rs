@@ -15,9 +15,10 @@ use std::path::Path;
 /// How a job ended, for the exit code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobExit {
-    /// Every item succeeded or was skipped (exit code 0).
+    /// Every item succeeded, or was skipped as the command promised (exit code 0).
     Ok,
-    /// Some item failed or was not reached, or the job was cancelled (exit code 2).
+    /// Some item failed, was not reached, was missing or was skipped, or the job was cancelled
+    /// (exit code 2).
     Incomplete,
 }
 
@@ -68,7 +69,7 @@ fn progress_line(done: u64, total: Option<u64>) -> Option<String> {
 
 /// Whether the job finished every item.
 fn job_exit(report: &JobReport) -> JobExit {
-    if report.cancelled || report.failed() > 0 {
+    if report.cancelled || report.incomplete() > 0 {
         JobExit::Incomplete
     } else {
         JobExit::Ok
@@ -164,8 +165,9 @@ fn print_result(
                 writeln!(out, "{text}")?;
             }
             writeln!(out, "{}", sanitize(&report.summary_line()))?;
+            // Every item that did not succeed, with its reason: skipped and missing ones too.
             let rows: Vec<Vec<String>> = report
-                .failures()
+                .not_succeeded()
                 .map(|i| {
                     vec![
                         i.sequence_number.map(|s| s.to_string()).unwrap_or_default(),
@@ -416,19 +418,59 @@ mod tests {
             8,
             ItemOutcome::Skipped {
                 reason: "session locked by another receiver".into(),
+                expected: false,
             },
         ));
         assert_eq!(
             finish_job_for_test(&skipped),
-            JobExit::Ok,
-            "skipped is fine"
+            JobExit::Incomplete,
+            "a skip leaves work undone"
         );
         let mut missing = report(1, 0);
         missing.items.push(item(9, ItemOutcome::Missing));
         assert_eq!(
             finish_job_for_test(&missing),
+            JobExit::Incomplete,
+            "a missing message was not acted on"
+        );
+        let mut asked = report(1, 0);
+        asked.items.push(item(
+            10,
+            ItemOutcome::Skipped {
+                reason: "scheduled messages are not moved".into(),
+                expected: true,
+            },
+        ));
+        assert_eq!(
+            finish_job_for_test(&asked),
             JobExit::Ok,
-            "missing counts as skipped (decision 17)"
+            "a skip the command promised (scheduled messages) is not incomplete"
+        );
+    }
+
+    #[test]
+    fn table_output_lists_skipped_and_missing_items_with_reasons() {
+        let mut r = report(1, 0);
+        r.items.push(item(
+            8,
+            ItemOutcome::Skipped {
+                reason: "session B is locked by another receiver".into(),
+                expected: false,
+            },
+        ));
+        r.items.push(item(9, ItemOutcome::Missing));
+        let text = table_output(&r);
+        assert!(text.contains("1 skipped, 1 missing"), "{text}");
+        assert!(
+            text.lines().any(|l| l.starts_with('8')
+                && l.contains("skipped")
+                && l.contains("session B is locked")),
+            "{text}"
+        );
+        assert!(
+            text.lines()
+                .any(|l| l.starts_with('9') && l.contains("missing") && l.contains("not found")),
+            "{text}"
         );
     }
 
