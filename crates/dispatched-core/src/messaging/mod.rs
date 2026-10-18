@@ -1,6 +1,7 @@
 //! AMQP data plane: connection, CBS, management link, message model, peek.
 
 mod connection;
+pub mod lockops;
 mod management;
 mod message;
 pub mod outgoing;

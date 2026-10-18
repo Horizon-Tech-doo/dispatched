@@ -208,7 +208,7 @@ impl PropValue {
 
 /// Convert an AMQP timestamp without panicking; `None` when the (sender-controlled)
 /// value falls outside years 0..=9999, which RFC 3339 can represent.
-fn timestamp_to_datetime(ts: &Timestamp) -> Option<OffsetDateTime> {
+pub(crate) fn timestamp_to_datetime(ts: &Timestamp) -> Option<OffsetDateTime> {
     let nanos = i128::from(ts.milliseconds()) * 1_000_000;
     let dt = OffsetDateTime::from_unix_timestamp_nanos(nanos).ok()?;
     (0..=9999).contains(&dt.year()).then_some(dt)

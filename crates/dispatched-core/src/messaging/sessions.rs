@@ -284,6 +284,7 @@ mod tests {
         MgmtResponse {
             status,
             description: None,
+            condition: None,
             body,
         }
     }

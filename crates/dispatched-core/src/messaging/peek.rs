@@ -146,6 +146,7 @@ mod tests {
         MgmtResponse {
             status,
             description: None,
+            condition: None,
             body,
         }
     }
@@ -227,6 +228,7 @@ mod tests {
         let r = MgmtResponse {
             status: 401,
             description: Some("Unauthorized".into()),
+            condition: None,
             body: Value::Null,
         };
         assert!(matches!(

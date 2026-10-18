@@ -102,6 +102,9 @@ pub struct MgmtResponse {
     pub status: u16,
     /// `statusDescription`, if present.
     pub description: Option<String>,
+    /// `errorCondition` (or `error-condition`), if present: Service Bus puts the
+    /// error condition there, not in `statusDescription`.
+    pub condition: Option<String>,
     /// AMQP-value body (`Value::Null` when absent).
     pub body: Value,
 }
@@ -117,6 +120,11 @@ impl MgmtResponse {
             Some(SimpleValue::String(s)) => Some(s.clone()),
             _ => None,
         };
+        let condition = match lookup("errorCondition", "error-condition") {
+            Some(SimpleValue::String(s)) => Some(s.clone()),
+            Some(SimpleValue::Symbol(s)) => Some(s.as_str().to_string()),
+            _ => None,
+        };
         let body = match message.body {
             Body::Value(v) => v.0,
             _ => Value::Null,
@@ -124,16 +132,39 @@ impl MgmtResponse {
         Self {
             status,
             description,
+            condition,
             body,
         }
     }
 
-    /// Map a non-success status to an [`Error`].
+    /// Map a non-success response to an [`Error`]: the `errorCondition` first,
+    /// then the status (410 lock lost, 409 conflict), then the condition names
+    /// in the description (for brokers that only put them there), otherwise by
+    /// status.
     pub fn error(&self, operation: &str) -> Error {
         let detail = self
             .description
             .clone()
             .unwrap_or_else(|| format!("status {}", self.status));
+        if let Some(e) = self
+            .condition
+            .as_deref()
+            .and_then(|c| condition_error(operation, c, &detail))
+        {
+            return e;
+        }
+        match self.status {
+            410 => return lock_lost(operation, &detail),
+            409 => return Error::Conflict(format!("{operation}: {detail}")),
+            _ => {}
+        }
+        if let Some(e) = self
+            .description
+            .as_deref()
+            .and_then(|d| condition_error(operation, d, &detail))
+        {
+            return e;
+        }
         match self.status {
             401 => crate::mgmt::unauthorized(format!("{operation}: {detail}")),
             403 => Error::Forbidden {
@@ -147,6 +178,30 @@ impl MgmtResponse {
     }
 }
 
+const MESSAGE_LOCK_LOST: &str = "com.microsoft:message-lock-lost";
+const SESSION_LOCK_LOST: &str = "com.microsoft:session-lock-lost";
+const SESSION_CANNOT_BE_LOCKED: &str = "com.microsoft:session-cannot-be-locked";
+
+fn lock_lost(operation: &str, detail: &str) -> Error {
+    Error::LockLost(format!(
+        "{operation}: the lock expired or was lost ({detail}); the message is available again, run the operation again"
+    ))
+}
+
+/// The error for a lock or session condition named in `text` (an
+/// `errorCondition`, or a description containing one); `None` for others.
+fn condition_error(operation: &str, text: &str, detail: &str) -> Option<Error> {
+    if text.contains(MESSAGE_LOCK_LOST) || text.contains(SESSION_LOCK_LOST) {
+        Some(lock_lost(operation, detail))
+    } else if text.contains(SESSION_CANNOT_BE_LOCKED) {
+        Some(Error::Conflict(format!(
+            "{operation}: the session is locked by another receiver; stop that receiver or wait for its lock to expire"
+        )))
+    } else {
+        None
+    }
+}
+
 fn simple_to_u16(v: &SimpleValue) -> Option<u16> {
     match v {
         SimpleValue::Int(n) => u16::try_from(*n).ok(),
@@ -157,6 +212,29 @@ fn simple_to_u16(v: &SimpleValue) -> Option<u16> {
         SimpleValue::Ushort(n) => Some(*n),
         _ => None,
     }
+}
+
+/// Application properties of a management request.
+fn request_properties(
+    operation: &str,
+    associated_link: Option<&str>,
+) -> OrderedMap<String, SimpleValue> {
+    let mut app = OrderedMap::new();
+    app.insert(
+        "operation".to_string(),
+        SimpleValue::String(operation.to_string()),
+    );
+    app.insert(
+        "com.microsoft:server-timeout".to_string(),
+        SimpleValue::Uint(SERVER_TIMEOUT_MS),
+    );
+    if let Some(link) = associated_link {
+        app.insert(
+            "associated-link-name".to_string(),
+            SimpleValue::String(link.to_string()),
+        );
+    }
+    app
 }
 
 /// A sender/receiver pair attached to `{address}/$management`.
@@ -208,17 +286,21 @@ impl ManagementLink {
         operation: &str,
         body: OrderedMap<String, Value>,
     ) -> Result<MgmtResponse> {
+        self.call_for_link(operation, body, None).await
+    }
+
+    /// [`call`](Self::call) on behalf of a receiver link: `associated_link`
+    /// (the receiver link's name) is sent as `associated-link-name`, which
+    /// lock and session operations need.
+    pub async fn call_for_link(
+        &mut self,
+        operation: &str,
+        body: OrderedMap<String, Value>,
+        associated_link: Option<&str>,
+    ) -> Result<MgmtResponse> {
         let id = self.next_id;
         self.next_id += 1;
-        let mut app = OrderedMap::new();
-        app.insert(
-            "operation".to_string(),
-            SimpleValue::String(operation.to_string()),
-        );
-        app.insert(
-            "com.microsoft:server-timeout".to_string(),
-            SimpleValue::Uint(SERVER_TIMEOUT_MS),
-        );
+        let app = request_properties(operation, associated_link);
         let request = Message::builder()
             .properties(
                 Properties::builder()
@@ -281,6 +363,7 @@ impl ManagementLink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fe2o3_amqp::types::messaging::AmqpValue;
     use fe2o3_amqp::types::primitives::Symbol;
     use fe2o3_amqp_management::error::StatusError;
     use fe2o3_amqp_management::status::StatusCode;
@@ -373,6 +456,107 @@ mod tests {
             code: StatusCode(NonZeroU16::new(code).unwrap()),
             description: Some(description.to_string()),
         })
+    }
+
+    #[test]
+    fn requests_for_a_link_name_it() {
+        let plain = request_properties("com.microsoft:peek-message", None);
+        assert_eq!(
+            plain.get("operation"),
+            Some(&SimpleValue::String("com.microsoft:peek-message".into()))
+        );
+        assert_eq!(
+            plain.get("com.microsoft:server-timeout"),
+            Some(&SimpleValue::Uint(SERVER_TIMEOUT_MS))
+        );
+        assert!(plain.get("associated-link-name").is_none());
+        let linked = request_properties("com.microsoft:renew-lock", Some("rx-1"));
+        assert_eq!(
+            linked.get("associated-link-name"),
+            Some(&SimpleValue::String("rx-1".into()))
+        );
+    }
+
+    #[test]
+    fn lock_lost_and_locked_sessions_map_to_their_errors() {
+        // The real carrier: the condition is in the `errorCondition` application property.
+        let with_condition = |status: u16, condition: &str| {
+            let msg = Message::builder()
+                .application_properties(
+                    ApplicationProperties::builder()
+                        .insert("statusCode", status as i32)
+                        .insert("statusDescription", "The lock supplied is invalid.")
+                        .insert("errorCondition", Symbol::from(condition))
+                        .build(),
+                )
+                .body(Body::Value(AmqpValue(Value::Null)))
+                .build();
+            MgmtResponse::from_message(msg)
+        };
+        let lost = with_condition(400, "com.microsoft:message-lock-lost");
+        assert_eq!(
+            lost.condition.as_deref(),
+            Some("com.microsoft:message-lock-lost")
+        );
+        assert!(
+            matches!(lost.error("update-disposition"), Error::LockLost(_)),
+            "condition wins over status 400"
+        );
+        assert!(matches!(
+            with_condition(400, "com.microsoft:session-lock-lost").error("renew-session-lock"),
+            Error::LockLost(_)
+        ));
+        assert!(matches!(
+            with_condition(400, "com.microsoft:session-cannot-be-locked").error("get-session-state"),
+            Error::Conflict(m) if m.contains("locked by another receiver")
+        ));
+        // Status only, no condition.
+        assert!(matches!(
+            MgmtResponse {
+                status: 410,
+                description: Some("gone".into()),
+                condition: None,
+                body: Value::Null
+            }
+            .error("renew-lock"),
+            Error::LockLost(_)
+        ));
+        assert!(matches!(
+            MgmtResponse {
+                status: 409,
+                description: None,
+                condition: None,
+                body: Value::Null
+            }
+            .error("x"),
+            Error::Conflict(_)
+        ));
+        // Description only, as a last resort.
+        assert!(matches!(
+            MgmtResponse {
+                status: 400,
+                description: Some("com.microsoft:message-lock-lost: x".into()),
+                condition: None,
+                body: Value::Null
+            }
+            .error("x"),
+            Error::LockLost(_)
+        ));
+        // A condition string arrives as a String too; other conditions keep the status mapping.
+        let mut app = OrderedMap::new();
+        app.insert("statusCode".to_string(), SimpleValue::Int(404));
+        app.insert(
+            "error-condition".to_string(),
+            SimpleValue::String("amqp:not-found".into()),
+        );
+        let r = MgmtResponse::from_message(
+            Message::builder()
+                .application_properties(ApplicationProperties(app))
+                .body(Body::Value(AmqpValue(Value::Null)))
+                .build(),
+        );
+        assert_eq!(r.condition.as_deref(), Some("amqp:not-found"));
+        assert!(matches!(r.error("x"), Error::NotFound(_)));
     }
 
     #[test]
