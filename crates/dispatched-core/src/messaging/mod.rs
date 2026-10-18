@@ -54,6 +54,8 @@ pub(crate) fn wall_now() -> time::OffsetDateTime {
 /// The wall clock in tests: one process-wide anchor advanced on tokio time, so the fake
 /// broker's clock and `ops::locate`'s read exactly the same time for the same instant (two
 /// separate `now_utc()` anchors would differ by however long the test took in between).
+/// Only this crate's unit tests get it (`FakeBroker` is `cfg(test)` too); the `test-support`
+/// feature and other crates see `now_utc()`, so exact lock-time assertions belong here.
 #[cfg(test)]
 pub(crate) fn wall_now() -> time::OffsetDateTime {
     use std::sync::OnceLock;

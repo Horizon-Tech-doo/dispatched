@@ -3,7 +3,7 @@
 
 use super::locate::{Found, OnFound, locate};
 use super::send::distinct;
-use super::{SelectSpec, failed, record, seq_item};
+use super::{Resolved, SelectSpec, failed, record, seq_item};
 use crate::diagnostics::error_kind;
 use crate::jobs::{ItemOutcome, ItemResult, JobKind, JobReport, JobRun, NotReached, Progress};
 use crate::messaging::backend::{LockReceiver, MessageSender, MessagingBackend};
@@ -66,14 +66,31 @@ pub fn default_target(source: &EntityPath) -> String {
     source.entity.clone()
 }
 
-/// The operation a resubmit (or, with `JobKind::Move`, a move) of `seqs` confirms. It is
-/// searched (the sentence says examined messages are locked) when originals are removed from
-/// a view found with a peek-lock link.
-pub(crate) fn operation(spec: &ResubmitSpec, seqs: &[i64], kind: JobKind) -> Result<Operation> {
-    let to = spec.target_name()?;
+/// Refuse a resubmit or move that cannot run, before any I/O: a target that is not a queue or
+/// topic, or the scheduled view (scheduled messages cannot be locked, so none would move).
+/// Returns the target.
+pub(crate) fn check(spec: &ResubmitSpec) -> Result<String> {
+    if spec.source.view == PeekView::Scheduled {
+        return Err(Error::Invalid(
+            "scheduled messages cannot be moved or resubmitted; wait until they are enqueued"
+                .into(),
+        ));
+    }
+    spec.target_name()
+}
+
+/// The operation a resubmit (or, with `JobKind::Move`, a move) of the `resolved` selection
+/// confirms, listing its sequence numbers. It is searched (the sentence says examined messages
+/// are locked) when originals are removed from a view found with a peek-lock link.
+pub(crate) fn operation(
+    spec: &ResubmitSpec,
+    resolved: &Resolved,
+    kind: JobKind,
+) -> Result<Operation> {
+    let to = check(spec)?;
     let source = &spec.source;
     let target = Target::new(source.entity.clone(), source.view.sub_queue());
-    let n = seqs.len() as u64;
+    let n = resolved.seqs.len() as u64;
     let op = match kind {
         JobKind::Move => Operation::move_to(target, &to, n),
         _ => Operation::resubmit(target, &to, n, spec.remove_original),
@@ -83,6 +100,7 @@ pub(crate) fn operation(spec: &ResubmitSpec, seqs: &[i64], kind: JobKind) -> Res
             source.view,
             PeekView::Active | PeekView::DeadLetter | PeekView::TransferDeadLetter
         );
+    let op = resolved.describe(op);
     Ok(if searched { op.searched() } else { op })
 }
 
@@ -115,7 +133,8 @@ fn scheduled_skip(kind: JobKind) -> ItemOutcome {
 }
 
 /// Resubmit the messages `seqs` (what `resolve_selection` returned) as `JobKind::Resubmit`.
-// The `Operator` goes through `run_as` with its kind; this is the plain resubmit entry point.
+/// The brief's entry point (the tests use it); the `Operator` goes through [`run_as`] with its
+/// kind.
 #[allow(dead_code)]
 pub(crate) async fn run(
     plane: &mut dyn MessagingBackend,
@@ -189,13 +208,46 @@ struct ResubmitOnFound {
     kind: JobKind,
 }
 
+/// A copy that was not sent, as far as the sender knows.
+struct SendFailure {
+    error: Error,
+    /// The link failed without a result for this copy: it may have reached the broker.
+    maybe_sent: bool,
+}
+
+impl From<Error> for SendFailure {
+    fn from(error: Error) -> Self {
+        Self {
+            error,
+            maybe_sent: false,
+        }
+    }
+}
+
+/// Added to the reason of a copy whose outcome is unknown.
+const MAYBE_SENT: &str = "; the copy may have been sent";
+
+/// Why the deferred original of a failed copy is where it is (it was abandoned, or the abandon
+/// failed and its lock runs out).
+fn deferred_kept(from_dead_letter: bool, abandoned: bool) -> &'static str {
+    match (abandoned, from_dead_letter) {
+        (false, _) => {
+            "the copy failed; the original stays locked until its lock expires, then its delivery count rises by 1"
+        }
+        (true, true) => "the copy failed; the original stays deferred in the dead-letter queue",
+        (true, false) => {
+            "the copy failed; the original stays deferred (its delivery count rose by 1, and at the entity's limit it moves to the dead-letter queue)"
+        }
+    }
+}
+
 impl ResubmitOnFound {
     /// Clone, edit and send the copy of `m`; the cloning notes on success.
     async fn send(
         &mut self,
         plane: &mut dyn MessagingBackend,
         m: &PeekedMessage,
-    ) -> Result<Vec<String>> {
+    ) -> std::result::Result<Vec<String>, SendFailure> {
         let (copy, notes) = prepare(m, &self.edits, &self.clone)?;
         let sender = match &mut self.sender {
             Some(s) => s,
@@ -211,9 +263,15 @@ impl ResubmitOnFound {
             broken.close().await;
         }
         match (one, call) {
-            (Some(r), _) => r.map(|()| notes),
-            (None, Err(e)) => Err(e),
-            (None, Ok(())) => Err(Error::Protocol("the sender reported no outcome".into())),
+            (Some(r), _) => Ok(r.map(|()| notes)?),
+            (None, Err(error)) => Err(SendFailure {
+                error,
+                maybe_sent: true,
+            }),
+            (None, Ok(())) => Err(SendFailure {
+                error: Error::Protocol("the sender reported no outcome".into()),
+                maybe_sent: true,
+            }),
         }
     }
 
@@ -254,21 +312,26 @@ impl OnFound for ResubmitOnFound {
                     ),
                 },
             },
-            Err(e) if m.state == MessageState::Deferred => {
+            Err(f) if m.state == MessageState::Deferred => {
                 // Received by sequence number, so not held: it cannot be released. Abandoning
-                // it unlocks it now (it stays deferred); its delivery count rises either way.
-                let _ = rx.settle(token, &Settlement::Abandon).await;
+                // it unlocks it now (it stays deferred); its delivery count rises either way,
+                // and on an entity at its max delivery count the broker dead-letters it.
+                let abandoned = rx.settle(token, &Settlement::Abandon).await.is_ok();
+                let kept = deferred_kept(self.clone.from_dead_letter, abandoned);
+                let maybe = if f.maybe_sent { MAYBE_SENT } else { "" };
                 ItemOutcome::Failed {
-                    kind: error_kind(&e),
-                    reason: format!(
-                        "{e}; the original was kept (still deferred, its delivery count rose by 1)"
-                    ),
+                    kind: error_kind(&f.error),
+                    reason: format!("{kept}: {}{maybe}", f.error),
                 }
             }
-            Err(e) => {
+            Err(f) => {
                 // A failed release leaves it held: `locate` releases it again at the end.
                 let _ = rx.release(token).await;
-                failed(&e)
+                let maybe = if f.maybe_sent { MAYBE_SENT } else { "" };
+                ItemOutcome::Failed {
+                    kind: error_kind(&f.error),
+                    reason: format!("{}{maybe}", f.error),
+                }
             }
         };
         seq_item(&self.address, m, outcome)
@@ -386,10 +449,16 @@ async fn clone_and_resend(
                     detail: detail(notes),
                 },
                 Some(Err(e)) => failed(&e),
-                None => failed(&call.as_ref().err().map_or_else(
-                    || Error::Protocol("the sender reported no outcome".into()),
-                    copy_error,
-                )),
+                None => {
+                    let e = call.as_ref().err().map_or_else(
+                        || Error::Protocol("the sender reported no outcome".into()),
+                        copy_error,
+                    );
+                    ItemOutcome::Failed {
+                        kind: error_kind(&e),
+                        reason: format!("{e}{MAYBE_SENT}"),
+                    }
+                }
             };
             out.insert(m.sequence_number, seq_item(address, m, outcome));
         }
@@ -686,13 +755,19 @@ mod tests {
         assert_eq!(b.held_locks(), 0);
     }
 
-    #[tokio::test]
-    async fn a_deferred_original_whose_copy_fails_stays_deferred() {
+    /// Move the deferred message of `address` (dead-letter view for a dead-letter address,
+    /// else the deferred view) with its copy refused and, with `abandon_fails`, the abandon too.
+    async fn move_deferred_failing(address: &str, abandon_fails: bool) -> (FakeBroker, String) {
         let b = FakeBroker::default();
-        let s = b.add("q", FakeMsg::active("x").deferred());
+        let s = b.add(address, FakeMsg::active("x").deferred());
         b.fail_next(FakeOp::Send, Error::Invalid("too big".into()));
-        let mut spec = move_spec("q", &[s], "t");
-        spec.source.view = PeekView::Deferred;
+        if abandon_fails {
+            b.fail_next(FakeOp::Settle, Error::Network("reset".into()));
+        }
+        let mut spec = move_spec(address, &[s], "t");
+        if !address.contains("/$") {
+            spec.source.view = PeekView::Deferred;
+        }
         let r = run(
             &mut b.clone(),
             &spec,
@@ -702,21 +777,46 @@ mod tests {
         )
         .await
         .unwrap();
-        let ItemOutcome::Failed { reason, .. } = &r.items[0].outcome else {
+        let ItemOutcome::Failed { kind, reason } = &r.items[0].outcome else {
             panic!("{:?}", r.items[0].outcome)
         };
-        assert!(
-            reason
-                .ends_with("the original was kept (still deferred, its delivery count rose by 1)")
-        );
+        assert_eq!(*kind, "invalid", "the copy's error kind");
+        assert!(reason.ends_with(": too big"), "{reason}");
+        assert_eq!(b.open_receivers(), 0);
+        assert_eq!(b.open_senders(), 0);
+        (b, reason.clone())
+    }
+
+    #[tokio::test]
+    async fn a_deferred_original_whose_copy_fails_stays_deferred() {
+        // On the entity: abandoned, so its delivery count rose and the limit may dead-letter it.
+        let (b, reason) = move_deferred_failing("q", false).await;
+        assert!(reason.starts_with(
+            "the copy failed; the original stays deferred (its delivery count rose by 1, and at the entity's limit it moves to the dead-letter queue)"
+        ));
         let left = b.all("q");
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].state, MessageState::Deferred);
+        assert_eq!(left[0].delivery_count, 1);
         assert!(
             left[0].locked_until.is_none(),
             "unlocked now, not on expiry"
         );
-        assert_eq!(b.open_receivers(), 0);
+        // In a dead-letter queue.
+        let dl = "q/$DeadLetterQueue";
+        let (b, reason) = move_deferred_failing(dl, false).await;
+        assert!(
+            reason.starts_with(
+                "the copy failed; the original stays deferred in the dead-letter queue"
+            )
+        );
+        assert_eq!(b.all(dl)[0].state, MessageState::Deferred);
+        // The abandon failed too: locked until its lock runs out.
+        let (b, reason) = move_deferred_failing("q", true).await;
+        assert!(reason.starts_with(
+            "the copy failed; the original stays locked until its lock expires, then its delivery count rises by 1"
+        ));
+        assert!(b.all("q")[0].locked_until.is_some(), "still locked");
     }
 
     #[tokio::test]
@@ -818,7 +918,12 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(r.succeeded(), 1);
-        assert_eq!(r.notes.len(), 1, "{:?}", r.notes);
+        assert_eq!(
+            r.notes,
+            [
+                "1 message could not be unlocked; its delivery count rises by 1 when the lock expires"
+            ]
+        );
     }
 
     #[test]
@@ -828,23 +933,49 @@ mod tests {
             production: false,
         };
         let dl = "q/$DeadLetterQueue";
-        let op = operation(&move_spec(dl, &[1], "t"), &[1], JobKind::Move).unwrap();
+        let one = Resolved::exact(vec![1]);
+        let op = operation(&move_spec(dl, &[1], "t"), &one, JobKind::Move).unwrap();
         assert_eq!(
             op.summary(&dev),
-            "Move 1 message from q/$DeadLetterQueue to t on dev (sent first, then removed: a message may arrive twice). Messages examined during the search are locked while it runs"
+            "Move 1 message (sequence number 1) from q/$DeadLetterQueue to t on dev (sent first, then removed: a message may arrive twice). Messages examined during the search are locked while it runs"
         );
-        let op = operation(&resubmit_spec(dl, &[1, 2], ""), &[1, 2], JobKind::Resubmit).unwrap();
+        let two = Resolved::exact(vec![1, 2]);
+        let op = operation(&resubmit_spec(dl, &[1, 2], ""), &two, JobKind::Resubmit).unwrap();
         assert_eq!(
             op.summary(&dev),
-            "Resubmit 2 messages from q/$DeadLetterQueue to q on dev"
+            "Resubmit 2 messages (sequence numbers 1, 2) from q/$DeadLetterQueue to q on dev"
         );
         let mut deferred = move_spec("q", &[1], "t");
         deferred.source.view = PeekView::Deferred;
-        let op = operation(&deferred, &[1], JobKind::Resubmit).unwrap();
+        let op = operation(&deferred, &one, JobKind::Resubmit).unwrap();
         assert_eq!(
             op.summary(&dev),
-            "Resubmit 1 message from q to t on dev, removing the originals",
+            "Resubmit 1 message (sequence number 1) from q to t on dev, removing the originals",
             "deferred messages are taken by sequence number, not searched"
         );
+        let partial = Resolved {
+            seqs: vec![5],
+            examined: 2_500,
+            complete: false,
+        };
+        let op = operation(&resubmit_spec(dl, &[], "t"), &partial, JobKind::Resubmit).unwrap();
+        assert_eq!(
+            op.summary(&dev),
+            "Resubmit 1 message (sequence number 5) from q/$DeadLetterQueue to t on dev; matched 1 in the first 2,500 examined; run again for the rest"
+        );
+    }
+
+    #[test]
+    fn the_scheduled_view_is_refused_before_anything_runs() {
+        let mut spec = move_spec("q", &[1], "t");
+        spec.source.view = PeekView::Scheduled;
+        let Err(Error::Invalid(text)) = check(&spec) else {
+            panic!("refused")
+        };
+        assert_eq!(
+            text,
+            "scheduled messages cannot be moved or resubmitted; wait until they are enqueued"
+        );
+        assert!(operation(&spec, &Resolved::exact(vec![1]), JobKind::Move).is_err());
     }
 }

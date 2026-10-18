@@ -213,7 +213,6 @@ enum Effect {
     },
     Delete {
         n: u64,
-        shown: Vec<i64>,
     },
     Move {
         to: String,
@@ -234,8 +233,8 @@ enum Effect {
     },
 }
 
-/// How many sequence numbers a delete sentence lists before `and N more`.
-const SEQUENCES_SHOWN: usize = 10;
+/// How many sequence numbers a sentence lists before `and N more`.
+const SEQUENCES_SHOWN: usize = 20;
 
 /// A mutating call, before it runs: what, where, how many and the words that name the effect.
 #[derive(Debug, Clone)]
@@ -250,6 +249,10 @@ pub struct Operation {
     pub reversible: bool,
     effect: Effect,
     lock_search: bool,
+    /// The first sequence numbers of the selection, listed after the count.
+    sequences: Vec<i64>,
+    /// The selection matched only within this many examined messages.
+    matched_within: Option<u64>,
 }
 
 fn messages(n: u64) -> String {
@@ -265,7 +268,36 @@ impl Operation {
             reversible: false,
             effect,
             lock_search: false,
+            sequences: Vec::new(),
+            matched_within: None,
         }
+    }
+
+    /// `n messages`, followed by the listed sequence numbers when there are any:
+    /// `3 messages (sequence numbers 4, 9, 12)`, `30 messages (sequence numbers 1, ... 20 and
+    /// 10 more)`.
+    fn counted(&self, n: u64) -> String {
+        let mut text = messages(n);
+        if self.sequences.is_empty() {
+            return text;
+        }
+        let mut list = self
+            .sequences
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let more = n.saturating_sub(self.sequences.len() as u64);
+        if more > 0 {
+            list = format!("{list} and {} more", count_text(more));
+        }
+        let label = if n == 1 {
+            "sequence number"
+        } else {
+            "sequence numbers"
+        };
+        text.push_str(&format!(" ({label} {list})"));
+        text
     }
 
     /// Send `n` messages, or schedule them for a time.
@@ -326,13 +358,9 @@ impl Operation {
             CountEstimate::Exact(sequence_numbers.len() as u64),
             Effect::Delete {
                 n: sequence_numbers.len() as u64,
-                shown: sequence_numbers
-                    .iter()
-                    .copied()
-                    .take(SEQUENCES_SHOWN)
-                    .collect(),
             },
         )
+        .with_sequences(sequence_numbers)
     }
 
     /// Move `n` messages to the entity `target_name`: sent first, then removed.
@@ -393,6 +421,24 @@ impl Operation {
                 replace,
             },
         )
+    }
+
+    /// List the selection's sequence numbers in the sentence: the first 20, then `and N more`
+    /// (none listed for an empty slice). Delete, move and resubmit use it.
+    pub fn with_sequences(mut self, sequence_numbers: &[i64]) -> Self {
+        self.sequences = sequence_numbers
+            .iter()
+            .copied()
+            .take(SEQUENCES_SHOWN)
+            .collect();
+        self
+    }
+
+    /// Say that the selection was matched only in the first `examined` messages of the view
+    /// (a budget or the limit stopped the scan), so more may match.
+    pub fn matched_within(mut self, examined: u64) -> Self {
+        self.matched_within = Some(examined);
+        self
     }
 
     /// Mark the operation as finding its messages with a peek-lock search: the sentence then says
@@ -467,26 +513,12 @@ impl Operation {
                 count_text(*n),
                 plural_word(*n)
             ),
-            Effect::Delete { n, shown } => {
-                let mut list = shown
-                    .iter()
-                    .map(i64::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let more = n.saturating_sub(shown.len() as u64);
-                if more > 0 {
-                    list = format!("{list} and {} more", count_text(more));
-                }
-                let label = if *n == 1 {
-                    "sequence number"
-                } else {
-                    "sequence numbers"
-                };
-                format!("Delete {} ({label} {list}) from {at} on {on}", messages(*n))
+            Effect::Delete { n } => {
+                format!("Delete {} from {at} on {on}", self.counted(*n))
             }
             Effect::Move { to, n } => format!(
                 "Move {} from {at} to {to} on {on} (sent first, then removed: a message may arrive twice)",
-                messages(*n)
+                self.counted(*n)
             ),
             Effect::Resubmit {
                 to,
@@ -494,7 +526,7 @@ impl Operation {
                 remove_original,
             } => format!(
                 "Resubmit {} from {at} to {to} on {on}{}",
-                messages(*n),
+                self.counted(*n),
                 if *remove_original {
                     ", removing the originals"
                 } else {
@@ -534,6 +566,13 @@ impl Operation {
                 if *replace { "Replace" } else { "Clear" }
             ),
         };
+        if let Some(examined) = self.matched_within {
+            text.push_str(&format!(
+                "; matched {} in the first {} examined; run again for the rest",
+                count_text(self.count.bound().unwrap_or(0)),
+                count_text(examined)
+            ));
+        }
         if self.lock_search {
             text.push_str(". Messages examined during the search are locked while it runs");
         }
@@ -893,7 +932,62 @@ mod tests {
         );
         assert_eq!(
             Operation::delete(t(), &(1..=30).collect::<Vec<_>>()).summary(&prod()),
-            "Delete 30 messages (sequence numbers 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 and 20 more) from orders/$DeadLetterQueue on prod-weu"
+            "Delete 30 messages (sequence numbers 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20 and 10 more) from orders/$DeadLetterQueue on prod-weu"
+        );
+    }
+
+    #[test]
+    fn move_and_resubmit_list_up_to_20_sequence_numbers() {
+        let t = || dlq("orders");
+        let mv = |seqs: &[i64]| {
+            Operation::move_to(t(), "orders", seqs.len() as u64)
+                .with_sequences(seqs)
+                .summary(&prod())
+        };
+        assert_eq!(
+            mv(&[]),
+            "Move 0 messages from orders/$DeadLetterQueue to orders on prod-weu (sent first, then removed: a message may arrive twice)"
+        );
+        assert_eq!(
+            mv(&[7]),
+            "Move 1 message (sequence number 7) from orders/$DeadLetterQueue to orders on prod-weu (sent first, then removed: a message may arrive twice)"
+        );
+        let twenty: Vec<i64> = (1..=20).collect();
+        let listed = (1..=20)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert_eq!(
+            mv(&twenty),
+            format!(
+                "Move 20 messages (sequence numbers {listed}) from orders/$DeadLetterQueue to orders on prod-weu (sent first, then removed: a message may arrive twice)"
+            )
+        );
+        let many: Vec<i64> = (1..=1_021).collect();
+        assert_eq!(
+            Operation::resubmit(t(), "orders", 1_021, true)
+                .with_sequences(&many)
+                .summary(&prod()),
+            format!(
+                "Resubmit 1,021 messages (sequence numbers {listed} and 1,001 more) from orders/$DeadLetterQueue to orders on prod-weu, removing the originals"
+            )
+        );
+        assert_eq!(
+            Operation::delete(t(), &(1..=21).collect::<Vec<_>>()).summary(&prod()),
+            format!(
+                "Delete 21 messages (sequence numbers {listed} and 1 more) from orders/$DeadLetterQueue on prod-weu"
+            )
+        );
+    }
+
+    #[test]
+    fn a_partial_match_says_how_far_it_looked() {
+        assert_eq!(
+            Operation::delete(dlq("orders"), &[4, 9])
+                .matched_within(10_000)
+                .searched()
+                .summary(&prod()),
+            "Delete 2 messages (sequence numbers 4, 9) from orders/$DeadLetterQueue on prod-weu; matched 2 in the first 10,000 examined; run again for the rest. Messages examined during the search are locked while it runs"
         );
     }
 

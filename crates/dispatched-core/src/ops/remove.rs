@@ -2,7 +2,7 @@
 
 use super::locate::{Found, OnFound, locate};
 use super::send::distinct;
-use super::{SelectSpec, failed, lock_lost_outcome, record, seq_item};
+use super::{Resolved, SelectSpec, failed, lock_lost_outcome, record, seq_item};
 use crate::jobs::{ItemOutcome, ItemResult, JobKind, JobReport, JobRun, Progress};
 use crate::messaging::Settlement;
 use crate::messaging::backend::{LockReceiver, MessagingBackend};
@@ -13,13 +13,24 @@ use crate::{Error, Result};
 use async_trait::async_trait;
 use horizon_azure_kit::safety::CancellationToken;
 
-/// The operation a delete of `seqs` confirms: cancelling for the scheduled view, a plain delete
-/// for the deferred view (received by sequence number), and a searched delete for the views
-/// found with a peek-lock link (active, dead-letter, transfer dead-letter).
-pub(crate) fn operation(spec: &SelectSpec, seqs: &[i64]) -> Result<Operation> {
-    Ok(match spec.view {
+/// Refuse a delete that cannot run, before any I/O: scheduled messages live on the queue or
+/// topic, so a subscription's scheduled view is refused.
+pub(crate) fn check(spec: &SelectSpec) -> Result<()> {
+    if spec.view == PeekView::Scheduled {
+        send_target(&spec.entity.base())?;
+    }
+    Ok(())
+}
+
+/// The operation a delete of the `resolved` selection confirms: cancelling for the scheduled
+/// view, a plain delete for the deferred view (received by sequence number), and a searched
+/// delete for the views found with a peek-lock link (active, dead-letter, transfer
+/// dead-letter). The sentence lists the sequence numbers.
+pub(crate) fn operation(spec: &SelectSpec, resolved: &Resolved) -> Result<Operation> {
+    check(spec)?;
+    let seqs = &resolved.seqs;
+    Ok(resolved.describe(match spec.view {
         PeekView::Scheduled => {
-            // Scheduled messages live on the queue or topic: refuse a subscription here.
             let target = Target::new(send_target(&spec.entity.base())?, SubQueue::Active);
             Operation::cancel_scheduled(target, seqs.len() as u64)
         }
@@ -29,7 +40,7 @@ pub(crate) fn operation(spec: &SelectSpec, seqs: &[i64]) -> Result<Operation> {
         view => {
             Operation::delete(Target::new(spec.entity.clone(), view.sub_queue()), seqs).searched()
         }
-    })
+    }))
 }
 
 /// Completes what [`locate`] finds locked and cancels what it finds scheduled.
@@ -325,9 +336,17 @@ mod tests {
             name: "dev".into(),
             production: false,
         };
-        let op = operation(&select("q", PeekView::Scheduled, &[1]), &[1]).unwrap();
+        let op = operation(
+            &select("q", PeekView::Scheduled, &[1]),
+            &Resolved::exact(vec![1]),
+        )
+        .unwrap();
         assert_eq!(op.verb(), "cancel-scheduled");
-        let op = operation(&select("q", PeekView::Deferred, &[1, 2]), &[1, 2]).unwrap();
+        let op = operation(
+            &select("q", PeekView::Deferred, &[1, 2]),
+            &Resolved::exact(vec![1, 2]),
+        )
+        .unwrap();
         assert_eq!(
             op.summary(&dev),
             "Delete 2 messages (sequence numbers 1, 2) from q on dev"
@@ -337,7 +356,7 @@ mod tests {
             ("q/$DeadLetterQueue", PeekView::DeadLetter),
             ("q/$Transfer/$DeadLetterQueue", PeekView::TransferDeadLetter),
         ] {
-            let op = operation(&select(address, view, &[7]), &[7]).unwrap();
+            let op = operation(&select(address, view, &[7]), &Resolved::exact(vec![7])).unwrap();
             assert_eq!(
                 op.summary(&dev),
                 format!(
@@ -349,6 +368,25 @@ mod tests {
             entity: EntityPath::subscription("events", "all"),
             ..select("q", PeekView::Scheduled, &[1])
         };
-        assert!(matches!(operation(&sub, &[1]), Err(Error::Invalid(_))));
+        assert!(matches!(check(&sub), Err(Error::Invalid(_))));
+        assert!(matches!(
+            operation(&sub, &Resolved::exact(vec![1])),
+            Err(Error::Invalid(_))
+        ));
+        // A partial match says how far it looked.
+        let partial = Resolved {
+            seqs: vec![3, 8],
+            examined: 10_000,
+            complete: false,
+        };
+        let op = operation(
+            &select("q/$DeadLetterQueue", PeekView::DeadLetter, &[]),
+            &partial,
+        )
+        .unwrap();
+        assert_eq!(
+            op.summary(&dev),
+            "Delete 2 messages (sequence numbers 3, 8) from q/$DeadLetterQueue on dev; matched 2 in the first 10,000 examined; run again for the rest. Messages examined during the search are locked while it runs"
+        );
     }
 }

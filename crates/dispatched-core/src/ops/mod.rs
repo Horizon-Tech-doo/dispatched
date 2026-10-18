@@ -23,7 +23,7 @@ use crate::explorer::Explorer;
 use crate::filter::MessageFilter;
 use crate::jobs::{ItemOutcome, ItemResult, JobKind, JobReport, JobRun, NotReached, Progress};
 use crate::messaging::backend::MessagingBackend;
-use crate::messaging::{PeekOptions, PeekedMessage, Settlement, scan_messages};
+use crate::messaging::{DEFAULT_SCAN_LIMIT, PeekOptions, PeekedMessage, Settlement, scan_messages};
 use crate::namespace::{EntityPath, PeekView, SubQueue};
 use crate::safety::{Audited, Gate, Operation, SettleVerb, Target, count_text};
 use crate::{Error, Result};
@@ -76,44 +76,99 @@ fn selection_too_large() -> Error {
     ))
 }
 
-/// The sequence numbers `spec` selects, sorted and without repeats: `Sequences` as given,
-/// `Matching` by peeking the view (no locks) for at most `limit` matches.
+/// The sequence numbers a selection resolved to, and how far the peek looked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Resolved {
+    /// Sorted, without repeats.
+    pub seqs: Vec<i64>,
+    /// Messages the peek examined (0 for `Sequences`).
+    pub examined: u64,
+    /// The whole view was looked at: no budget or limit stopped the peek.
+    pub complete: bool,
+}
+
+impl Resolved {
+    /// Exactly these numbers (a `Sequences` selection).
+    pub(crate) fn exact(seqs: Vec<i64>) -> Self {
+        Self {
+            seqs,
+            examined: 0,
+            complete: true,
+        }
+    }
+
+    /// `op` with the selection in its sentence: the numbers, and how far a partial match looked.
+    pub(crate) fn describe(&self, op: Operation) -> Operation {
+        let op = op.with_sequences(&self.seqs);
+        if self.complete {
+            op
+        } else {
+            op.matched_within(self.examined)
+        }
+    }
+}
+
+/// The sequence numbers `spec` selects, sorted and without repeats: `Sequences` as given (1 to
+/// 100,000), `Matching` by peeking the view (no locks) for at most `limit` matches within the
+/// first `spec.limits.max_examined` messages, which is as far as lock-and-match reaches. A
+/// cancel returns `Cancelled` (checked between pages).
 pub(crate) async fn resolve_selection<B: MessagingBackend + ?Sized>(
     plane: &mut B,
     spec: &SelectSpec,
-) -> Result<Vec<i64>> {
+    cancel: &CancellationToken,
+) -> Result<Resolved> {
+    if cancel.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
     match &spec.selection {
         MessageSelection::Sequences(seqs) => {
             let mut seqs = seqs.clone();
             seqs.sort_unstable();
             seqs.dedup();
-            if seqs.len() as u64 > MAX_SELECTION {
+            if seqs.is_empty() || seqs.len() as u64 > MAX_SELECTION {
                 return Err(selection_too_large());
             }
-            Ok(seqs)
+            Ok(Resolved::exact(seqs))
         }
         MessageSelection::Matching { filter, limit } => {
             if *limit == 0 || *limit > MAX_SELECTION {
                 return Err(selection_too_large());
             }
             let address = spec.address();
+            let budget = spec.limits.max_examined;
             let mut out: Vec<i64> = Vec::new();
-            let mut from = 0;
-            loop {
+            let (mut from, mut examined, mut complete) = (0, 0u64, false);
+            while examined < budget {
+                if cancel.is_cancelled() {
+                    return Err(Error::Cancelled);
+                }
                 let want = u32::try_from(*limit - out.len() as u64).unwrap_or(u32::MAX);
+                let scan = u32::try_from(budget - examined)
+                    .unwrap_or(u32::MAX)
+                    .min(DEFAULT_SCAN_LIMIT);
                 let opts = PeekOptions::new(want)
                     .from_sequence(from)
+                    .scan_limit(scan)
                     .filter(filter.clone());
                 let page = scan_messages(plane, &address, spec.view, &opts).await?;
+                examined += u64::from(page.scanned);
                 out.extend(page.messages.iter().map(|m| m.sequence_number));
                 match page.next_sequence {
-                    Some(next) if (out.len() as u64) < *limit => from = next,
-                    _ => break,
+                    None => {
+                        complete = true;
+                        break;
+                    }
+                    Some(_) if out.len() as u64 >= *limit => break,
+                    Some(next) => from = next,
                 }
             }
             out.sort_unstable();
             out.dedup();
-            Ok(out)
+            Ok(Resolved {
+                seqs: out,
+                examined,
+                complete,
+            })
         }
     }
 }
@@ -325,8 +380,10 @@ impl Operator {
         progress: &dyn Progress,
         cancel: &CancellationToken,
     ) -> Result<JobReport> {
-        let seqs = resolve_selection(&mut self.explorer.plane(), &spec).await?;
-        if seqs.is_empty() {
+        // Refused before any I/O.
+        remove::check(&spec)?;
+        let resolved = resolve_selection(&mut self.explorer.plane(), &spec, cancel).await?;
+        if resolved.seqs.is_empty() {
             return Ok(nothing_selected(
                 JobKind::Delete,
                 spec.address(),
@@ -334,7 +391,8 @@ impl Operator {
                 progress,
             ));
         }
-        let op = remove::operation(&spec, &seqs)?;
+        let op = remove::operation(&spec, &resolved)?;
+        let seqs = resolved.seqs;
         gated(&self.gate, &op, || {
             let explorer = self.explorer.clone();
             async move {
@@ -385,10 +443,10 @@ impl Operator {
         progress: &dyn Progress,
         cancel: &CancellationToken,
     ) -> Result<JobReport> {
-        // Refused before any I/O: a bad target needs no peek.
-        let to = spec.target_name()?;
-        let seqs = resolve_selection(&mut self.explorer.plane(), &spec.source).await?;
-        if seqs.is_empty() {
+        // Refused before any I/O: a bad target or view needs no peek.
+        let to = resubmit::check(&spec)?;
+        let resolved = resolve_selection(&mut self.explorer.plane(), &spec.source, cancel).await?;
+        if resolved.seqs.is_empty() {
             return Ok(nothing_selected(
                 kind,
                 spec.source.address(),
@@ -396,7 +454,8 @@ impl Operator {
                 progress,
             ));
         }
-        let op = resubmit::operation(&spec, &seqs, kind)?;
+        let op = resubmit::operation(&spec, &resolved, kind)?;
+        let seqs = resolved.seqs;
         gated(&self.gate, &op, || {
             let explorer = self.explorer.clone();
             async move {
@@ -561,6 +620,18 @@ mod tests {
     use crate::messaging::PropValue;
     use crate::messaging::fake::{FakeBroker, FakeMsg};
 
+    /// Resolve `spec` on `b` with a fresh token.
+    async fn resolve(b: &FakeBroker, spec: &SelectSpec) -> Result<Resolved> {
+        resolve_selection(&mut b.clone(), spec, &CancellationToken::new()).await
+    }
+
+    fn matching(filter: MessageFilter, limit: u64, address: &str, view: PeekView) -> SelectSpec {
+        SelectSpec {
+            selection: MessageSelection::Matching { filter, limit },
+            ..select(address, view, &[])
+        }
+    }
+
     #[tokio::test]
     async fn matching_selections_resolve_to_sequence_numbers_before_the_gate() {
         let b = FakeBroker::default();
@@ -583,10 +654,9 @@ mod tests {
             },
             ..select("q/$DeadLetterQueue", PeekView::DeadLetter, &[])
         };
-        assert_eq!(
-            resolve_selection(&mut b.clone(), &spec).await.unwrap(),
-            [a, c]
-        );
+        let all = resolve(&b, &spec).await.unwrap();
+        assert_eq!(all.seqs, [a, c]);
+        assert!(all.complete, "the whole view was read");
         let one = SelectSpec {
             selection: MessageSelection::Matching {
                 filter: filter("user.kind = 'a'"),
@@ -594,7 +664,9 @@ mod tests {
             },
             ..spec
         };
-        assert_eq!(resolve_selection(&mut b.clone(), &one).await.unwrap(), [a]);
+        let first = resolve(&b, &one).await.unwrap();
+        assert_eq!(first.seqs, [a]);
+        assert!(!first.complete, "the limit stopped it: more may match");
         assert_eq!(b.held_locks(), 0, "resolving only peeks");
         assert_eq!(b.all("q/$DeadLetterQueue").len(), 3);
     }
@@ -604,47 +676,92 @@ mod tests {
         let b = FakeBroker::default();
         let spec = select("q", PeekView::Active, &[5, 3, 5, 1]);
         assert_eq!(
-            resolve_selection(&mut b.clone(), &spec).await.unwrap(),
-            [1, 3, 5]
+            resolve(&b, &spec).await.unwrap(),
+            Resolved::exact(vec![1, 3, 5])
         );
         let too_many: Vec<i64> = (0..=MAX_SELECTION as i64).collect();
-        let spec = select("q", PeekView::Active, &too_many);
-        assert!(matches!(
-            resolve_selection(&mut b.clone(), &spec).await,
-            Err(Error::Invalid(_))
-        ));
-        for limit in [0, MAX_SELECTION + 1] {
-            let spec = SelectSpec {
-                selection: MessageSelection::Matching {
-                    filter: MessageFilter::default(),
-                    limit,
-                },
-                ..select("q", PeekView::Active, &[])
+        for seqs in [too_many, Vec::new()] {
+            let spec = select("q", PeekView::Active, &seqs);
+            let Err(Error::Invalid(text)) = resolve(&b, &spec).await else {
+                panic!("refused")
             };
-            assert!(matches!(
-                resolve_selection(&mut b.clone(), &spec).await,
-                Err(Error::Invalid(_))
-            ));
+            assert_eq!(text, "select 1 to 100,000 messages at a time");
+        }
+        for limit in [0, MAX_SELECTION + 1] {
+            let spec = matching(MessageFilter::default(), limit, "q", PeekView::Active);
+            assert!(matches!(resolve(&b, &spec).await, Err(Error::Invalid(_))));
         }
     }
 
     #[tokio::test]
     async fn a_matching_selection_reads_past_one_scan_page() {
-        // More than one page of `DEFAULT_SCAN_LIMIT` examined messages.
+        // More than one page of `DEFAULT_SCAN_LIMIT` examined messages, within the budget.
         let b = FakeBroker::default();
         let n = crate::messaging::DEFAULT_SCAN_LIMIT as usize + 5;
         let seqs: Vec<i64> = (0..n).map(|_| b.add("q", FakeMsg::active("x"))).collect();
-        let spec = SelectSpec {
-            selection: MessageSelection::Matching {
-                filter: MessageFilter::default(),
-                limit: MAX_SELECTION,
-            },
-            ..select("q", PeekView::Active, &[])
-        };
-        assert_eq!(
-            resolve_selection(&mut b.clone(), &spec).await.unwrap(),
-            seqs
+        let mut spec = matching(
+            MessageFilter::default(),
+            MAX_SELECTION,
+            "q",
+            PeekView::Active,
         );
+        spec.limits.max_examined = 20_000;
+        let r = resolve(&b, &spec).await.unwrap();
+        assert_eq!(r.seqs, seqs);
+        assert!(r.complete);
+        assert_eq!(r.examined, n as u64);
+    }
+
+    #[tokio::test]
+    async fn a_matching_selection_stops_at_the_examined_budget_and_says_so() {
+        // Lock-and-match examines at most `max_examined`: the selection stays within it.
+        let b = FakeBroker::default();
+        let dl = "q/$DeadLetterQueue";
+        let seqs: Vec<i64> = (0..30).map(|_| b.add(dl, FakeMsg::active("x"))).collect();
+        let mut spec = matching(
+            MessageFilter::default(),
+            MAX_SELECTION,
+            dl,
+            PeekView::DeadLetter,
+        );
+        spec.limits.max_examined = 10;
+        let r = resolve(&b, &spec).await.unwrap();
+        assert_eq!(r.seqs, seqs[..10]);
+        assert_eq!(r.examined, 10);
+        assert!(!r.complete);
+        let op = remove::operation(&spec, &r).unwrap();
+        assert_eq!(
+            op.summary(&crate::safety::ProfileRef {
+                name: "dev".into(),
+                production: false
+            }),
+            format!(
+                "Delete 10 messages (sequence numbers {}) from q/$DeadLetterQueue on dev; matched 10 in the first 10 examined; run again for the rest. Messages examined during the search are locked while it runs",
+                seqs[..10]
+                    .iter()
+                    .map(i64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_selection_returns_cancelled() {
+        let b = FakeBroker::default();
+        b.add("q", FakeMsg::active("x"));
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        for spec in [
+            matching(MessageFilter::default(), 10, "q", PeekView::Active),
+            select("q", PeekView::Active, &[1]),
+        ] {
+            assert!(matches!(
+                resolve_selection(&mut b.clone(), &spec, &cancel).await,
+                Err(Error::Cancelled)
+            ));
+        }
+        assert_eq!(b.held_locks(), 0);
     }
 
     #[tokio::test]
