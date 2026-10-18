@@ -9,6 +9,7 @@ pub mod peek;
 pub mod props;
 mod receiver;
 pub mod scan;
+mod sender;
 pub mod sessions;
 pub mod summary;
 pub mod template;
@@ -36,6 +37,7 @@ pub use scan::{
     DEFAULT_SCAN_LIMIT, PeekOptions, PeekPage, PeekSource, SequenceCollection, StateCounts,
     collect_sequences, count_messages, last_sequence, peek_one, peek_tail, scan_messages,
 };
+pub use sender::send_target;
 pub use sessions::{BrokerList, SessionListing, SessionSummary};
 pub use summary::{DETAIL_BODY_CAP, MessageDetail, MessageSummary};
 pub use template::{parse_template_json, parse_template_xml, read_template};

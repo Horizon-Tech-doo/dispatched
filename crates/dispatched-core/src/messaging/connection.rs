@@ -1,15 +1,22 @@
 //! One AMQP connection per namespace: connection + session + CBS client,
 //! plus cached management links per entity address.
 
+use super::lockops::{
+    CANCEL_SCHEDULED, SCHEDULE, cancel_scheduled_request, parse_schedule_response,
+    parse_status_only, schedule_request,
+};
+use super::management::map_sender_attach_error;
 use super::management::{ManagementLink, SETUP_TIMEOUT, map_put_token_error};
+use super::outgoing::OutgoingMessage;
 use super::receiver::{AmqpReceiver, ReceiverSpec, SessionChoice};
+use super::sender::{AmqpSender, chunks, encode_for_schedule, send_target};
 use super::tokens_ledger::{LinkLru, TokenLedger, must_reattach};
 use crate::namespace::Namespace;
 use crate::{Error, Result};
-use fe2o3_amqp::Session;
 use fe2o3_amqp::connection::ConnectionHandle;
 use fe2o3_amqp::session::SessionHandle;
 use fe2o3_amqp::types::primitives::Timestamp;
+use fe2o3_amqp::{Sender, Session};
 use fe2o3_amqp_cbs::client::CbsClient;
 use fe2o3_amqp_cbs::token::CbsToken;
 use secrecy::ExposeSecret;
@@ -162,6 +169,73 @@ impl ServiceBusConnection {
             ..spec.clone()
         };
         AmqpReceiver::attach(&mut self.session, &next, Some(wait)).await
+    }
+
+    /// Open a sender to a queue or topic `address`: put a token for it, then
+    /// attach the data link. Subscription paths are refused before any I/O.
+    #[allow(dead_code)] // callers arrive with the operations (Task 12)
+    pub(crate) async fn open_sender(&mut self, address: &str) -> Result<AmqpSender> {
+        let target = send_target(address)?.base();
+        self.ensure_authorized(&target).await?;
+        let sender = tokio::time::timeout(
+            SETUP_TIMEOUT,
+            Sender::builder()
+                .name(format!("{target}-tx-{}", uuid::Uuid::new_v4().simple()))
+                .target(target.clone())
+                .attach(&mut self.session),
+        )
+        .await
+        .map_err(|_| Error::Timeout(format!("attach sender to {target} timed out")))?
+        .map_err(|e| map_sender_attach_error(&target, &target, e))?;
+        Ok(AmqpSender::new(sender))
+    }
+
+    /// Schedule `batch` on `address` for `at` through the entity's `$management`
+    /// link, 100 messages per request; returns the sequence numbers in order.
+    /// A message without a message id gets a new UUID. If a later request
+    /// fails, earlier chunks stay scheduled and the error is returned.
+    #[allow(dead_code)] // callers arrive with the operations (Task 12)
+    pub(crate) async fn schedule(
+        &mut self,
+        address: &str,
+        batch: &[OutgoingMessage],
+        at: OffsetDateTime,
+    ) -> Result<Vec<i64>> {
+        let target = send_target(address)?.base();
+        let now = OffsetDateTime::now_utc();
+        let entries = batch
+            .iter()
+            .map(|m| encode_for_schedule(m, at, now))
+            .collect::<Result<Vec<_>>>()?;
+        let mut sequences = Vec::with_capacity(entries.len());
+        for chunk in chunks(&entries) {
+            let link = self.management(&target).await?;
+            let resp = link.call(SCHEDULE, schedule_request(chunk)).await?;
+            let got = parse_schedule_response(resp)?;
+            if got.len() != chunk.len() {
+                return Err(Error::Protocol(format!(
+                    "{SCHEDULE}: scheduled {} messages but the broker returned {} sequence numbers",
+                    chunk.len(),
+                    got.len()
+                )));
+            }
+            sequences.extend(got);
+        }
+        Ok(sequences)
+    }
+
+    /// Cancel scheduled messages by sequence number, 100 per request.
+    #[allow(dead_code)] // callers arrive with the operations (Task 12)
+    pub(crate) async fn cancel_scheduled(&mut self, address: &str, seqs: &[i64]) -> Result<()> {
+        let target = send_target(address)?.base();
+        for chunk in chunks(seqs) {
+            let link = self.management(&target).await?;
+            let resp = link
+                .call(CANCEL_SCHEDULED, cancel_scheduled_request(chunk))
+                .await?;
+            parse_status_only(resp, CANCEL_SCHEDULED)?;
+        }
+        Ok(())
     }
 
     async fn authorize_receiver(&mut self, address: &str) -> Result<()> {
