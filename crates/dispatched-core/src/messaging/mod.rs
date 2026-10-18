@@ -44,3 +44,26 @@ pub use sender::send_target;
 pub use sessions::{BrokerList, SessionListing, SessionSummary};
 pub use summary::{DETAIL_BODY_CAP, MessageDetail, MessageSummary};
 pub use template::{parse_template_json, parse_template_xml, read_template};
+
+/// The wall clock, for lock-expiry arithmetic against broker times.
+#[cfg(not(test))]
+pub(crate) fn wall_now() -> time::OffsetDateTime {
+    time::OffsetDateTime::now_utc()
+}
+
+/// The wall clock in tests: one process-wide anchor advanced on tokio time, so the fake
+/// broker's clock and `ops::locate`'s read exactly the same time for the same instant (two
+/// separate `now_utc()` anchors would differ by however long the test took in between).
+#[cfg(test)]
+pub(crate) fn wall_now() -> time::OffsetDateTime {
+    use std::sync::OnceLock;
+    static ANCHOR: OnceLock<(std::time::Instant, time::OffsetDateTime)> = OnceLock::new();
+    let (at, wall) =
+        *ANCHOR.get_or_init(|| (std::time::Instant::now(), time::OffsetDateTime::now_utc()));
+    let now = tokio::time::Instant::now().into_std();
+    if now >= at {
+        wall + (now - at)
+    } else {
+        wall - (at - now)
+    }
+}

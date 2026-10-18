@@ -1,9 +1,6 @@
 //! Lock-and-match: find messages by sequence number with their lock held, so delete, move
 //! and resubmit act on exactly those messages.
 
-// The jobs that use it (delete, move, resubmit) come in Task 14; until then only the tests do.
-#![allow(dead_code)]
-
 use super::failed;
 use super::send::distinct;
 use crate::diagnostics::error_kind;
@@ -91,7 +88,7 @@ struct Clock {
 impl Clock {
     fn new() -> Self {
         Self {
-            wall: OffsetDateTime::now_utc(),
+            wall: crate::messaging::wall_now(),
             at: Instant::now(),
         }
     }
@@ -1368,16 +1365,17 @@ mod tests {
     #[tokio::test]
     async fn held_locks_are_renewed_in_chunks_of_100() {
         tokio::time::pause();
-        // 30 s locks, 80 ms per delivery: the one renewal (at about 20 s) covers about 250
-        // held locks.
+        // 30 s locks, 80 ms per delivery: the one renewal (at 20 s) covers 247 held locks.
         let b = slow(30, 80);
         let seqs: Vec<i64> = (0..300).map(|_| b.add("q", FakeMsg::active("x"))).collect();
         let l = find(&b, "q", PeekView::Active, &[seqs[299]]).await;
         assert!(matches!(l.items[0].outcome, ItemOutcome::Succeeded { .. }));
-        let sizes = b.renew_sizes();
-        assert!(
-            sizes.len() == 3 && sizes[..2] == [100, 100] && (40..=60).contains(&sizes[2]),
-            "one renewal in three calls of at most 100: {sizes:?}"
+        // Exact: the paused clock drives the deliveries, and the fake broker and `locate`
+        // read one wall clock (`messaging::wall_now`), so no real time leaks in.
+        assert_eq!(
+            b.renew_sizes(),
+            [100, 100, 47],
+            "one renewal in three calls of at most 100"
         );
         for s in &seqs[..299] {
             assert_eq!(b.delivery_count("q", *s), 0);

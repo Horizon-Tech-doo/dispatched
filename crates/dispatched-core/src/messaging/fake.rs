@@ -145,13 +145,17 @@ struct State {
     /// The renew_lock call (1 = the next one) that fails with this error.
     renew_fails_on: Option<(u32, Error)>,
     receivers: u64,
+    /// Senders opened and not yet closed.
+    open_senders: usize,
+    /// Receivers opened and not yet closed.
+    open_receivers: usize,
 }
 
 impl Default for State {
     fn default() -> Self {
         Self {
             t0: Instant::now(),
-            start: OffsetDateTime::now_utc(),
+            start: super::wall_now(),
             entities: HashMap::new(),
             last_seq: HashMap::new(),
             sent: HashMap::new(),
@@ -174,6 +178,8 @@ impl Default for State {
             session_renewals: 0,
             renew_fails_on: None,
             receivers: 0,
+            open_senders: 0,
+            open_receivers: 0,
         }
     }
 }
@@ -459,6 +465,16 @@ impl FakeBroker {
 
     // Inspection.
 
+    /// Receivers opened and not closed (one dropped without `close` stays counted).
+    pub(crate) fn open_receivers(&self) -> usize {
+        self.with(|s| s.open_receivers)
+    }
+
+    /// Senders opened and not closed (a sender dropped without `close` stays counted).
+    pub(crate) fn open_senders(&self) -> usize {
+        self.with(|s| s.open_senders)
+    }
+
     /// Every message on `address`, in sequence order (locked ones too).
     pub(crate) fn all(&self, address: &str) -> Vec<PeekedMessage> {
         self.with(|s| {
@@ -635,6 +651,7 @@ impl PeekSource for FakeBroker {
 impl MessagingBackend for FakeBroker {
     async fn open_sender(&mut self, address: &str) -> Result<Box<dyn MessageSender>> {
         let target = send_target(address)?.base();
+        self.with(|s| s.open_senders += 1);
         Ok(Box::new(FakeSender {
             broker: self.clone(),
             target,
@@ -751,6 +768,7 @@ impl MessagingBackend for FakeBroker {
         };
         let n = self.with(|s| {
             s.receivers += 1;
+            s.open_receivers += 1;
             s.receivers
         });
         Ok(Some(Box::new(FakeReceiver {
@@ -869,7 +887,9 @@ impl MessageSender for FakeSender {
         Ok(())
     }
 
-    async fn close(self: Box<Self>) {}
+    async fn close(self: Box<Self>) {
+        self.broker.with(|s| s.open_senders -= 1);
+    }
 }
 
 /// A receiver on the fake broker. Deliveries go into `buffer` the moment they happen and
@@ -1223,6 +1243,7 @@ impl LockReceiver for FakeReceiver {
             let address = self.address.clone();
             self.broker.with(|s| s.unaccept(&address, &id));
         }
+        self.broker.with(|s| s.open_receivers -= 1);
         self.buffer.len()
     }
 }
