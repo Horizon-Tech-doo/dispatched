@@ -366,6 +366,17 @@ impl Explorer {
         ExplorerPlane(self)
     }
 
+    /// The state of `session` on `entity` (a read: it takes the session lock at credit 0 and
+    /// locks no message; a session held elsewhere is a conflict).
+    pub async fn session_state(
+        &self,
+        entity: &EntityPath,
+        session: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        let address = entity.address(SubQueue::Active);
+        crate::ops::session_state::get(&mut self.plane(), &address, session).await
+    }
+
     /// Close the AMQP connection, if open, for good: reads started before, including long
     /// per-batch scans, stop at their next batch with [`Error::Cancelled`], and later reads fail
     /// the same way without connecting. Management (HTTP) calls are unaffected.

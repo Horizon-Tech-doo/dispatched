@@ -545,8 +545,7 @@ impl Operator {
         entity: &EntityPath,
         session: &str,
     ) -> Result<Option<Vec<u8>>> {
-        let address = entity.address(SubQueue::Active);
-        session_state::get(&mut self.explorer.plane(), &address, session).await
+        self.explorer.session_state(entity, session).await
     }
 
     /// Replace the state of `session`, or with `None` clear it.

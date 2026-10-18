@@ -369,24 +369,50 @@ fn kind_text(kind: Option<EntityKind>) -> &'static str {
     }
 }
 
+/// A short, secret-free name for why a kind lookup failed.
+fn lookup_failure(e: &dispatched_core::Error) -> &'static str {
+    use dispatched_core::Error;
+    match e {
+        Error::NotFound(_) => "not found",
+        Error::Forbidden { .. } => "access denied",
+        Error::Auth(_) | Error::NotSignedIn(_) => "not signed in",
+        Error::Timeout(_) => "timed out",
+        _ => "lookup failed",
+    }
+}
+
 /// The kind of each known entity, for the limited (no-Manage) listing: at most
 /// [`KIND_LOOKUPS`] entities, one after the other. A kind that cannot be told (or a lookup that
 /// fails, e.g. a pinned entity that no longer exists) is `None`, shown as `unknown`: the
-/// listing is a best-effort overview and must not fail on one entity.
+/// listing is a best-effort overview and must not fail on one entity. The notes say which
+/// lookups failed (the error kind only) and when the lookups stopped at the limit.
 async fn resolve_known_kinds(
     explorer: &Explorer,
     known: Vec<EntityPath>,
-) -> Vec<(EntityPath, Option<EntityKind>)> {
+) -> (Vec<(EntityPath, Option<EntityKind>)>, Vec<String>) {
     let mut out = Vec::with_capacity(known.len());
+    let mut notes = Vec::new();
+    let total = known.len();
     for (i, entity) in known.into_iter().enumerate() {
         let kind = if i < KIND_LOOKUPS {
-            explorer.resolve_kind(&entity).await.ok().flatten()
+            match explorer.resolve_kind(&entity).await {
+                Ok(k) => k,
+                Err(e) => {
+                    notes.push(format!("{}: {}", entity.base(), lookup_failure(&e)));
+                    None
+                }
+            }
         } else {
             None
         };
         out.push((entity, kind));
     }
-    out
+    if total > KIND_LOOKUPS {
+        notes.push(format!(
+            "kinds resolved for the first {KIND_LOOKUPS} of {total} entities; the rest show unknown"
+        ));
+    }
+    (out, notes)
 }
 
 /// Known entities as tables, every count `?`, with the kind where it is known.
@@ -539,8 +565,11 @@ async fn list(
             if known.is_empty() {
                 return Err(forbidden_without_known(e));
             }
-            let kinds = resolve_known_kinds(explorer, known).await;
+            let (kinds, notes) = resolve_known_kinds(explorer, known).await;
             eprintln!("{FALLBACK_NOTE}");
+            for n in notes {
+                eprintln!("{}", sanitize(&n));
+            }
             if let Format::Json = format {
                 println!("{}", serde_json::to_string_pretty(&fallback_json(&kinds))?);
             } else {
@@ -1449,13 +1478,27 @@ mod tests {
             (EntityPath::queue("events"), Some(EntityKind::Topic)),
             (EntityPath::queue("x"), None),
         ]);
-        assert!(
-            t.contains("orders")
-                && t.contains("queue")
-                && t.contains("topic")
-                && t.contains("unknown"),
-            "{t}"
+        let row = |name: &str| t.lines().find(|l| l.starts_with(name)).unwrap().to_string();
+        assert!(row("orders").contains("queue") && row("orders").matches('?').count() == 3);
+        assert_eq!(
+            row("events").split_whitespace().collect::<Vec<_>>(),
+            ["events", "topic"]
         );
+        assert!(row("x").contains("unknown"), "{t}");
+        let topic_header = t.lines().position(|l| l.starts_with("TOPIC")).unwrap();
+        let events = t.lines().position(|l| l.starts_with("events")).unwrap();
+        assert!(events > topic_header, "{t}");
+        let j = fallback_json(&[
+            (EntityPath::queue("orders"), Some(EntityKind::Queue)),
+            (EntityPath::queue("events"), Some(EntityKind::Topic)),
+            (EntityPath::queue("x"), None),
+        ]);
+        assert_eq!(j["queues"][0]["name"], "orders");
+        assert_eq!(j["queues"][0]["kind"], "queue");
+        assert_eq!(j["topics"][0]["name"], "events");
+        assert_eq!(j["topics"][0]["kind"], "topic");
+        assert_eq!(j["queues"][1]["name"], "x");
+        assert_eq!(j["queues"][1]["kind"], "unknown");
     }
 
     #[test]

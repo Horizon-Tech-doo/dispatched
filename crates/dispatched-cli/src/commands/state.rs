@@ -11,11 +11,8 @@ use crate::safety::{MutateArgs, Planned};
 use anyhow::Context as _;
 use base64::Engine as _;
 use clap::{ArgGroup, Args, Subcommand};
-use dispatched_core::safety::Gate;
-use dispatched_core::{Actor, EntityPath, MemoryAudit, Mutation, Operator, ProfileRef};
-use horizon_azure_kit::safety::{DenyAll, Origin};
+use dispatched_core::{EntityPath, Mutation};
 use std::path::PathBuf;
-use std::sync::Arc;
 
 /// The largest session state without `--allow-large` (Standard tier).
 pub const STATE_LIMIT: usize = 256 * 1024;
@@ -49,7 +46,7 @@ pub struct GetArgs {
     pub entity: String,
     /// The session id.
     pub session: String,
-    /// Write the raw state bytes to this file instead of printing them.
+    /// Write the raw state bytes to this file (or `-` for stdout) instead of printing them.
     #[arg(long, value_name = "PATH")]
     pub out: Option<PathBuf>,
     /// With --out: replace the file if it exists.
@@ -65,7 +62,7 @@ pub struct SetArgs {
     pub entity: String,
     /// The session id.
     pub session: String,
-    /// The new state, as text.
+    /// The new state, as text (visible in the process list; prefer --file for sensitive state).
     #[arg(long, value_name = "TEXT")]
     pub value: Option<String>,
     /// Read the new state (raw bytes) from this file.
@@ -157,23 +154,6 @@ pub async fn run(
     Ok(JobExit::Ok)
 }
 
-/// The gate of the read-only operator: it denies everything and logs nowhere. Reading a
-/// session's state never goes through it (a read is not gated and not audited), so a mutation
-/// attempted through this operator would be refused.
-fn read_only_gate() -> Gate {
-    Gate::new(
-        Arc::new(DenyAll),
-        Arc::new(MemoryAudit::default()),
-        Actor {
-            origin: Origin::Cli,
-            profile: ProfileRef {
-                name: String::new(),
-                production: false,
-            },
-        },
-    )
-}
-
 /// A read: not gated, not audited.
 async fn get(ctx: &Ctx, sel: &Selection<'_>, args: &GetArgs, format: Format) -> anyhow::Result<()> {
     let entity = EntityPath::parse(&args.entity)?;
@@ -181,10 +161,8 @@ async fn get(ctx: &Ctx, sel: &Selection<'_>, args: &GetArgs, format: Format) -> 
     if let Some(out) = &out {
         check_output(out, args.force)?;
     }
-    let explorer = Arc::new(explorer_for(ctx, sel)?);
-    // A read needs no gate; the operator's read path is the one that locks the session.
-    let operator = Operator::new(explorer.clone(), read_only_gate());
-    let result = operator.session_state(&entity, &args.session).await;
+    let explorer = explorer_for(ctx, sel)?;
+    let result = explorer.session_state(&entity, &args.session).await;
     explorer.close().await;
     let state = result?;
     if let Some(out) = &out {
@@ -192,22 +170,33 @@ async fn get(ctx: &Ctx, sel: &Selection<'_>, args: &GetArgs, format: Format) -> 
             eprintln!("(no state; nothing was written to {})", sanitize(out));
             return Ok(());
         };
+        if out == "-" {
+            use std::io::Write as _;
+            let mut so = std::io::stdout().lock();
+            so.write_all(bytes).and_then(|()| so.flush())?;
+            return Ok(());
+        }
         write_state(std::path::Path::new(out), bytes, args.force)?;
         eprintln!("Wrote {} byte(s) to {}", bytes.len(), sanitize(out));
         return Ok(());
     }
     if let Format::Json = format {
-        let text = state.as_deref().and_then(|b| std::str::from_utf8(b).ok());
-        let value = serde_json::json!({
-            "session_id": args.session,
-            "state_base64": state.as_deref().map(|b| BASE64.encode(b)),
-            "state_text": text,
-        });
+        let value = state_json(&args.session, state.as_deref());
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
         println!("{}", printable(&render_state(state.as_deref())));
     }
     Ok(())
+}
+
+/// The JSON of `get`: the state as base64, and as text when it is UTF-8 (null when there is
+/// none, and `state_text` null for binary state).
+pub fn state_json(session: &str, state: Option<&[u8]>) -> serde_json::Value {
+    serde_json::json!({
+        "session_id": session,
+        "state_base64": state.map(|b| BASE64.encode(b)),
+        "state_text": state.and_then(|b| std::str::from_utf8(b).ok()),
+    })
 }
 
 /// Write the raw bytes; without `force` the file must not exist (checked again at creation,
@@ -216,7 +205,7 @@ fn write_state(path: &std::path::Path, bytes: &[u8], force: bool) -> anyhow::Res
     use std::io::Write as _;
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true);
-    if force {
+    if force || dispatched_core::export::is_special(path) {
         opts.create(true).truncate(true);
     } else {
         opts.create_new(true);
@@ -321,6 +310,19 @@ mod tests {
             ])
             .is_ok()
         );
+    }
+
+    #[test]
+    fn get_json_has_text_base64_and_nulls() {
+        let j = state_json("RMA-1", Some(b"{\"step\":2}"));
+        assert_eq!(j["session_id"], "RMA-1");
+        assert_eq!(j["state_text"], "{\"step\":2}");
+        assert_eq!(j["state_base64"], "eyJzdGVwIjoyfQ==");
+        let bin = state_json("s", Some(&[0xff, 0x00]));
+        assert_eq!(bin["state_base64"], "/wA=");
+        assert!(bin["state_text"].is_null());
+        let none = state_json("s", None);
+        assert!(none["state_base64"].is_null() && none["state_text"].is_null());
     }
 
     #[test]
