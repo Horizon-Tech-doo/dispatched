@@ -8,6 +8,7 @@ pub mod profile;
 pub mod receive;
 pub mod repair;
 pub mod send;
+pub mod state;
 
 use crate::context::Ctx;
 use crate::resolve::Selection;

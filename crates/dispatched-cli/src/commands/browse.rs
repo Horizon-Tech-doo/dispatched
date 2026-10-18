@@ -8,9 +8,10 @@ use clap::Args;
 use dispatched_core::messaging::DEFAULT_SCAN_LIMIT;
 pub use dispatched_core::namespace::known_entities;
 use dispatched_core::{
-    Continuation, EntityCounts, EntityPath, Explorer, ExportFormat, ExportedMessage, FileExport,
-    MessageBody, MessageFilter, Namespace, PeekOptions, PeekPage, PeekView, PeekedMessage,
-    QueueInfo, Streamed, SubscriptionInfo, TopicInfo, continuation, stream_pages, write_messages,
+    Continuation, EntityCounts, EntityKind, EntityPath, Explorer, ExportFormat, ExportedMessage,
+    FileExport, MessageBody, MessageFilter, Namespace, PeekOptions, PeekPage, PeekView,
+    PeekedMessage, QueueInfo, Streamed, SubscriptionInfo, TopicInfo, continuation, stream_pages,
+    write_messages,
 };
 use horizon_azure_kit::safety::CancellationToken;
 use std::future::Future;
@@ -355,14 +356,48 @@ fn subscriptions_section(topic_count: usize, subs: &[&SubscriptionInfo]) -> Stri
     }
 }
 
-/// Known entities as tables, every count `?`.
-pub fn fallback_tables(known: &[EntityPath]) -> String {
+/// How many known entities the limited listing resolves the kind of.
+const KIND_LOOKUPS: usize = 20;
+
+/// The kind shown for a known entity: `queue`, `topic`, `subscription` or `unknown`.
+fn kind_text(kind: Option<EntityKind>) -> &'static str {
+    match kind {
+        Some(EntityKind::Queue) => "queue",
+        Some(EntityKind::Topic) => "topic",
+        Some(EntityKind::Subscription) => "subscription",
+        None => "unknown",
+    }
+}
+
+/// The kind of each known entity, for the limited (no-Manage) listing: at most
+/// [`KIND_LOOKUPS`] entities, one after the other. A kind that cannot be told (or a lookup that
+/// fails, e.g. a pinned entity that no longer exists) is `None`, shown as `unknown`: the
+/// listing is a best-effort overview and must not fail on one entity.
+async fn resolve_known_kinds(
+    explorer: &Explorer,
+    known: Vec<EntityPath>,
+) -> Vec<(EntityPath, Option<EntityKind>)> {
+    let mut out = Vec::with_capacity(known.len());
+    for (i, entity) in known.into_iter().enumerate() {
+        let kind = if i < KIND_LOOKUPS {
+            explorer.resolve_kind(&entity).await.ok().flatten()
+        } else {
+            None
+        };
+        out.push((entity, kind));
+    }
+    out
+}
+
+/// Known entities as tables, every count `?`, with the kind where it is known.
+pub fn fallback_tables(known: &[(EntityPath, Option<EntityKind>)]) -> String {
     let queues: Vec<Vec<String>> = known
         .iter()
-        .filter(|e| e.subscription.is_none())
-        .map(|e| {
+        .filter(|(e, k)| e.subscription.is_none() && *k != Some(EntityKind::Topic))
+        .map(|(e, k)| {
             vec![
                 e.entity.clone(),
+                kind_text(*k).into(),
                 "?".into(),
                 "?".into(),
                 "?".into(),
@@ -371,12 +406,18 @@ pub fn fallback_tables(known: &[EntityPath]) -> String {
             ]
         })
         .collect();
+    let topics: Vec<Vec<String>> = known
+        .iter()
+        .filter(|(e, k)| e.subscription.is_none() && *k == Some(EntityKind::Topic))
+        .map(|(e, k)| vec![e.entity.clone(), kind_text(*k).into()])
+        .collect();
     let subs: Vec<Vec<String>> = known
         .iter()
-        .filter_map(|e| {
+        .filter_map(|(e, k)| {
             e.subscription.as_ref().map(|s| {
                 vec![
                     format!("{}/subscriptions/{s}", e.entity),
+                    kind_text(*k).into(),
                     "?".into(),
                     "?".into(),
                     String::new(),
@@ -387,31 +428,56 @@ pub fn fallback_tables(known: &[EntityPath]) -> String {
     let mut parts = Vec::new();
     if !queues.is_empty() {
         parts.push(table(
-            &["QUEUE", "ACTIVE", "DLQ", "SCHEDULED", "SESSIONS", "STATUS"],
+            &[
+                "QUEUE",
+                "KIND",
+                "ACTIVE",
+                "DLQ",
+                "SCHEDULED",
+                "SESSIONS",
+                "STATUS",
+            ],
             &queues,
         ));
     }
+    if !topics.is_empty() {
+        parts.push(table(&["TOPIC", "KIND"], &topics));
+    }
     if !subs.is_empty() {
-        parts.push(table(&["SUBSCRIPTION", "ACTIVE", "DLQ", "STATUS"], &subs));
+        parts.push(table(
+            &["SUBSCRIPTION", "KIND", "ACTIVE", "DLQ", "STATUS"],
+            &subs,
+        ));
     }
     parts.join("\n\n")
 }
 
-pub fn fallback_json(known: &[EntityPath]) -> serde_json::Value {
+pub fn fallback_json(known: &[(EntityPath, Option<EntityKind>)]) -> serde_json::Value {
     let queues: Vec<_> = known
         .iter()
-        .filter(|e| e.subscription.is_none())
-        .map(|e| serde_json::json!({ "name": e.entity, "counts": null }))
+        .filter(|(e, k)| e.subscription.is_none() && *k != Some(EntityKind::Topic))
+        .map(
+            |(e, k)| serde_json::json!({ "name": e.entity, "kind": kind_text(*k), "counts": null }),
+        )
+        .collect();
+    let topics: Vec<_> = known
+        .iter()
+        .filter(|(e, k)| e.subscription.is_none() && *k == Some(EntityKind::Topic))
+        .map(|(e, k)| serde_json::json!({ "name": e.entity, "kind": kind_text(*k) }))
         .collect();
     let subs: Vec<_> = known
         .iter()
-        .filter_map(|e| {
-            e.subscription
-                .as_ref()
-                .map(|s| serde_json::json!({ "topic": e.entity, "name": s, "counts": null }))
+        .filter_map(|(e, k)| {
+            e.subscription.as_ref().map(|s| {
+                serde_json::json!({
+                    "topic": e.entity, "name": s, "kind": kind_text(*k), "counts": null
+                })
+            })
         })
         .collect();
-    serde_json::json!({ "queues": queues, "subscriptions": subs, "note": FALLBACK_NOTE })
+    serde_json::json!({
+        "queues": queues, "topics": topics, "subscriptions": subs, "note": FALLBACK_NOTE
+    })
 }
 
 pub async fn ls(
@@ -473,11 +539,12 @@ async fn list(
             if known.is_empty() {
                 return Err(forbidden_without_known(e));
             }
+            let kinds = resolve_known_kinds(explorer, known).await;
             eprintln!("{FALLBACK_NOTE}");
             if let Format::Json = format {
-                println!("{}", serde_json::to_string_pretty(&fallback_json(&known))?);
+                println!("{}", serde_json::to_string_pretty(&fallback_json(&kinds))?);
             } else {
-                println!("{}", fallback_tables(&known));
+                println!("{}", fallback_tables(&kinds));
             }
             return Ok(());
         }
@@ -1359,6 +1426,7 @@ mod tests {
     #[test]
     fn fallback_lists_known_entities_with_unknown_counts() {
         let k = known_entities(Some("orders"), &["events/subscriptions/all".to_string()]);
+        let k: Vec<_> = k.into_iter().map(|e| (e, None)).collect();
         let t = fallback_tables(&k);
         assert!(t.contains("QUEUE") && t.contains("orders"), "{t}");
         assert!(t.contains("SUBSCRIPTION") && t.contains("events/subscriptions/all"));
@@ -1371,6 +1439,22 @@ mod tests {
         assert_eq!(
             j["note"],
             "listing needs Manage,EntityRead; showing known entities"
+        );
+    }
+
+    #[test]
+    fn limited_listing_names_resolved_kinds() {
+        let t = fallback_tables(&[
+            (EntityPath::queue("orders"), Some(EntityKind::Queue)),
+            (EntityPath::queue("events"), Some(EntityKind::Topic)),
+            (EntityPath::queue("x"), None),
+        ]);
+        assert!(
+            t.contains("orders")
+                && t.contains("queue")
+                && t.contains("topic")
+                && t.contains("unknown"),
+            "{t}"
         );
     }
 

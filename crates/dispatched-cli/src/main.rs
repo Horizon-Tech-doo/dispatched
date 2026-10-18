@@ -172,6 +172,11 @@ enum Command {
 enum SessionCmd {
     /// List sessions with message counts.
     Ls { entity: String },
+    /// Read, set or clear the state of a session.
+    State {
+        #[command(subcommand)]
+        cmd: commands::state::StateCmd,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -356,6 +361,9 @@ async fn run_command(ctx: &Ctx, cli: Cli) -> anyhow::Result<JobExit> {
         Command::Session {
             cmd: SessionCmd::Ls { entity },
         } => commands::inspect::sessions(ctx, &sel, &entity, format).await,
+        Command::Session {
+            cmd: SessionCmd::State { cmd },
+        } => return commands::state::run(ctx, &sel, &cmd, format).await,
         Command::Rule {
             cmd: RuleCmd::Ls { subscription },
         } => commands::inspect::rules(ctx, &sel, &subscription, format).await,
