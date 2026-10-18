@@ -3,7 +3,7 @@
 use crate::Format;
 use crate::context::Ctx;
 use crate::output::{ellipsize, sanitize, table, thousands};
-use crate::resolve::{Selection, needs_sign_in, resolve};
+use crate::resolve::{Selection, needs_sign_in, resolve_namespace};
 use clap::Args;
 use dispatched_core::messaging::DEFAULT_SCAN_LIMIT;
 pub use dispatched_core::namespace::known_entities;
@@ -16,15 +16,16 @@ use horizon_azure_kit::safety::CancellationToken;
 use std::future::Future;
 use time::format_description::well_known::Rfc3339;
 
-/// The namespace the user selected. The sign-in (a keychain read) is only
-/// looked up when the selection uses Entra.
+/// The namespace the user selected, for read commands (no production check, so a connection
+/// string never opens the profile store). The sign-in (a keychain read) is only looked up when
+/// the selection uses Entra.
 pub(crate) fn namespace(ctx: &Ctx, sel: &Selection<'_>) -> anyhow::Result<Namespace> {
     let sign_in = if needs_sign_in(sel, ctx)? {
         ctx.current_sign_in()?
     } else {
         None
     };
-    resolve(
+    resolve_namespace(
         sel,
         ctx,
         ctx.secrets.as_ref(),
@@ -723,22 +724,6 @@ pub fn check_complete(end: Continuation, written: usize) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A token that Ctrl-C cancels. A second Ctrl-C, while a page is still loading, ends the
-/// process at once.
-fn cancel_on_ctrl_c() -> CancellationToken {
-    let token = CancellationToken::new();
-    let t = token.clone();
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            t.cancel();
-            if tokio::signal::ctrl_c().await.is_ok() {
-                std::process::exit(130);
-            }
-        }
-    });
-    token
-}
-
 /// Core refuses to replace a file that appeared while the export ran; say how to allow it.
 fn finish_error(e: dispatched_core::Error, force: bool, out: &str) -> anyhow::Error {
     match e {
@@ -803,7 +788,7 @@ pub async fn export(
     check_output(out, force)?;
     let q = Query::open(ctx, sel, args)?;
     let qr = &q;
-    let cancel = cancel_on_ctrl_c();
+    let cancel = crate::jobs::cancel_on_ctrl_c();
     let result = export_stream(top, q.from_seq, out, format, force, &cancel, |from, max| {
         let opts = qr.options(max, from);
         async move { qr.explorer.peek(&qr.entity, qr.view, &opts).await }

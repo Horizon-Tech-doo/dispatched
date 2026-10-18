@@ -1136,6 +1136,8 @@ name = "dispatched"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "base64 0.22.1",
  "clap",
  "dirs",
  "dispatched-core",
@@ -1148,6 +1150,7 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

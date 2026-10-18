@@ -146,7 +146,8 @@ impl JobReport {
         }
     }
 
-    fn failures(&self) -> impl Iterator<Item = &ItemResult> {
+    /// The failed and not-reached items, in order.
+    pub fn failures(&self) -> impl Iterator<Item = &ItemResult> {
         self.items.iter().filter(|i| {
             matches!(
                 i.outcome,
@@ -160,7 +161,8 @@ impl JobReport {
         self.failures().filter_map(|i| i.sequence_number).collect()
     }
 
-    fn reason(i: &ItemResult) -> String {
+    /// Why an item failed or was not reached (empty for other outcomes).
+    pub fn reason(i: &ItemResult) -> String {
         match &i.outcome {
             ItemOutcome::Failed { reason, .. } => reason.clone(),
             ItemOutcome::NotReached { why } => not_reached_text(*why).into(),
@@ -171,7 +173,7 @@ impl JobReport {
     /// A copy with secrets scrubbed from every free-text field (reasons, details, notes).
     /// All output (`summary_line`, JSON, report files) goes through this, so hand-built
     /// reports are covered too.
-    fn scrubbed(&self) -> JobReport {
+    pub fn scrubbed(&self) -> JobReport {
         let mut r = self.clone();
         for item in &mut r.items {
             match &mut item.outcome {
