@@ -2,6 +2,7 @@
 
 pub(crate) mod backend;
 mod connection;
+pub mod dlq;
 #[cfg(test)]
 pub(crate) mod fake;
 pub mod lockops;
@@ -22,6 +23,7 @@ mod tokens_ledger;
 mod transport;
 
 pub use connection::ServiceBusConnection;
+pub use dlq::{DLQ_SUMMARY_CAP, DlqSummary, ReasonGroup};
 pub use management::{ManagementLink, MgmtResponse};
 pub use message::{
     MessageBody, MessageState, PeekedMessage, PropValue, decode_bytes, decode_message, ttl_ms,

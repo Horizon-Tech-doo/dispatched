@@ -342,6 +342,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(op.verb(), "cancel-scheduled");
+        assert_eq!(
+            op.summary(&dev),
+            "Cancel 1 scheduled message (sequence number 1) in q on dev",
+            "the scheduled view lists its sequence numbers like the others"
+        );
+        let op = operation(
+            &select("q", PeekView::Scheduled, &[4, 9, 12]),
+            &Resolved::exact(vec![4, 9, 12]),
+        )
+        .unwrap();
+        assert_eq!(
+            op.summary(&dev),
+            "Cancel 3 scheduled messages (sequence numbers 4, 9, 12) in q on dev"
+        );
         let op = operation(
             &select("q", PeekView::Deferred, &[1, 2]),
             &Resolved::exact(vec![1, 2]),

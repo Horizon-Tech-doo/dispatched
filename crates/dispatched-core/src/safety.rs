@@ -277,9 +277,14 @@ impl Operation {
     /// `3 messages (sequence numbers 4, 9, 12)`, `30 messages (sequence numbers 1, ... 20 and
     /// 10 more)`.
     fn counted(&self, n: u64) -> String {
-        let mut text = messages(n);
+        format!("{}{}", messages(n), self.listed(n))
+    }
+
+    /// ` (sequence numbers 4, 9, 12)` for the listed sequence numbers of `n` messages; empty
+    /// when none are listed.
+    fn listed(&self, n: u64) -> String {
         if self.sequences.is_empty() {
-            return text;
+            return String::new();
         }
         let mut list = self
             .sequences
@@ -296,8 +301,7 @@ impl Operation {
         } else {
             "sequence numbers"
         };
-        text.push_str(&format!(" ({label} {list})"));
-        text
+        format!(" ({label} {list})")
     }
 
     /// Send `n` messages, or schedule them for a time.
@@ -424,7 +428,7 @@ impl Operation {
     }
 
     /// List the selection's sequence numbers in the sentence: the first 20, then `and N more`
-    /// (none listed for an empty slice). Delete, move and resubmit use it.
+    /// (none listed for an empty slice). Delete, cancel scheduled, move and resubmit use it.
     pub fn with_sequences(mut self, sequence_numbers: &[i64]) -> Self {
         self.sequences = sequence_numbers
             .iter()
@@ -486,9 +490,10 @@ impl Operation {
             ),
             Effect::CancelScheduled { n } => {
                 format!(
-                    "Cancel {} scheduled {} in {at} on {on}",
+                    "Cancel {} scheduled {}{} in {at} on {on}",
                     count_text(*n),
-                    plural_word(*n)
+                    plural_word(*n),
+                    self.listed(*n)
                 )
             }
             Effect::ReceiveAndDelete { n } => format!(
@@ -977,6 +982,24 @@ mod tests {
             format!(
                 "Delete 21 messages (sequence numbers {listed} and 1 more) from orders/$DeadLetterQueue on prod-weu"
             )
+        );
+    }
+
+    #[test]
+    fn cancel_scheduled_lists_its_sequence_numbers() {
+        let q = Target::new(EntityPath::queue("orders"), SubQueue::Active);
+        assert_eq!(
+            Operation::cancel_scheduled(q.clone(), 2)
+                .with_sequences(&[4, 9])
+                .summary(&prod()),
+            "Cancel 2 scheduled messages (sequence numbers 4, 9) in orders on prod-weu"
+        );
+        let many: Vec<i64> = (1..=25).collect();
+        assert!(
+            Operation::cancel_scheduled(q, 25)
+                .with_sequences(&many)
+                .summary(&prod())
+                .starts_with("Cancel 25 scheduled messages (sequence numbers 1, 2, ")
         );
     }
 

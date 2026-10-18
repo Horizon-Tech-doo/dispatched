@@ -614,6 +614,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_copy_without_an_outcome_may_have_been_sent() {
+        // The link dropped before the broker answered: the reason says the copy may be there.
+        for remove_original in [true, false] {
+            let b = FakeBroker::default();
+            let dl = "q/$DeadLetterQueue";
+            let s = b.add(dl, FakeMsg::active("x"));
+            b.lose_next_send_outcome(Error::Network("link detached".into()));
+            let spec = ResubmitSpec {
+                remove_original,
+                ..resubmit_spec(dl, &[s], "t")
+            };
+            let r = run(
+                &mut b.clone(),
+                &spec,
+                &[s],
+                &NoProgress,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            let ItemOutcome::Failed { kind, reason } = &r.items[0].outcome else {
+                panic!("{:?}", r.items[0].outcome)
+            };
+            assert_eq!(*kind, "network");
+            assert!(
+                reason.ends_with("link detached; the copy may have been sent"),
+                "remove_original = {remove_original}: {reason}"
+            );
+            assert_eq!(b.all(dl).len(), 1, "the original stays");
+            assert_eq!((b.open_senders(), b.held_locks()), (0, 0));
+        }
+    }
+
+    #[tokio::test]
     async fn resubmit_from_an_active_queue_can_remove_the_original() {
         // #771: fix a message in an active queue and put the fixed copy back.
         let b = FakeBroker::default();

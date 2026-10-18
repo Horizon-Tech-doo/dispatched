@@ -114,12 +114,26 @@ fn item(entity: &str, seq: i64, m: Option<&PeekedMessage>, outcome: ItemOutcome)
     }
 }
 
-/// How the receive loop ended.
-struct Ended {
-    cancelled: bool,
+/// How a receiver's take ended ([`take_and_close`]).
+pub(crate) struct Ended {
+    pub(crate) cancelled: bool,
     /// The last receive's unaccounted credit.
-    shortfall: u32,
-    error: Option<Error>,
+    pub(crate) shortfall: u32,
+    pub(crate) error: Option<Error>,
+    /// Messages the receiver returned (each recorded as an item).
+    pub(crate) received: u64,
+    /// Receive-and-delete messages the closed receiver had taken but never returned.
+    pub(crate) unreturned: usize,
+}
+
+impl Ended {
+    /// The most messages a receive-and-delete link may have removed: those it returned, those
+    /// it took but never returned, and its unaccounted credit.
+    pub(crate) fn removed_at_most(&self) -> u64 {
+        self.received
+            .saturating_add(self.unreturned as u64)
+            .saturating_add(u64::from(self.shortfall))
+    }
 }
 
 /// Run a receive job. Peek-lock takes one message per call and settles it at once, so no
@@ -154,7 +168,7 @@ pub(crate) async fn run<B: MessagingBackend + ?Sized>(
             None => SessionChoice::None,
         },
     };
-    let Some(mut rx) = b.open_receiver(&spec, req.wait).await? else {
+    let Some(rx) = b.open_receiver(&spec, req.wait).await? else {
         return Err(Error::Protocol(format!(
             "no receiver was opened on {address}"
         )));
@@ -167,20 +181,55 @@ pub(crate) async fn run<B: MessagingBackend + ?Sized>(
         Some(u64::from(req.max)),
     );
     let mut messages = Vec::new();
-    let ended = take_all(rx.as_mut(), req, &address, &mut run, &mut messages, cancel).await;
-    let unreturned = rx.close().await;
+    let mut ended = take_and_close(rx, req, &address, &mut run, Some(&mut messages), cancel).await;
+    let nothing_lost = !delete || (ended.shortfall == 0 && ended.unreturned == 0);
+    if messages.is_empty()
+        && nothing_lost
+        && let Some(e) = ended.error.take()
+    {
+        return Err(e);
+    }
+    let cancelled = record_end(&mut run, req, &address, ended);
+    Ok(ReceiveOutcome {
+        messages,
+        report: run.finish(cancelled),
+    })
+}
+
+/// Take messages from `rx` as `req` says (each recorded in `run`, and kept in `messages` when
+/// given), then close it, on every path. Stops at `req.max`, on cancel, on a call that returns
+/// nothing within `req.wait`, or on one that ends with credit unaccounted; a failure the receiver
+/// held back is collected, never dropped.
+pub(crate) async fn take_and_close(
+    mut rx: Box<dyn LockReceiver>,
+    req: &ReceiveRequest,
+    address: &str,
+    run: &mut JobRun<'_>,
+    messages: Option<&mut Vec<PeekedMessage>>,
+    cancel: &CancellationToken,
+) -> Ended {
+    let mut ended = take_all(rx.as_mut(), req, address, run, messages, cancel).await;
+    ended.unreturned = rx.close().await;
+    ended
+}
+
+/// Put how a receiver ended into `run`: a link failure as a failed item (and a note), then the
+/// drain and unreturned notes of a receive-and-delete link. Returns whether it was cancelled.
+pub(crate) fn record_end(
+    run: &mut JobRun<'_>,
+    req: &ReceiveRequest,
+    address: &str,
+    ended: Ended,
+) -> bool {
+    let delete = req.action == ReceiveAction::Delete;
     let stopped = ended.cancelled || ended.error.is_some();
     if let Some(e) = ended.error {
-        let nothing_lost = !delete || (ended.shortfall == 0 && unreturned == 0);
-        if messages.is_empty() && nothing_lost {
-            return Err(e);
-        }
         let reason = format!("the receive stopped early: {e}");
         run.item(ItemResult {
             sequence_number: None,
             message_id: None,
             session_id: req.session.clone(),
-            entity: address.clone(),
+            entity: address.to_string(),
             new_sequence_number: None,
             outcome: ItemOutcome::Failed {
                 kind: error_kind(&e),
@@ -196,13 +245,10 @@ pub(crate) async fn run<B: MessagingBackend + ?Sized>(
             drain_note(ended.shortfall)
         });
     }
-    if unreturned > 0 {
-        run.note(unreturned_note(unreturned));
+    if ended.unreturned > 0 {
+        run.note(unreturned_note(ended.unreturned));
     }
-    Ok(ReceiveOutcome {
-        messages,
-        report: run.finish(ended.cancelled),
-    })
+    ended.cancelled
 }
 
 async fn take_all(
@@ -210,13 +256,15 @@ async fn take_all(
     req: &ReceiveRequest,
     address: &str,
     run: &mut JobRun<'_>,
-    messages: &mut Vec<PeekedMessage>,
+    mut messages: Option<&mut Vec<PeekedMessage>>,
     cancel: &CancellationToken,
 ) -> Ended {
     let mut ended = Ended {
         cancelled: false,
         shortfall: 0,
         error: None,
+        received: 0,
+        unreturned: 0,
     };
     let mut got = 0u32;
     while got < req.max {
@@ -250,7 +298,10 @@ async fn take_all(
                     // Asking for no more than is buffered grants no credit.
                     let n = u32::try_from(rx.buffered()).unwrap_or(u32::MAX);
                     match rx.receive(n, Duration::ZERO).await {
-                        Ok(batch) => record(rx, req, address, run, messages, batch).await,
+                        Ok(batch) => {
+                            ended.received += batch.len() as u64;
+                            record(rx, req, address, run, messages.as_deref_mut(), batch).await
+                        }
                         Err(e) => ended.error = Some(e),
                     }
                 }
@@ -258,7 +309,8 @@ async fn take_all(
             }
         };
         let n = u32::try_from(batch.len()).unwrap_or(u32::MAX);
-        record(rx, req, address, run, messages, batch).await;
+        ended.received += batch.len() as u64;
+        record(rx, req, address, run, messages.as_deref_mut(), batch).await;
         got = got.saturating_add(n);
         if n == 0 || ended.shortfall > 0 {
             // `wait` passed without a delivery, or the drain left credit unaccounted.
@@ -278,7 +330,7 @@ async fn record(
     req: &ReceiveRequest,
     address: &str,
     run: &mut JobRun<'_>,
-    messages: &mut Vec<PeekedMessage>,
+    mut messages: Option<&mut Vec<PeekedMessage>>,
     batch: Vec<ReceivedMessage>,
 ) {
     for m in batch {
@@ -298,7 +350,9 @@ async fn record(
             Some(&m.message),
             outcome,
         ));
-        messages.push(m.message);
+        if let Some(kept) = messages.as_deref_mut() {
+            kept.push(m.message);
+        }
     }
 }
 

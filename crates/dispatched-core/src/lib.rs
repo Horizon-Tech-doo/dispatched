@@ -41,9 +41,9 @@ pub use jobs::{
     RecordingProgress,
 };
 pub use messaging::{
-    BodySource, BrokerList, CloneOptions, Cloned, Edits, MessageBody, MessageDetail,
+    BodySource, BrokerList, CloneOptions, Cloned, DlqSummary, Edits, MessageBody, MessageDetail,
     MessageIdSource, MessageState, MessageSummary, OutgoingBody, OutgoingMessage, PeekOptions,
-    PeekPage, PeekedMessage, PropValue, SessionListing, SessionSummary,
+    PeekPage, PeekedMessage, PropValue, ReasonGroup, SessionListing, SessionSummary,
 };
 pub use mgmt::{
     CorrelationProperty, EntityCounts, EntityDetails, EntityKind, EntityProperty, ManagementClient,
@@ -52,7 +52,9 @@ pub use mgmt::{
 pub use namespace::{
     EmulatorPorts, EntityPath, Namespace, PeekView, ProxyConfig, SubQueue, Transport,
 };
-pub use ops::{Operator, ReceiveAction, ReceiveOutcome, ReceiveRequest, SendRequest};
+pub use ops::{
+    Operator, PurgePlan, PurgeScope, ReceiveAction, ReceiveOutcome, ReceiveRequest, SendRequest,
+};
 pub use safety::{
     Actor, CountEstimate, Mutation, OpKind, Operation, ProfileRef, SettleVerb, Target, count_text,
 };

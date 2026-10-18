@@ -135,6 +135,8 @@ struct State {
     stall: u32,
     /// After this many more deliveries a receive fails, holding the error back (as `Intake`).
     fail_after: Option<(u32, Error)>,
+    /// The next `send_all` fails with this before reporting any message's outcome.
+    lose_send_outcome: Option<Error>,
     credit_max: u32,
     renewals: u32,
     /// Tokens per `renew_lock` call, in order.
@@ -171,6 +173,7 @@ impl Default for State {
             late: 0,
             stall: 0,
             fail_after: None,
+            lose_send_outcome: None,
             credit_max: 0,
             renewals: 0,
             renew_sizes: Vec::new(),
@@ -598,6 +601,12 @@ impl FakeBroker {
         self.with(|s| s.late = n);
     }
 
+    /// The next `send_all` fails with `e` without an outcome for any of its messages (the link
+    /// dropped before the broker answered): nothing is stored, but the caller cannot know that.
+    pub(crate) fn lose_next_send_outcome(&self, e: Error) {
+        self.with(|s| s.lose_send_outcome = Some(e));
+    }
+
     /// After `k` more deliveries, a receive fails with `e` the way the real receiver does:
     /// the call returns what it took and holds `e` back for the next call (or `take_error`).
     pub(crate) fn fail_receive_after(&self, k: u32, e: Error) {
@@ -840,6 +849,9 @@ struct FakeSender {
 #[async_trait]
 impl MessageSender for FakeSender {
     async fn send_all(&mut self, batch: &[OutgoingMessage], each: Each<'_, ()>) -> Result<()> {
+        if let Some(e) = self.broker.with(|s| s.lose_send_outcome.take()) {
+            return Err(e);
+        }
         for (i, m) in batch.iter().enumerate() {
             if let Err(e) = self.broker.fault(FakeOp::Send) {
                 if retry_after(&e, 0) {

@@ -1,6 +1,7 @@
 //! The facade every surface uses: one namespace, lazily-opened AMQP connection.
 
 use crate::messaging::backend::{Each, LockReceiver, MessageSender, MessagingBackend};
+use crate::messaging::dlq::{self, DLQ_SUMMARY_CAP, DlqSummary};
 use crate::messaging::receiver::{AmqpReceiver, ReceiverSpec, SessionChoice};
 use crate::messaging::sender::AmqpSender;
 use crate::messaging::{
@@ -294,6 +295,20 @@ impl Explorer {
             cancel,
             session,
         )
+        .await
+    }
+
+    /// Dead-lettered messages of `sub_queue` (normally the dead-letter queue) grouped by reason
+    /// and description, from a peek of up to [`DLQ_SUMMARY_CAP`] messages. Read-only.
+    pub async fn dlq_summary(
+        &self,
+        entity: &EntityPath,
+        sub_queue: SubQueue,
+    ) -> Result<DlqSummary> {
+        let address = entity.address(sub_queue);
+        with_one_retry(|_| async {
+            dlq::summarize(&mut self.per_batch(), &address, DLQ_SUMMARY_CAP).await
+        })
         .await
     }
 

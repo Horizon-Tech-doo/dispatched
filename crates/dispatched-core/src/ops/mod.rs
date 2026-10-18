@@ -6,6 +6,7 @@
 //! `pub(crate)` function over a [`MessagingBackend`], so tests drive it with the fake broker.
 
 pub mod locate;
+pub mod purge;
 pub mod receive;
 pub mod remove;
 pub mod resubmit;
@@ -14,6 +15,7 @@ pub mod session_state;
 
 pub use crate::messaging::sender::send_target;
 pub use locate::LocateLimits;
+pub use purge::{PurgePlan, PurgeScope};
 pub use receive::{ReceiveAction, ReceiveOutcome, ReceiveRequest};
 pub use resubmit::{ResubmitSpec, default_target};
 pub use send::SendRequest;
@@ -308,7 +310,9 @@ impl Operator {
     ) -> Result<JobReport> {
         // Refused before the confirmation: scheduled messages live on the queue or topic.
         let target = Target::new(send_target(&entity.base())?, SubQueue::Active);
-        let op = Operation::cancel_scheduled(target, send::distinct(seqs).len() as u64);
+        let distinct = send::distinct(seqs);
+        let op =
+            Operation::cancel_scheduled(target, distinct.len() as u64).with_sequences(&distinct);
         gated(&self.gate, &op, || {
             let explorer = self.explorer.clone();
             let address = entity.base();
@@ -466,6 +470,30 @@ impl Operator {
         .await
     }
 
+    /// Count what a purge of `scope` on `entity` would remove (a read: not gated). The plan's
+    /// total is what [`Operator::purge`] confirms and the most it removes.
+    pub async fn plan_purge(&self, entity: &EntityPath, scope: PurgeScope) -> Result<PurgePlan> {
+        purge::plan(&mut self.explorer.plane(), entity, scope).await
+    }
+
+    /// Purge each planned entity in order, each behind its own confirmation; never more
+    /// messages than its plan's total. A denied entity is skipped and the rest go on.
+    pub async fn purge(
+        &self,
+        plans: Vec<PurgePlan>,
+        progress: &dyn Progress,
+        cancel: &CancellationToken,
+    ) -> Result<JobReport> {
+        purge::run_many(
+            &mut self.explorer.plane(),
+            &self.gate,
+            plans,
+            progress,
+            cancel,
+        )
+        .await
+    }
+
     /// The state of `session` (a read: not gated, not audited).
     pub async fn session_state(
         &self,
@@ -528,6 +556,26 @@ pub(crate) mod testkit {
     /// A gate that allows everything, over an in-memory audit.
     pub(crate) fn fake_gate() -> (Gate, Arc<MemoryAudit>) {
         gate_with(Arc::new(AllowAll))
+    }
+
+    /// A gate that refuses operations on the entity `target` and allows the rest.
+    pub(crate) fn gate_denying_target(target: &str) -> (Gate, Arc<MemoryAudit>) {
+        struct DenyTarget(String);
+        #[async_trait::async_trait]
+        impl Policy for DenyTarget {
+            async fn confirm(
+                &self,
+                req: &horizon_azure_kit::safety::ConfirmRequest,
+            ) -> horizon_azure_kit::safety::Decision {
+                use horizon_azure_kit::safety::Decision;
+                if req.target == self.0 {
+                    Decision::Deny(format!("{} is not to be purged", self.0))
+                } else {
+                    Decision::Allow
+                }
+            }
+        }
+        gate_with(Arc::new(DenyTarget(target.to_string())))
     }
 
     /// A gate that refuses everything, over an in-memory audit.
@@ -861,6 +909,8 @@ mod tests {
             &NoProgress,
             c,
         ));
+        assert_send(&o.plan_purge(e, PurgeScope::All));
+        assert_send(&o.purge(Vec::new(), &NoProgress, c));
         assert_send(&o.session_state(e, "s"));
         assert_send(&o.set_session_state(e, "s", None));
     }
