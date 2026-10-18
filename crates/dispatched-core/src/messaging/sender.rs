@@ -78,6 +78,54 @@ pub(crate) fn encode_for_schedule(
     Ok((bytes, id, m.session_id.clone(), m.partition_key.clone()))
 }
 
+/// Run `items` through `call` in chunks of [`REQUEST_CHUNK`], reporting a result per
+/// original index. See the tests for the contract.
+pub(crate) async fn run_chunks<T, R>(
+    items: Vec<Result<T>>,
+    mut call: impl AsyncFnMut(&[T]) -> Result<Vec<R>>,
+    mut each: impl FnMut(usize, Result<R>),
+) -> Result<()> {
+    // Items that failed to encode are reported at once and left out of the requests.
+    let mut indexes = Vec::with_capacity(items.len());
+    let mut values = Vec::with_capacity(items.len());
+    for (i, item) in items.into_iter().enumerate() {
+        match item {
+            Ok(v) => {
+                indexes.push(i);
+                values.push(v);
+            }
+            Err(e) => each(i, Err(e)),
+        }
+    }
+    for (c, chunk) in chunks(&values).enumerate() {
+        let first = c * REQUEST_CHUNK;
+        let ids = &indexes[first..first + chunk.len()];
+        let outcome = match call(chunk).await {
+            Ok(got) if got.len() == chunk.len() => Ok(got),
+            Ok(got) => Err(Error::Protocol(format!(
+                "the broker handled {} messages but returned {} results; they may have taken effect, check the entity before retrying",
+                chunk.len(),
+                got.len()
+            ))),
+            Err(e) => Err(e),
+        };
+        match outcome {
+            Ok(got) => {
+                for (i, r) in ids.iter().zip(got) {
+                    each(*i, Ok(r));
+                }
+            }
+            Err(e) => {
+                for i in &indexes[first..] {
+                    each(*i, Err(copy_error(&e)));
+                }
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// What the pipeline needs from a link; the real one wraps [`Sender`].
 trait Submit {
     /// The future that resolves with the broker's disposition.
@@ -276,7 +324,19 @@ fn copy_error(e: &Error) -> Error {
         Error::Conflict(m) => Error::Conflict(m.clone()),
         Error::Network(m) => Error::Network(m.clone()),
         Error::Protocol(m) => Error::Protocol(m.clone()),
-        other => Error::Protocol(other.to_string()),
+        Error::Invalid(m) => Error::Invalid(m.clone()),
+        Error::Auth(m) => Error::Auth(m.clone()),
+        Error::NotSignedIn(m) => Error::NotSignedIn(m.clone()),
+        Error::LockLost(m) => Error::LockLost(m.clone()),
+        Error::Denied(m) => Error::Denied(m.clone()),
+        Error::Io(m) => Error::Io(m.clone()),
+        Error::Cancelled => Error::Cancelled,
+        Error::Throttled { retry_after } => Error::Throttled {
+            retry_after: *retry_after,
+        },
+        Error::Unsupported { capability } => Error::Unsupported {
+            capability: capability.clone(),
+        },
     }
 }
 
@@ -486,5 +546,89 @@ mod tests {
         assert!(matches!(r, Err(Error::Forbidden { .. })));
         assert!(seen[..2].iter().all(|r| r.is_ok()));
         assert!(seen[2..].iter().all(|r| r.is_err()));
+    }
+
+    /// Run `run_chunks` over `items`, echoing each value + 1000, failing the
+    /// chunk numbered `fail_chunk`; returns (calls' sizes, per-index results, return).
+    async fn chunked(
+        items: Vec<Result<i64>>,
+        fail_chunk: Option<usize>,
+    ) -> (Vec<usize>, Vec<Option<Result<i64>>>, Result<()>) {
+        let mut sizes = Vec::new();
+        let mut seen: Vec<Option<Result<i64>>> = (0..items.len()).map(|_| None).collect();
+        let r = run_chunks(
+            items,
+            async |chunk: &[i64]| {
+                let n = sizes.len();
+                sizes.push(chunk.len());
+                if fail_chunk == Some(n) {
+                    return Err(Error::Timeout("broker stalled".into()));
+                }
+                Ok(chunk.iter().map(|v| v + 1000).collect())
+            },
+            |i, r| {
+                assert!(seen[i].is_none(), "index {i} reported twice");
+                seen[i] = Some(r);
+            },
+        )
+        .await;
+        (sizes, seen, r)
+    }
+
+    #[tokio::test]
+    async fn chunks_that_all_succeed_report_every_index() {
+        let (sizes, seen, r) = chunked((0..250).map(Ok).collect(), None).await;
+        assert!(r.is_ok());
+        assert_eq!(sizes, [100, 100, 50]);
+        for (i, s) in seen.into_iter().enumerate() {
+            assert_eq!(s.unwrap().unwrap(), i as i64 + 1000);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_middle_chunk_fails_its_indexes_and_the_rest() {
+        let (sizes, seen, r) = chunked((0..250).map(Ok).collect(), Some(1)).await;
+        assert!(matches!(r, Err(Error::Timeout(_))));
+        assert_eq!(sizes, [100, 100], "no request after the failure");
+        for (i, s) in seen.into_iter().enumerate() {
+            let s = s.expect("every index is reported");
+            if i < 100 {
+                assert_eq!(s.unwrap(), i as i64 + 1000);
+            } else {
+                assert!(matches!(s, Err(Error::Timeout(_))), "{i}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_item_that_fails_to_encode_is_left_out_and_the_rest_go() {
+        let mut items: Vec<Result<i64>> = (0..3).map(Ok).collect();
+        items[1] = Err(Error::Invalid("bad".into()));
+        let (sizes, seen, r) = chunked(items, None).await;
+        assert!(r.is_ok());
+        assert_eq!(sizes, [2]);
+        let seen: Vec<_> = seen.into_iter().map(Option::unwrap).collect();
+        assert_eq!(*seen[0].as_ref().unwrap(), 1000);
+        assert!(matches!(&seen[1], Err(Error::Invalid(m)) if m == "bad"));
+        assert_eq!(*seen[2].as_ref().unwrap(), 1002);
+    }
+
+    #[tokio::test]
+    async fn a_wrong_result_count_fails_the_chunk() {
+        let mut seen = Vec::new();
+        let r = run_chunks(
+            vec![Ok(1_i64), Ok(2)],
+            async |_: &[i64]| Ok(vec![1_i64]),
+            |i, r: Result<i64>| seen.push((i, r.is_err())),
+        )
+        .await;
+        assert!(matches!(r, Err(Error::Protocol(m)) if m.contains("returned 1")));
+        assert_eq!(seen, [(0, true), (1, true)]);
+    }
+
+    #[test]
+    fn scheduling_at_exactly_now_is_allowed() {
+        let now = datetime!(2026-10-17 12:00 UTC);
+        assert!(encode_for_schedule(&OutgoingMessage::text("x"), now, now).is_ok());
     }
 }
