@@ -105,6 +105,32 @@ impl Ctx {
         )
     }
 
+    #[cfg(test)]
+    /// The context signed in as the account test profiles use (`o`): the sign-in is saved and
+    /// current, and a placeholder refresh token is in the in-memory credential store, so an
+    /// Entra profile resolves. Nothing ever exchanges the placeholder for a token.
+    pub fn signed_in_for_test(self) -> Self {
+        let sign_in = SignIn {
+            id: "o".into(),
+            user_principal: "a@x.io".into(),
+            tenant_id: "t".into(),
+            display_name: None,
+            cloud: AzureCloud::Public,
+        };
+        let store = self.store().expect("test store");
+        store.save_sign_in(&sign_in).expect("sign-in saved");
+        store
+            .set_current_sign_in(Some(&sign_in.id))
+            .expect("sign-in current");
+        self.secrets
+            .put(
+                &format!("{KEY_PREFIX}:entra:{}", sign_in.id),
+                &secrecy::SecretString::from("placeholder"),
+            )
+            .expect("placeholder token saved");
+        self
+    }
+
     /// The activity log, opened (creating `{config_dir}/activity.db`) on first use, so
     /// read-only commands never touch it.
     pub fn activity(&self) -> anyhow::Result<&Arc<ActivityLog>> {

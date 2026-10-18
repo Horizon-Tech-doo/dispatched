@@ -57,6 +57,16 @@ pub struct CliPolicy {
     prompt: Prompt,
     /// The profile name, for the production refusal.
     profile: String,
+    /// Shows what `--yes` confirmed (stderr).
+    echo: Echo,
+}
+
+/// Shows a line to the user.
+pub type Echo = Box<dyn Fn(&str) + Send + Sync>;
+
+/// The line `--yes` shows for the confirmation it answered.
+fn confirmed_text(summary: &str) -> String {
+    format!("confirmed with --yes: {}", sanitize(summary))
 }
 
 impl CliPolicy {
@@ -74,7 +84,15 @@ impl CliPolicy {
             interactive,
             prompt,
             profile: profile.to_string(),
+            echo: Box::new(|line| eprintln!("{line}")),
         })
+    }
+
+    /// The same policy, showing what `--yes` confirmed through `echo` instead of stderr.
+    #[cfg(test)]
+    pub fn with_echo(mut self, echo: Echo) -> Self {
+        self.echo = echo;
+        self
     }
 
     /// The policy for this process: it prompts when stdin and stderr are terminals.
@@ -155,12 +173,16 @@ impl Policy for CliPolicy {
         if req.production {
             // No interactive way around it: both flags, naming this entity.
             return if self.yes && names(&self.confirm_prod, &req.target) {
+                (self.echo)(&confirmed_text(&req.summary));
                 Decision::ConfirmedTyped(req.target.clone())
             } else {
                 Decision::Deny(production_refusal(&req.target, &self.profile))
             };
         }
         if self.yes {
+            // No prompt shows the sentence, so say what was confirmed (a partial match says
+            // "run again for the rest").
+            (self.echo)(&confirmed_text(&req.summary));
             return Decision::Allow;
         }
         if !self.interactive {
@@ -514,6 +536,40 @@ mod tests {
             Decision::Allow,
             "--yes needs no prompt off production"
         );
+    }
+
+    #[tokio::test]
+    async fn yes_shows_what_it_confirmed() {
+        use std::sync::Mutex;
+        let shown = Arc::new(Mutex::new(Vec::<String>::new()));
+        let policy = |yes, prod: &[&str]| {
+            let sink = shown.clone();
+            CliPolicy::for_test(yes, prod, false, "n")
+                .with_echo(Box::new(move |l| sink.lock().unwrap().push(l.to_string())))
+        };
+        let mut partial = req("orders", false);
+        partial.summary =
+            "Delete 2 messages (sequence numbers 3, 8) from orders on dev; matched 2 \
+                           in the first 10,000 examined; run again for the rest"
+                .into();
+        assert_eq!(policy(true, &[]).confirm(&partial).await, Decision::Allow);
+        assert!(matches!(
+            policy(true, &["orders"])
+                .confirm(&req("orders", true))
+                .await,
+            Decision::ConfirmedTyped(_)
+        ));
+        // A denial, or a prompt (which shows the sentence itself), adds nothing.
+        policy(false, &[]).confirm(&req("orders", false)).await;
+        policy(true, &[]).confirm(&req("orders", true)).await;
+        let shown = shown.lock().unwrap();
+        assert_eq!(shown.len(), 2, "{shown:?}");
+        assert_eq!(
+            shown[0],
+            format!("confirmed with --yes: {}", partial.summary)
+        );
+        assert!(shown[0].ends_with("run again for the rest"));
+        assert!(shown[1].contains("Remove 3 messages from orders/$DeadLetterQueue on prod-weu"));
     }
 
     #[test]

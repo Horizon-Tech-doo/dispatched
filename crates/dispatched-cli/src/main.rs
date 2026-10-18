@@ -153,6 +153,19 @@ enum Command {
         #[command(subcommand)]
         cmd: commands::receive::DeferredCmd,
     },
+    /// Delete messages by sequence number, or all that match (--all with filters).
+    Delete(commands::repair::DeleteArgs),
+    /// Move messages to another queue or topic (sent first, then removed).
+    Move(commands::repair::MoveArgs),
+    /// Send edited copies of messages to a queue or topic, optionally removing the originals.
+    Resubmit(Box<commands::repair::ResubmitArgs>),
+    /// Remove every message of one or more entities (each counted and confirmed on its own).
+    Purge(commands::repair::PurgeArgs),
+    /// The dead-letter queue: summary, resubmit, move, delete and purge.
+    Dlq {
+        #[command(subcommand)]
+        cmd: commands::repair::DlqCmd,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -261,6 +274,11 @@ async fn run(cli: Cli) -> Result<JobExit, (anyhow::Error, Hints)> {
                 | Command::Import(_)
                 | Command::Receive(_)
                 | Command::Deferred { .. }
+                | Command::Delete(_)
+                | Command::Move(_)
+                | Command::Resubmit(_)
+                | Command::Purge(_)
+                | Command::Dlq { .. }
         ) && resolve::select(&flags, &env).namespace.is_some(),
     };
     // Opens nothing: the profile store, activity log and keychain are touched
@@ -367,6 +385,15 @@ async fn run_command(ctx: &Ctx, cli: Cli) -> anyhow::Result<JobExit> {
         Command::Deferred { cmd } => {
             return commands::receive::deferred(ctx, &sel, &cmd, format).await;
         }
+        Command::Delete(args) => return commands::repair::delete(ctx, &sel, &args, format).await,
+        Command::Move(args) => {
+            return commands::repair::move_messages(ctx, &sel, &args, format).await;
+        }
+        Command::Resubmit(args) => {
+            return commands::repair::resubmit(ctx, &sel, &args, format).await;
+        }
+        Command::Purge(args) => return commands::repair::purge(ctx, &sel, &args, format).await,
+        Command::Dlq { cmd } => return commands::repair::dlq(ctx, &sel, &cmd, format).await,
     };
     done.map(|()| JobExit::Ok)
 }

@@ -74,6 +74,8 @@ pub enum DeferredCmd {
     Ls(DeferredLsArgs),
     /// Receive deferred messages by sequence number and settle them.
     Receive(DeferredReceiveArgs),
+    /// Delete deferred messages by sequence number (`delete --view deferred`).
+    Delete(super::repair::DeferredDeleteArgs),
 }
 
 /// `deferred ls`.
@@ -289,6 +291,7 @@ pub async fn deferred(
             operator.explorer().close().await;
             Ok(finish_job(&result?, format, &a.mutate))
         }
+        DeferredCmd::Delete(a) => super::repair::deferred_delete(ctx, sel, a, format).await,
     }
 }
 
@@ -425,7 +428,12 @@ mod tests {
             "--then needed"
         );
         assert!(try_parse(["deferred", "ls", "q", "--top", "3"]).is_ok());
-        assert!(try_parse(["deferred", "delete", "q"]).is_err(), "Task 20");
+        // Defined in Task 20 next to `SelectArgs`; it needs --seq.
+        assert!(try_parse(["deferred", "delete", "q", "--seq", "3"]).is_ok());
+        assert!(
+            try_parse(["deferred", "delete", "q"]).is_err(),
+            "--seq needed"
+        );
     }
 
     #[tokio::test]

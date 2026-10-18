@@ -6,6 +6,7 @@ pub mod browse;
 pub mod inspect;
 pub mod profile;
 pub mod receive;
+pub mod repair;
 pub mod send;
 
 use crate::context::Ctx;
