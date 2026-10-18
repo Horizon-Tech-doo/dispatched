@@ -9,7 +9,7 @@
 #![allow(dead_code)]
 
 use super::outgoing::OutgoingMessage;
-use super::receiver::{AmqpReceiver, LockToken, ReceivedMessage, ReceiverSpec, Settlement};
+use super::receiver::{AmqpReceiver, Closed, LockToken, ReceivedMessage, ReceiverSpec, Settlement};
 use super::scan::PeekSource;
 use super::sender::AmqpSender;
 use crate::mgmt::EntityCounts;
@@ -113,9 +113,10 @@ pub(crate) trait LockReceiver: Send {
     async fn set_session_state(&mut self, state: Option<&[u8]>) -> Result<()>;
     /// Renew the session lock; its new expiration.
     async fn renew_session_lock(&mut self) -> Result<OffsetDateTime>;
-    /// Release what is held, then close. Returns how many receive-and-delete messages
-    /// were removed from the entity but never returned (callers report them).
-    async fn close(self: Box<Self>) -> usize;
+    /// Release what is held, then close. Returns the receive-and-delete messages removed
+    /// from the entity but never returned (callers record them), and what may have been
+    /// removed beyond them when the close did not complete (see [`Closed`]).
+    async fn close(self: Box<Self>) -> Closed;
 }
 
 #[async_trait]
@@ -176,7 +177,7 @@ impl LockReceiver for AmqpReceiver {
     async fn renew_session_lock(&mut self) -> Result<OffsetDateTime> {
         AmqpReceiver::renew_session_lock(self).await
     }
-    async fn close(self: Box<Self>) -> usize {
+    async fn close(self: Box<Self>) -> Closed {
         AmqpReceiver::close(*self).await
     }
 }

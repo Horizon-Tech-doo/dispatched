@@ -78,6 +78,10 @@ async fn m2a_link_semantics() {
         p.removed_unreturned, 0,
         "(d) close found no removed-but-unreturned messages"
     );
+    assert_eq!(
+        p.close_uncertain, 0,
+        "(d) the close (drain, sweep, detach) completed, settling the unconfirmed drain"
+    );
 }
 
 const OPS: &str = "m2a-ops";

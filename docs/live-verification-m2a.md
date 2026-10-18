@@ -16,6 +16,7 @@ M2a is the operate core and the CLI. The emulator column comes from the gate `em
 | Session state get, set, clear, and delete inside a session | ✅ gate step 11 (session A kept both messages after the delete in session B) | not run | not run |
 | Plain receive on a session queue is refused | ✅ gate: `Invalid("m2a-sessions requires sessions; open a session receiver")`, logged `Failed` | not run | not run |
 | Bulk purge across entities and sub-queues | ✅ gate step 13 (`About(3)` and `About(2)`; `3 removed from m2a-purge-a; more remain, run purge again`; `m2a-purge-b` empty) | not run | not run |
+| Session-queue purge in one run; short receive-and-delete without a note | ✅ CLI against the emulator (final-review fix): `purge m2a-sessions` removed 34 of 34 messages across 16 sessions in one run, no note; `receive m2a-target --delete --top 50` on 3 returned 3, notes `[]` | not run | not run |
 | Export, then import with the same MessageIds; bodies equal | ✅ gate step 14 (NDJSON) | not run | not run |
 | Entity kind resolution, queue and topic | ✅ gate step 15 | not run | not run |
 | Denied purge: one `Skipped` item with `denied: …`, one note, queue untouched | ✅ gate step 16 | not run | not run |
@@ -35,12 +36,12 @@ M2a is the operate core and the CLI. The emulator column comes from the gate `em
 **Task 9 probe, verbatim (identical on every run, after the fix round):**
 
 ```
-link probe: LinkProbe { released_delivery_count: 0, abandoned_delivery_count: 1, management_complete_removed: true, management_complete_error: None, drain_returned: 2, drain_credit_left: 1, left_after_drain: 0, late_arrival_kept: true, removed_unreturned: 0 }
+link probe: LinkProbe { released_delivery_count: 0, abandoned_delivery_count: 1, management_complete_removed: true, management_complete_error: None, drain_returned: 2, drain_credit_left: 1, left_after_drain: 0, late_arrival_kept: true, removed_unreturned: 0, close_uncertain: 0 }
 ```
 
 - (a) `released` left the delivery count at 0; (b) abandon through `update-disposition` raised it to 1.
 - (c) `update-disposition` with the delivery-tag token and `associated-link-name` completed a link-received message with no error, and a peek found nothing.
-- (d) Asked for 3 with a 2 s wait, 2 were returned. The drain ended on `DRAIN_GRACE`: fe2o3 still reports 1 credit (`drain_credit_left: 1`), so a short receive-and-delete adds the "may have been removed" note. The link was quiet afterwards: a message sent later stayed in the queue (`late_arrival_kept`) and `close` returned `removed_unreturned: 0`.
+- (d) Asked for 3 with a 2 s wait, 2 were returned. The drain ended on `DRAIN_GRACE`: fe2o3 still reports 1 credit (`drain_credit_left: 1`). The link was quiet afterwards: a message sent later stayed in the queue (`late_arrival_kept`), and `close` returned nothing removed (`removed_unreturned: 0`) and completed its drain, sweep and detach (`close_uncertain: 0`), which settles the unconfirmed drain, so a short receive-and-delete carries no note (final-review fix I2).
 
 **Local checks:** fmt and clippy are clean. Tests: core 584, CLI 148 plus 1 (`cargo test --locked`).
 
@@ -66,7 +67,8 @@ Run every gate step (1 to 16), and resubmit with remove-original, which the gate
 - [ ] A partitioned entity: delete by sequence number.
 - [ ] `released` and the delivery count (Task 9 probe (a) and gate step 8 on the cloud): after a lock-and-match delete the unmatched messages still have delivery count 0. If `released` raises the count, Decision 19 must be reworked (fallback: count +1 and `max_examined` 1,000).
 - [ ] `update-disposition` settles a link-received lock token (probe (c)).
-- [ ] The drain grace and the "up to n more messages may have been removed" note (probe (d)): on a short receive-and-delete, does the cloud confirm the drain and drop the note?
+- [ ] The drain grace and the close (probe (d)): on a short receive-and-delete, does the cloud complete the close (`close_uncertain: 0`), so there is no note? Pass: `close_uncertain` 0 and no note. Fail: any note on a short receive.
+- [ ] A session-queue purge (several sessions, each holding fewer messages than the allowance) removes every session's messages in one run with no note. Pass: one run, everything removed, no note. Fail: it stops after a session, or adds a "may have been removed" note.
 - [ ] Lock renewal during a long lock-and-match search (more messages than one lock duration allows; no `lock-time` stop and no lost lock).
 - [ ] Session receivers with the plain filter: by id (`session state get/set/clear`, `delete` or `receive --session`), next available (purge of a session queue), and the accepted session id read back correctly. If the cloud wanted the described form, the receiver would need a fallback; unlikely, since the SDKs send plain values.
 - [ ] The "requires sessions" wording of the refusal on a plain receive from a session entity (the emulator's matches the mapping).

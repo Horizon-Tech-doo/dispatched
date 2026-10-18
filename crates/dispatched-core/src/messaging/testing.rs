@@ -425,8 +425,12 @@ pub struct LinkProbe {
     /// stayed open for `DRAIN_GRACE` plus 1 s, is still in the queue after
     /// close: the drained link stayed quiet (expected true).
     pub late_arrival_kept: bool,
-    /// (d) Receive-and-delete messages `close` reported as removed but not returned (expected 0).
+    /// (d) Receive-and-delete messages `close` returned as removed but not returned by a
+    /// receive (expected 0).
     pub removed_unreturned: usize,
+    /// (d) Credit `close` left uncertain: 0 when its drain, sweep and detach completed, which
+    /// settles the receive's unconfirmed drain (expected 0).
+    pub close_uncertain: u32,
 }
 
 fn probe_tagged(m: &PeekedMessage, tag: &str) -> bool {
@@ -542,7 +546,7 @@ pub async fn probe_m2a_link_semantics(
         // Clean up over the link; the probe reports the refusal above.
         let _ = rx.settle_on_link(token, &Settlement::Complete).await;
     }
-    rx.close().await;
+    let _ = rx.close().await;
 
     // (d) receive-and-delete with more credit than messages.
     send_text(conn, address, "m2a probe d1", &[("probe", &tag_d)]).await?;
@@ -558,7 +562,9 @@ pub async fn probe_m2a_link_semantics(
     let tag_late = format!("{run}-late");
     send_text(conn, address, "m2a probe late", &[("probe", &tag_late)]).await?;
     tokio::time::sleep(super::receiver::DRAIN_GRACE + Duration::from_secs(1)).await;
-    let removed_unreturned = rd.close().await;
+    let closed = rd.close().await;
+    let removed_unreturned = closed.removed.len();
+    let close_uncertain = closed.uncertain;
     tokio::time::sleep(Duration::from_secs(2)).await;
     let after = peek_everything(conn, address).await?;
     let left_after_drain = after.iter().filter(|m| probe_tagged(m, &tag_d)).count();
@@ -576,6 +582,7 @@ pub async fn probe_m2a_link_semantics(
         left_after_drain,
         late_arrival_kept,
         removed_unreturned,
+        close_uncertain,
     })
 }
 
@@ -628,6 +635,6 @@ pub async fn renew_lock_once(
         Ok((before, after))
     }
     .await;
-    rx.close().await;
+    let _ = rx.close().await;
     outcome
 }

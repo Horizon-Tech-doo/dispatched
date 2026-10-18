@@ -328,12 +328,29 @@ impl<B: MessagingBackend + ?Sized> Purge<'_, '_, B> {
         allowance: u64,
         d: &mut Drain,
     ) {
+        let want = allowance - d.used;
+        self.take_up_to(rx, q, address, allowance, want, d).await;
+    }
+
+    /// Receive-and-delete on `rx` up to `want` messages (never above `allowance - d.used`),
+    /// then close it. The allowance is charged with what was removed: the messages received
+    /// (those the close returned too), and any credit a close that did not complete left
+    /// uncertain, so the run never removes more than confirmed.
+    async fn take_up_to(
+        &mut self,
+        rx: Box<dyn LockReceiver>,
+        q: SubQueue,
+        address: &str,
+        allowance: u64,
+        want: u64,
+        d: &mut Drain,
+    ) {
         let session = rx.session_id().map(str::to_string);
         let req = ReceiveRequest {
             entity: self.plan.entity.clone(),
             sub_queue: q,
             session: session.clone(),
-            max: u32::try_from(allowance - d.used).unwrap_or(u32::MAX),
+            max: u32::try_from(want.min(allowance - d.used)).unwrap_or(u32::MAX),
             wait: PURGE_IDLE,
             action: ReceiveAction::Delete,
         };
@@ -398,11 +415,8 @@ impl<B: MessagingBackend + ?Sized> Purge<'_, '_, B> {
                         .is_none_or(|id| visited.insert(id.to_string()));
                     if !fresh {
                         // Handed a session already emptied (it may keep state): none is left.
-                        let unreturned = rx.close().await;
-                        if unreturned > 0 {
-                            d.used = d.used.saturating_add(unreturned as u64).min(allowance);
-                            self.job.note(receive::unreturned_note(unreturned));
-                        }
+                        // Close it without asking for messages (it grants no credit).
+                        self.take_up_to(rx, q, address, allowance, 0, d).await;
                         break;
                     }
                     self.take(rx, q, address, allowance, d).await;
@@ -869,6 +883,44 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_session_queue_purge_removes_every_session_in_one_run() {
+        // Each session's receiver gets more credit than its session holds; the unspent credit
+        // is unconfirmed until the close settles it, so it must not use up the allowance.
+        let b = FakeBroker::default();
+        for (id, n) in [("A", 4), ("B", 3), ("C", 3)] {
+            for _ in 0..n {
+                b.add("s", FakeMsg::active("x").in_session(id));
+            }
+        }
+        let plan = plan_with("s", PurgeScope::Active, CountEstimate::Exact(10)).sessions();
+        let r = purge(&b, &plan).await;
+        assert_eq!(r.succeeded(), 10, "{:?}", r.items);
+        assert!(b.all("s").is_empty());
+        assert!(r.notes.is_empty(), "no false note: {:?}", r.notes);
+        assert!(b.credit_granted_max() <= 10);
+        assert_eq!(b.open_receivers(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_close_that_does_not_complete_charges_the_allowance_and_keeps_the_note() {
+        let b = FakeBroker::default();
+        for _ in 0..2 {
+            b.add("q", FakeMsg::active("x"));
+        }
+        b.fail_next_close();
+        let plan = plan_with("q", PurgeScope::Active, CountEstimate::Exact(5));
+        let r = purge(&b, &plan).await;
+        assert_eq!(r.succeeded(), 2);
+        assert!(
+            r.notes
+                .iter()
+                .any(|n| n.starts_with("up to 3 more messages may have been removed")),
+            "{:?}",
+            r.notes
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_session_entity_is_learned_from_the_first_attach() {
         // Management cannot say, and the plain receiver is refused: purge goes by session.
         let b = FakeBroker::default();
@@ -992,8 +1044,10 @@ mod tests {
         b.add("q", FakeMsg::active("x"));
         b.add("q/$DeadLetterQueue", FakeMsg::active("y"));
         b.stall_drain(2);
-        // The active line may take 3; the whole purge 3: the drain's 2 unaccounted credits use
-        // up the rest, so the dead-letter queue gets nothing.
+        b.fail_next_close();
+        // The active line may take 3; the whole purge 3: the drain's 2 unaccounted credits,
+        // which the close did not settle, use up the rest, so the dead-letter queue gets
+        // nothing.
         let mut plan = plan_with_counts(
             "q",
             PurgeScope::All,
@@ -1372,7 +1426,7 @@ mod tests {
             .unwrap()
             .unwrap();
         rx.set_session_state(Some(b"state")).await.unwrap();
-        rx.close().await;
+        let _ = rx.close().await;
         let plan = plan_with("s", PurgeScope::Active, CountEstimate::Exact(5)).sessions();
         let r = purge(&b, &plan).await;
         assert_eq!(r.succeeded(), 1);

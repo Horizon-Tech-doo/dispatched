@@ -29,7 +29,8 @@ pub(crate) async fn get<B: MessagingBackend + ?Sized>(
 ) -> Result<Option<Vec<u8>>> {
     let mut rx = accept(b, address, session).await?;
     let state = rx.session_state().await;
-    rx.close().await;
+    // Peek-lock: the close removes nothing.
+    let _ = rx.close().await;
     state
 }
 
@@ -42,7 +43,8 @@ pub(crate) async fn set<B: MessagingBackend + ?Sized>(
 ) -> Result<()> {
     let mut rx = accept(b, address, session).await?;
     let done = rx.set_session_state(state.as_deref()).await;
-    rx.close().await;
+    // Peek-lock: the close removes nothing.
+    let _ = rx.close().await;
     done
 }
 

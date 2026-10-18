@@ -90,14 +90,15 @@ pub(crate) fn drain_note(n: u32) -> String {
     }
 }
 
-/// The report note for receive-and-delete messages a closing receiver had taken but not returned.
-pub(crate) fn unreturned_note(n: usize) -> String {
+/// The report note for receive-and-delete deliveries a closing receiver swept up but could not
+/// decode: removed from the entity, and lost.
+pub(crate) fn undecodable_note(n: u32) -> String {
     if n == 1 {
-        "1 message was removed but is not in this result".into()
+        "1 message was removed but could not be decoded, so it is not in this result".into()
     } else {
         format!(
-            "{} messages were removed but are not in this result",
-            count_text(n as u64)
+            "{} messages were removed but could not be decoded, so they are not in this result",
+            count_text(u64::from(n))
         )
     }
 }
@@ -117,21 +118,22 @@ fn item(entity: &str, seq: i64, m: Option<&PeekedMessage>, outcome: ItemOutcome)
 /// How a receiver's take ended ([`take_and_close`]).
 pub(crate) struct Ended {
     pub(crate) cancelled: bool,
-    /// The last receive's unaccounted credit.
+    /// The last receive's unaccounted credit, until the close settles it.
     pub(crate) shortfall: u32,
     pub(crate) error: Option<Error>,
-    /// Messages the receiver returned (each recorded as an item).
+    /// Messages received and recorded as items: those `receive` returned and the
+    /// receive-and-delete ones the close returned.
     pub(crate) received: u64,
-    /// Receive-and-delete messages the closed receiver had taken but never returned.
-    pub(crate) unreturned: usize,
+    /// Receive-and-delete messages the close swept up but could not decode.
+    pub(crate) undecodable: u32,
 }
 
 impl Ended {
-    /// The most messages a receive-and-delete link may have removed: those it returned, those
-    /// it took but never returned, and its unaccounted credit.
+    /// The most messages a receive-and-delete link may have removed: those recorded, those it
+    /// could not decode, and the credit the close left uncertain.
     pub(crate) fn removed_at_most(&self) -> u64 {
         self.received
-            .saturating_add(self.unreturned as u64)
+            .saturating_add(u64::from(self.undecodable))
             .saturating_add(u64::from(self.shortfall))
     }
 }
@@ -182,7 +184,7 @@ pub(crate) async fn run<B: MessagingBackend + ?Sized>(
     );
     let mut messages = Vec::new();
     let mut ended = take_and_close(rx, req, &address, &mut run, Some(&mut messages), cancel).await;
-    let nothing_lost = !delete || (ended.shortfall == 0 && ended.unreturned == 0);
+    let nothing_lost = !delete || (ended.shortfall == 0 && ended.undecodable == 0);
     if messages.is_empty()
         && nothing_lost
         && let Some(e) = ended.error.take()
@@ -208,9 +210,46 @@ pub(crate) async fn take_and_close(
     messages: Option<&mut Vec<PeekedMessage>>,
     cancel: &CancellationToken,
 ) -> Ended {
-    let mut ended = take_all(rx.as_mut(), req, address, run, messages, cancel).await;
-    ended.unreturned = rx.close().await;
+    let mut messages = messages;
+    let mut ended = take_all(
+        rx.as_mut(),
+        req,
+        address,
+        run,
+        messages.as_deref_mut(),
+        cancel,
+    )
+    .await;
+    let closed = rx.close().await;
+    // The close settles the last receive's credit: what it swept up is returned here, and
+    // only a close that did not complete leaves any uncertain.
+    ended.shortfall = closed.uncertain;
+    ended.undecodable = closed.undecodable;
+    if !closed.removed.is_empty() {
+        ended.received += closed.removed.len() as u64;
+        record_removed(address, run, messages, closed.removed);
+    }
     ended
+}
+
+/// Record receive-and-delete messages removed outside a `receive` (returned by the close).
+fn record_removed(
+    address: &str,
+    run: &mut JobRun<'_>,
+    mut messages: Option<&mut Vec<PeekedMessage>>,
+    removed: Vec<ReceivedMessage>,
+) {
+    for m in removed {
+        run.item(item(
+            address,
+            m.message.sequence_number,
+            Some(&m.message),
+            ItemOutcome::Succeeded { detail: None },
+        ));
+        if let Some(kept) = messages.as_deref_mut() {
+            kept.push(m.message);
+        }
+    }
 }
 
 /// Put how a receiver ended into `run`: a link failure as a failed item (and a note), then the
@@ -245,8 +284,8 @@ pub(crate) fn record_end(
             drain_note(ended.shortfall)
         });
     }
-    if ended.unreturned > 0 {
-        run.note(unreturned_note(ended.unreturned));
+    if ended.undecodable > 0 {
+        run.note(undecodable_note(ended.undecodable));
     }
     ended.cancelled
 }
@@ -264,7 +303,7 @@ async fn take_all(
         shortfall: 0,
         error: None,
         received: 0,
-        unreturned: 0,
+        undecodable: 0,
     };
     let mut got = 0u32;
     while got < req.max {
@@ -404,7 +443,8 @@ pub(crate) async fn settle_deferred<B: MessagingBackend + ?Sized>(
         done += chunk.len();
         settle_chunk(rx.as_mut(), address, chunk, how, &mut run).await;
     }
-    rx.close().await;
+    // Peek-lock: the close removes nothing.
+    let _ = rx.close().await;
     Ok(run.finish(cancelled))
 }
 
@@ -533,10 +573,70 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_short_receive_and_delete_has_no_false_note() {
+        // `receive --delete --top 50` on 3 messages: 47 credits are unspent when the wait
+        // ends, but the completed close settles them.
+        let b = FakeBroker::default();
+        for _ in 0..3 {
+            b.add("q", FakeMsg::active("x"));
+        }
+        let out = receive::run(
+            &mut b.clone(),
+            &recv("q", 50, ReceiveAction::Delete),
+            &NoProgress,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.messages.len(), 3);
+        assert_eq!(out.report.succeeded(), 3);
+        assert!(out.report.notes.is_empty(), "{:?}", out.report.notes);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_close_that_does_not_complete_keeps_the_note() {
+        let b = FakeBroker::default();
+        b.add("q", FakeMsg::active("x"));
+        b.fail_next_close();
+        let out = receive::run(
+            &mut b.clone(),
+            &recv("q", 3, ReceiveAction::Delete),
+            &NoProgress,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.messages.len(), 1);
+        assert_eq!(out.report.notes, [drain_note(2)]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn messages_the_close_sweeps_up_are_returned_and_reported() {
+        // The second message arrives after the drain, while the link is still open: the
+        // close sweep takes it (removing it), so it must be in the result.
+        let b = FakeBroker::default();
+        b.add("q", FakeMsg::active("first"));
+        b.add_at_close("q", FakeMsg::active("late"));
+        let out = receive::run(
+            &mut b.clone(),
+            &recv("q", 5, ReceiveAction::Delete),
+            &NoProgress,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(b.all("q").is_empty(), "the sweep removed it");
+        assert_eq!(out.messages.len(), 2, "so it is returned");
+        assert_eq!(out.report.succeeded(), 2, "and reported");
+        assert!(out.report.notes.is_empty(), "{:?}", out.report.notes);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn an_unconfirmed_drain_is_noted_in_the_report() {
         let b = FakeBroker::default();
         b.add("q", FakeMsg::active("x"));
         b.stall_drain(2);
+        b.fail_next_close();
         let out = receive::run(
             &mut b.clone(),
             &recv("q", 3, ReceiveAction::Delete),
@@ -693,8 +793,8 @@ mod tests {
         assert_eq!(b.all("q").len(), 1);
         assert!(b.credit_granted_max() <= 2);
         assert!(
-            out.report.notes.contains(&stopped_drain_note(1)),
-            "credit was out when it stopped: {:?}",
+            out.report.notes.is_empty(),
+            "credit was out when it stopped, but the close settled it: {:?}",
             out.report.notes
         );
     }
@@ -727,9 +827,10 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn messages_removed_but_never_returned_are_noted_and_not_an_error() {
+    async fn messages_a_receive_never_returned_come_back_from_the_close() {
         // One message is taken, then the receive is cancelled and getting the buffered
-        // message back fails: it stays on the receiver, and `close` counts it.
+        // message back fails: it stays on the receiver, and `close` returns it, so it is
+        // recorded and kept in full.
         let b = FakeBroker::default().with_receive_delay(Duration::from_secs(1));
         for _ in 0..2 {
             b.add("q", FakeMsg::active("x"));
@@ -748,11 +849,14 @@ mod tests {
             .await
             .expect("something was removed: a report, not an error");
         assert!(out.report.cancelled);
-        assert!(out.messages.is_empty());
+        assert_eq!(out.messages.len(), 1, "the close returned it");
+        assert_eq!(out.report.succeeded(), 1);
         assert_eq!(b.all("q").len(), 1);
         let notes = &out.report.notes;
-        assert!(notes.contains(&unreturned_note(1)), "{notes:?}");
-        assert!(notes.contains(&stopped_drain_note(1)), "{notes:?}");
+        assert!(
+            !notes.iter().any(|n| n.contains("may have been removed")),
+            "the close completed, so nothing is uncertain: {notes:?}"
+        );
         assert!(
             notes
                 .iter()
@@ -771,6 +875,8 @@ mod tests {
             b.add("q", FakeMsg::active("x"));
         }
         b.fail_receive_after(2, Error::Protocol("link detached".into()));
+        // The close after the failure does not complete either: the credit stays uncertain.
+        b.fail_next_close();
         let out = receive::run(
             &mut b.clone(),
             &recv("q", 5, ReceiveAction::Delete),
@@ -935,12 +1041,12 @@ mod tests {
             "up to 1 more message may have been removed after the wait and is not in this result"
         );
         assert_eq!(
-            unreturned_note(1_200),
-            "1,200 messages were removed but are not in this result"
+            undecodable_note(1_200),
+            "1,200 messages were removed but could not be decoded, so they are not in this result"
         );
         assert_eq!(
-            unreturned_note(1),
-            "1 message was removed but is not in this result"
+            undecodable_note(1),
+            "1 message was removed but could not be decoded, so it is not in this result"
         );
     }
 }

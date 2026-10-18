@@ -12,7 +12,8 @@ use super::message::{MessageBody, MessageState, PeekedMessage, PropValue, dead_l
 use super::message::{decode_bytes, decode_message, test_message};
 use super::outgoing::OutgoingMessage;
 use super::receiver::{
-    DRAIN_GRACE, LockToken, ReceiveMode, ReceivedMessage, ReceiverSpec, SessionChoice, Settlement,
+    Closed, DRAIN_GRACE, LockToken, ReceiveMode, ReceivedMessage, ReceiverSpec, SessionChoice,
+    Settlement,
 };
 use super::scan::PeekSource;
 use super::sender::{copy_error, encode_for_schedule, send_target};
@@ -133,6 +134,10 @@ struct State {
     session_states: HashMap<(String, String), Vec<u8>>,
     late: u32,
     stall: u32,
+    /// Messages that arrive only during a close sweep (sent after the drain), per address.
+    at_close: Vec<(String, FakeMsg)>,
+    /// The next close does not complete (its detach times out).
+    close_fails: bool,
     /// After this many more deliveries a receive fails, holding the error back (as `Intake`).
     fail_after: Option<(u32, Error)>,
     /// The next `send_all` fails with this before reporting any message's outcome.
@@ -172,6 +177,8 @@ impl Default for State {
             session_states: HashMap::new(),
             late: 0,
             stall: 0,
+            at_close: Vec::new(),
+            close_fails: false,
             fail_after: None,
             lose_send_outcome: None,
             credit_max: 0,
@@ -626,10 +633,24 @@ impl FakeBroker {
         self.with(|s| s.fail_after = Some((k, e)));
     }
 
-    /// The next drain ends by the grace time with `n` credit unaccounted. It waits
-    /// `DRAIN_GRACE` on the tokio clock: pause the clock in tests that use it.
+    /// The next drain ends by the grace time with only `n` credit unaccounted (by default all
+    /// unspent credit is, as on the real link). It waits `DRAIN_GRACE` on the tokio clock:
+    /// pause the clock in tests that use it.
     pub(crate) fn stall_drain(&self, n: u32) {
         self.with(|s| s.stall = n);
+    }
+
+    /// `m` arrives on `address` only during the next close sweep there (sent while the
+    /// drained link was still open). A receive-and-delete receiver with credit still out takes
+    /// it, and the close returns it; otherwise it simply stays on the entity.
+    pub(crate) fn add_at_close(&self, address: &str, m: FakeMsg) {
+        self.with(|s| s.at_close.push((address.to_string(), m)));
+    }
+
+    /// The next close does not complete (its detach times out), so the credit still out
+    /// stays uncertain.
+    pub(crate) fn fail_next_close(&self) {
+        self.with(|s| s.close_fails = true);
     }
 
     fn fault(&self, op: FakeOp) -> Result<()> {
@@ -1003,7 +1024,8 @@ impl LockReceiver for FakeReceiver {
         self.broker
             .with(|s| s.credit_max = s.credit_max.max(outstanding));
         self.shortfall = outstanding;
-        let deadline = Instant::now() + wait;
+        // An idle timeout, as on the real link: each delivery restarts it.
+        let mut deadline = Instant::now() + wait;
         let delay = self.broker.with(|s| s.receive_delay);
         while outstanding > 0 {
             if self.broker.with(|s| s.late == 0) {
@@ -1017,6 +1039,7 @@ impl LockReceiver for FakeReceiver {
                 if self.take_one() {
                     outstanding -= 1;
                     self.shortfall = outstanding;
+                    deadline = Instant::now() + wait;
                     if self.tripped() {
                         return Ok(self.take(max));
                     }
@@ -1035,12 +1058,14 @@ impl LockReceiver for FakeReceiver {
                 outstanding -= 1;
                 self.broker.with(|s| s.late = s.late.saturating_sub(1));
             }
+            // As on the real link, nothing confirms the drain: the unspent credit stays
+            // unaccounted until the receiver is closed.
             let stall = self.broker.with(|s| std::mem::take(&mut s.stall));
             self.shortfall = if stall > 0 {
                 tokio::time::sleep(DRAIN_GRACE).await;
                 stall.min(outstanding)
             } else {
-                0
+                outstanding
             };
         }
         Ok(self.take(max))
@@ -1257,7 +1282,26 @@ impl LockReceiver for FakeReceiver {
         })
     }
 
-    async fn close(mut self: Box<Self>) -> usize {
+    async fn close(mut self: Box<Self>) -> Closed {
+        // The sweep: late arrivals, taken while credit is still out.
+        let address = self.address.clone();
+        let late: Vec<FakeMsg> = self.broker.with(|s| {
+            let (mine, rest) = std::mem::take(&mut s.at_close)
+                .into_iter()
+                .partition(|(a, _)| *a == address);
+            s.at_close = rest;
+            mine.into_iter().map(|(_, m)| m).collect()
+        });
+        let mut swept = 0;
+        for m in late {
+            self.broker.add(&address, m);
+            if self.mode == ReceiveMode::ReceiveAndDelete
+                && swept < self.shortfall
+                && self.take_one()
+            {
+                swept += 1;
+            }
+        }
         // Buffered peek-lock messages are released with the rest; what stays buffered
         // was removed by receive-and-delete and never returned.
         let _ = self.release_all().await;
@@ -1266,8 +1310,19 @@ impl LockReceiver for FakeReceiver {
             let address = self.address.clone();
             self.broker.with(|s| s.unaccept(&address, &id));
         }
-        self.broker.with(|s| s.open_receivers -= 1);
-        self.buffer.len()
+        let complete = !self.broker.with(|s| {
+            s.open_receivers -= 1;
+            std::mem::take(&mut s.close_fails)
+        });
+        Closed {
+            removed: self.buffer.drain(..).collect(),
+            undecodable: 0,
+            uncertain: if complete || self.mode == ReceiveMode::PeekLock {
+                0
+            } else {
+                self.shortfall.saturating_sub(swept)
+            },
+        }
     }
 }
 
@@ -1416,7 +1471,7 @@ mod tests {
             .expect("session b is free");
         assert_eq!(r.session_id(), Some("b"));
         assert_eq!(r.receive(5, WAIT).await.unwrap().len(), 1);
-        r.close().await;
+        let _ = r.close().await;
         assert!(
             plane.open_receiver(&spec, WAIT).await.unwrap().is_none(),
             "only a locked session is left: none available"
@@ -1451,6 +1506,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_drain_is_unconfirmed_until_the_close_settles_it() {
+        tokio::time::pause();
+        let b = FakeBroker::default();
+        b.add("q", FakeMsg::active("x"));
+        let open = || async {
+            b.clone()
+                .open_receiver(&ReceiverSpec::receive_and_delete("q"), WAIT)
+                .await
+                .unwrap()
+                .unwrap()
+        };
+        let mut r = open().await;
+        assert_eq!(r.receive(5, WAIT).await.unwrap().len(), 1);
+        assert_eq!(
+            r.drain_shortfall(),
+            4,
+            "the unspent credit, as on the real link"
+        );
+        let closed = r.close().await;
+        assert!(closed.removed.is_empty());
+        assert_eq!(closed.uncertain, 0, "a completed close settles it");
+        // A late delivery the sweep finds is returned by the close.
+        let mut r = open().await;
+        assert!(r.receive(3, WAIT).await.unwrap().is_empty());
+        b.add_at_close("q", FakeMsg::active("late"));
+        let closed = r.close().await;
+        assert_eq!(closed.removed.len(), 1);
+        assert_eq!(closed.uncertain, 0);
+        assert!(b.all("q").is_empty());
+        // A close that does not complete leaves the credit still out uncertain.
+        let mut r = open().await;
+        r.receive(3, WAIT).await.unwrap();
+        b.fail_next_close();
+        assert_eq!(r.close().await.uncertain, 3);
+    }
+
+    #[tokio::test]
     async fn a_dropped_receive_loses_no_receive_and_delete_message() {
         tokio::time::pause();
         let b = FakeBroker::default().with_receive_delay(Duration::from_secs(1));
@@ -1479,7 +1571,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn close_reports_removed_but_unreturned_messages() {
+    async fn close_returns_removed_but_unreturned_messages() {
         tokio::time::pause();
         let b = FakeBroker::default().with_receive_delay(Duration::from_secs(1));
         for _ in 0..3 {
@@ -1496,7 +1588,13 @@ mod tests {
             r.receive(3, Duration::from_secs(10)),
         )
         .await;
-        assert_eq!(r.close().await, 2, "removed by the broker, never returned");
+        let closed = r.close().await;
+        assert_eq!(
+            closed.removed.len(),
+            2,
+            "removed by the broker, never returned by a receive: the close returns them"
+        );
+        assert_eq!(closed.uncertain, 0, "the close completed");
         assert_eq!(b.all("q").len(), 1);
     }
 
@@ -1545,7 +1643,10 @@ mod tests {
             (1, 1),
             "the second deferred one counts as active"
         );
-        assert_eq!(r.close().await, 0);
+        assert!(
+            r.close().await.removed.is_empty(),
+            "peek-lock: nothing removed"
+        );
         assert_eq!(b.held_locks(), 1, "close leaves it locked");
         assert_eq!(b.delivery_count("q", other), 0);
         tokio::time::advance(Duration::from_secs(31)).await;
@@ -1707,7 +1808,7 @@ mod tests {
         r.set_session_state(Some(b"step-2")).await.unwrap();
         assert_eq!(b.session_state("s", "a").as_deref(), Some(&b"step-2"[..]));
         assert_eq!(b.session_ids("s").await.unwrap(), ["a"]);
-        r.close().await;
+        let _ = r.close().await;
         let mut tx = b.open_sender("s").await.unwrap();
         let mut seen = Vec::new();
         tx.send_all(&[OutgoingMessage::text("no session")], &mut |i, r| {

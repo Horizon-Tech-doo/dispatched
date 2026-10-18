@@ -228,7 +228,8 @@ pub(crate) async fn locate(
             continue;
         };
         take_deferred(plane, rx.as_mut(), address, &msgs, cancel, on, &mut out).await;
-        rx.close().await;
+        // Peek-lock: the close removes nothing.
+        let _ = rx.close().await;
     }
 
     for m in scheduled {
@@ -265,7 +266,8 @@ pub(crate) async fn locate(
             notes: &mut notes,
         };
         search.run(msgs, cancel, on).await;
-        rx.close().await;
+        // Peek-lock: the close removes nothing.
+        let _ = rx.close().await;
     }
 
     let items = wanted
@@ -1132,7 +1134,7 @@ mod tests {
                 why: NotReached::Timeout
             }
         ));
-        other.close().await;
+        let _ = other.close().await;
     }
 
     #[tokio::test]
@@ -1449,7 +1451,7 @@ mod tests {
         assert!(b.renewals() >= 1, "the held lock was renewed while waiting");
         assert_eq!(b.delivery_count("q", h), 0);
         assert_eq!(b.held_locks(), 1, "only the other receiver's lock");
-        other.close().await;
+        let _ = other.close().await;
     }
 
     #[tokio::test]

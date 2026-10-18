@@ -123,6 +123,23 @@ pub struct ReceivedMessage {
     pub lock_token: Option<LockToken>,
 }
 
+/// What closing a receiver found ([`AmqpReceiver::close`]).
+#[must_use = "a closed receive-and-delete receiver may return removed messages"]
+#[derive(Debug, Default)]
+pub(crate) struct Closed {
+    /// Receive-and-delete messages removed from the entity that no `receive` returned: those
+    /// a failed or cancelled call left buffered, and late deliveries the close swept up.
+    /// Always empty for peek-lock (what it held is released).
+    pub(crate) removed: Vec<ReceivedMessage>,
+    /// Receive-and-delete deliveries the close swept up but could not decode: removed, and
+    /// lost.
+    pub(crate) undecodable: u32,
+    /// Up to this many more messages may have been removed: credit was still out and the
+    /// close did not complete (the drain or the detach failed or timed out). 0 once the
+    /// detach completed, since nothing can be delivered after it.
+    pub(crate) uncertain: u32,
+}
+
 /// How to settle a peek-lock delivery.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Settlement {
@@ -345,6 +362,10 @@ fn not_held() -> Error {
 struct Intake {
     ready: VecDeque<ReceivedMessage>,
     shortfall: u32,
+    /// The last `receive` ended normally (its credit was spent, or it drained and waited out
+    /// the grace time), so anything the broker still sends has had time to arrive. A failed
+    /// or dropped call leaves it false, and `close` then waits the grace time itself.
+    quiet: bool,
     /// A failure after some messages were taken; those are returned first and
     /// the failure is reported by the next call (whatever kind it is).
     pending_error: Option<Error>,
@@ -367,6 +388,7 @@ impl Intake {
     /// Start a `receive` of up to `max`: buffered messages count toward it.
     fn begin(&mut self, max: u32) -> CreditPlan {
         self.shortfall = 0;
+        self.quiet = false;
         let buffered = u64::try_from(self.ready.len()).unwrap_or(u64::MAX);
         CreditPlan::new(u64::from(max).saturating_sub(buffered), CREDIT_CHUNK)
     }
@@ -399,6 +421,7 @@ impl Intake {
     /// The receive ended normally with `credit_left` (0 when it was spent).
     fn finish(&mut self, plan: &CreditPlan, credit_left: u32, max: u32) -> Vec<ReceivedMessage> {
         self.shortfall = plan.shortfall(credit_left);
+        self.quiet = true;
         self.take(max)
     }
 
@@ -534,8 +557,8 @@ impl AmqpReceiver {
         self.session_id.as_deref()
     }
 
-    /// Receive up to `max` messages, waiting at most `wait` (plus the drain
-    /// grace time when credit is still outstanding then). Messages buffered
+    /// Receive up to `max` messages, until `wait` passes without a delivery
+    /// (plus the drain grace time when credit is still outstanding then). Messages buffered
     /// by an earlier call (one that failed or was cancelled) come first and
     /// count toward `max`.
     ///
@@ -552,7 +575,8 @@ impl AmqpReceiver {
             return out;
         }
         let mut plan = self.intake.begin(max);
-        let deadline = Instant::now() + wait;
+        // `wait` is an idle timeout: each delivery restarts it.
+        let mut deadline = Instant::now() + wait;
         loop {
             if plan.outstanding == 0 {
                 let grant = plan.next_grant();
@@ -578,6 +602,7 @@ impl AmqpReceiver {
                         .await;
                 }
                 Ok(Ok(delivery)) => {
+                    deadline = Instant::now() + wait;
                     let taken = self.take(delivery);
                     let failed = taken.is_err();
                     self.intake.arrived(&mut plan, taken.ok());
@@ -876,42 +901,73 @@ impl AmqpReceiver {
     /// Stop the link, release what is held (closing a link with locks held
     /// counts as a lost lock and raises the delivery count), then close both
     /// links. Deliveries the broker sent after the last `receive` are swept
-    /// first: peek-lock ones are released.
+    /// first: peek-lock ones are released, receive-and-delete ones returned.
     ///
-    /// Returns how many receive-and-delete messages were removed from the
-    /// entity but never returned to a caller (those [`buffered`](Self::buffered)
-    /// plus any swept here); callers report them. Always 0 for peek-lock.
-    pub(crate) async fn close(mut self) -> usize {
-        if bounded("drain", CLOSE_TIMEOUT, self.receiver.drain())
+    /// The close settles what the last `receive` left uncertain. The drain asks
+    /// the broker to spend or drop its credit; the sweep reads until the link is
+    /// quiet (the grace time when the last `receive` did not wait it out); once
+    /// the detach completes, nothing more can be delivered. So after a completed
+    /// close every message removed is in [`Closed::removed`] (or counted as
+    /// undecodable), and only a close that did not complete leaves
+    /// [`Closed::uncertain`] credit.
+    pub(crate) async fn close(mut self) -> Closed {
+        let mut closed = Closed::default();
+        let delete = self.mode == ReceiveMode::ReceiveAndDelete;
+        let outstanding = self.intake.shortfall;
+        let idle = if self.intake.quiet {
+            CLOSE_SWEEP_IDLE
+        } else {
+            DRAIN_GRACE
+        };
+        let mut swept = 0u32;
+        let mut complete = bounded("drain", CLOSE_TIMEOUT, self.receiver.drain())
             .await
-            .is_ok()
-        {
-            while let Ok(Ok(delivery)) =
-                tokio::time::timeout(CLOSE_SWEEP_IDLE, self.receiver.recv::<Body<Value>>()).await
-            {
-                if let Ok(m) = self.take(delivery) {
-                    self.intake.ready.push_back(m);
+            .is_ok();
+        if complete {
+            loop {
+                match tokio::time::timeout(idle, self.receiver.recv::<Body<Value>>()).await {
+                    // Quiet for `idle`: the sweep is over.
+                    Err(_) => break,
+                    Ok(Ok(delivery)) => {
+                        swept = swept.saturating_add(1);
+                        if let Ok(m) = self.take(delivery) {
+                            self.intake.ready.push_back(m);
+                        }
+                    }
+                    // Settled on send: removed, but its content is lost.
+                    Ok(Err(fe2o3_amqp::link::RecvError::MessageDecode(_))) if delete => {
+                        swept = swept.saturating_add(1);
+                        closed.undecodable = closed.undecodable.saturating_add(1);
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!(error = %e, "the close sweep stopped early");
+                        complete = false;
+                        break;
+                    }
                 }
             }
         }
         if let Err(e) = self.release_all().await {
             tracing::warn!(error = %e, "releasing held messages before closing failed");
         }
-        let unreturned = self.intake.ready.len();
-        if unreturned > 0 {
-            tracing::warn!(
-                unreturned,
-                "receive-and-delete messages were removed but not returned"
-            );
-        }
-        if tokio::time::timeout(CLOSE_TIMEOUT, self.receiver.close())
-            .await
-            .is_err()
-        {
-            tracing::warn!("closing a receiver link timed out; dropped it");
+        // Peek-lock messages left buffered were released above; the rest were removed.
+        closed.removed = self.intake.ready.drain(..).collect();
+        match tokio::time::timeout(CLOSE_TIMEOUT, self.receiver.close()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "closing a receiver link failed");
+                complete = false;
+            }
+            Err(_) => {
+                tracing::warn!("closing a receiver link timed out; dropped it");
+                complete = false;
+            }
         }
         close_management(self.management).await;
-        unreturned
+        if delete && !complete {
+            closed.uncertain = outstanding.saturating_sub(swept);
+        }
+        closed
     }
 }
 
