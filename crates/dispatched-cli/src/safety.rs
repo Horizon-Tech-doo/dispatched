@@ -12,7 +12,7 @@ use dispatched_core::{
     ActivityEntry, Actor, Audit, EntityPath, Mutation, OpKind, Outcome, Phase, ProfileRef,
 };
 use horizon_azure_kit::safety::{CancellationToken, ConfirmRequest, Decision, Origin, Policy};
-use std::io::{self, BufRead, IsTerminal, Write};
+use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use time::OffsetDateTime;
@@ -93,12 +93,6 @@ impl CliPolicy {
     pub fn with_echo(mut self, echo: Echo) -> Self {
         self.echo = echo;
         self
-    }
-
-    /// The policy for this process: it prompts when stdin and stderr are terminals.
-    pub fn for_terminal(args: &MutateArgs, profile: &str) -> anyhow::Result<Self> {
-        let interactive = io::stdin().is_terminal() && io::stderr().is_terminal();
-        Self::new(args, profile, interactive, Box::new(ask_on_terminal))
     }
 
     #[cfg(test)]
@@ -249,7 +243,77 @@ pub fn preflight(
     entities: &[EntityPath],
 ) -> anyhow::Result<()> {
     check_report_path(args)?;
-    precheck_production(ctx, &resolved.profile, args, planned, entities)
+    precheck_production(ctx, &resolved.profile, args, planned, entities)?;
+    precheck_confirmable(ctx, &resolved.profile, args, planned, entities)
+}
+
+/// Refuse, **before any I/O**, a run that no confirmation could allow: no `--yes` and no
+/// terminal to ask on. [`CliPolicy`] would deny it at the gate, but only after a purge counted
+/// its entities or an `--all` selection was peeked. Logged like [`precheck_production`]'s
+/// refusal, with the same advice the policy gives.
+pub fn precheck_confirmable(
+    ctx: &Ctx,
+    profile: &ProfileRef,
+    args: &MutateArgs,
+    planned: Planned,
+    entities: &[EntityPath],
+) -> anyhow::Result<()> {
+    if args.yes || ctx.interactive() {
+        return Ok(());
+    }
+    let target = (!entities.is_empty()).then(|| {
+        entities
+            .iter()
+            .map(EntityPath::base)
+            .collect::<Vec<_>>()
+            .join(", ")
+    });
+    let refusal = format!(
+        "{} needs a confirmation and there is no terminal to ask on. Pass --yes to confirm \
+         without a prompt",
+        match &target {
+            Some(t) => format!("{} on {t}", planned.verb),
+            None => planned.verb.to_string(),
+        }
+    );
+    refuse_before_connecting(ctx, profile, planned, target, refusal)
+}
+
+/// Log a refusal made before any I/O as one finished, denied entry, then fail with it.
+fn refuse_before_connecting(
+    ctx: &Ctx,
+    profile: &ProfileRef,
+    planned: Planned,
+    target: Option<String>,
+    refusal: String,
+) -> anyhow::Result<()> {
+    let verb = planned.verb;
+    let entry = ActivityEntry {
+        id: 0,
+        op_id: format!("op-{}", uuid::Uuid::new_v4().simple()),
+        at: OffsetDateTime::now_utc(),
+        origin: Origin::Cli,
+        profile: profile.name.clone(),
+        entity: target.clone(),
+        action: verb.to_string(),
+        kind: OpKind::Mutating(planned.kind),
+        phase: Phase::Finished,
+        outcome: Outcome::Denied,
+        count: None,
+        succeeded: None,
+        failed: None,
+        skipped: None,
+        summary: match &target {
+            Some(t) => format!("{verb} on {t} refused before connecting"),
+            None => format!("{verb} refused before connecting"),
+        },
+        error: Some(refusal.clone()),
+        note: None,
+    };
+    if let Err(e) = ctx.activity().and_then(|log| Ok(log.record(&entry)?)) {
+        anyhow::bail!("{refusal} (the refusal could not be written to the activity log: {e:#})");
+    }
+    anyhow::bail!(refusal)
 }
 
 /// The CLI's production check, made **before any I/O** (before connecting, counting for a
@@ -281,33 +345,7 @@ pub fn precheck_production(
         let refusal = production_refusal(&target, &profile.name);
         (Some(target), refusal)
     };
-    let verb = planned.verb;
-    let entry = ActivityEntry {
-        id: 0,
-        op_id: format!("op-{}", uuid::Uuid::new_v4().simple()),
-        at: OffsetDateTime::now_utc(),
-        origin: Origin::Cli,
-        profile: profile.name.clone(),
-        entity: target.clone(),
-        action: verb.to_string(),
-        kind: OpKind::Mutating(planned.kind),
-        phase: Phase::Finished,
-        outcome: Outcome::Denied,
-        count: None,
-        succeeded: None,
-        failed: None,
-        skipped: None,
-        summary: match &target {
-            Some(t) => format!("{verb} on {t} refused before connecting"),
-            None => format!("{verb} refused before connecting"),
-        },
-        error: Some(refusal.clone()),
-        note: None,
-    };
-    if let Err(e) = ctx.activity().and_then(|log| Ok(log.record(&entry)?)) {
-        anyhow::bail!("{refusal} (the refusal could not be written to the activity log: {e:#})");
-    }
-    anyhow::bail!(refusal)
+    refuse_before_connecting(ctx, profile, planned, target, refusal)
 }
 
 /// A policy that runs `on_confirm` once, the first time `inner` lets an operation proceed.
@@ -351,7 +389,12 @@ fn cli_gate_with(
     let cancel = CancellationToken::new();
     let token = cancel.clone();
     let policy = ArmOnConfirm {
-        inner: CliPolicy::for_terminal(args, &resolved.profile.name)?,
+        inner: CliPolicy::new(
+            args,
+            &resolved.profile.name,
+            ctx.interactive(),
+            Box::new(ask_on_terminal),
+        )?,
         on_confirm: Box::new(move || arm(&token)),
         armed: std::sync::Once::new(),
     };

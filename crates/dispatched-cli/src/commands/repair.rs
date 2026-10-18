@@ -17,7 +17,8 @@ use dispatched_core::ops::{
     send_target,
 };
 use dispatched_core::{
-    DlqSummary, Edits, EntityPath, Mutation, OutgoingBody, PeekView, PurgeScope, SubQueue,
+    CountEstimate, DlqSummary, Edits, EntityPath, ItemOutcome, JobReport, Mutation, OutgoingBody,
+    PeekView, PurgePlan, PurgeScope, SubQueue,
 };
 use std::path::PathBuf;
 
@@ -259,8 +260,8 @@ pub struct DeferredDeleteArgs {
     /// A sequence number (repeat, or separate with commas).
     #[arg(long = "seq", value_name = "N", value_delimiter = ',', required = true)]
     pub seqs: Vec<i64>,
-    /// The session the messages are in. Optional: each message's session is read from the
-    /// entity before it is received.
+    /// Accepted for parity with `deferred receive`, but not used: each message's session is
+    /// read from the entity before it is received.
     #[arg(long)]
     pub session: Option<String>,
     #[command(flatten)]
@@ -440,7 +441,12 @@ fn edits_from(a: &EditArgs) -> anyhow::Result<Edits> {
     for prop in &a.set_props {
         let (key, value) =
             parse_prop_arg(prop).map_err(|e| anyhow::anyhow!("--set-prop {prop}: {e}"))?;
-        set.insert(key, value);
+        if a.remove_props.contains(&key) {
+            anyhow::bail!("--set-prop and --remove-prop both name {key}; keep one of them");
+        }
+        if set.insert(key.clone(), value).is_some() {
+            anyhow::bail!("--set-prop names {key} more than once; keep one value");
+        }
     }
     let time_to_live = match &a.set_ttl {
         Some(ttl) => Some(Some(
@@ -649,6 +655,46 @@ pub async fn resubmit(
     Ok(finish_job(&result?, format, &args.mutate))
 }
 
+/// Whether `plan` has nothing to remove: an exact count of 0 and no capped deferred count.
+fn nothing_to_purge(plan: &PurgePlan) -> bool {
+    plan.total == CountEstimate::Exact(0) && !plan.deferred_truncated
+}
+
+/// The reasons of the purge items a confirmation denied (one item per denied entity; core
+/// records a denial as a skipped item without a sequence number, its reason the denial).
+fn denied_reasons(report: &JobReport) -> Vec<&str> {
+    report
+        .items
+        .iter()
+        .filter_map(|i| match &i.outcome {
+            ItemOutcome::Skipped { reason }
+                if i.sequence_number.is_none() && reason.starts_with(DENIED_PREFIX) =>
+            {
+                Some(reason.as_str())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// How core's `Error::Denied` reads.
+const DENIED_PREFIX: &str = "denied: ";
+
+/// The end of a purge whose `run` entities went to the confirmation: every one denied is an
+/// error (exit 1, nothing was changed), some denied is an incomplete job (exit 2), none denied
+/// is the job's own exit.
+fn purge_exit(report: &JobReport, run: usize, exit: JobExit) -> anyhow::Result<JobExit> {
+    let denied = denied_reasons(report);
+    if run > 0 && denied.len() >= run {
+        anyhow::bail!("{}", denied[0]);
+    }
+    Ok(if denied.is_empty() {
+        exit
+    } else {
+        JobExit::Incomplete
+    })
+}
+
 pub async fn purge(
     ctx: &Ctx,
     sel: &Selection<'_>,
@@ -657,27 +703,59 @@ pub async fn purge(
 ) -> anyhow::Result<JobExit> {
     let entities = entities_from(&args.entities)?;
     let scope = PurgeScope::from(args.scope);
-    // The precheck names every entity before anything is counted.
+    // The precheck names every entity, and a run that cannot be confirmed (no --yes, no
+    // terminal) is refused, before anything is counted.
     let (operator, cancel) = operator_for(ctx, sel, &args.mutate, PURGE, &entities)?;
     let result = async {
         // Count every entity first: a count that fails changes nothing anywhere.
         let mut plans = Vec::with_capacity(entities.len());
+        let mut empty = Vec::new();
         for entity in &entities {
             let plan = operator.plan_purge(entity, scope).await.with_context(|| {
                 format!("counting the messages of {}", sanitize(&entity.base()))
             })?;
-            plans.push(plan);
+            // Nothing to remove: not put to the confirmation.
+            if nothing_to_purge(&plan) {
+                empty.push(plan.target().address_text());
+            } else {
+                plans.push(plan);
+            }
         }
+        if plans.is_empty() {
+            return Ok(None);
+        }
+        let run = plans.len();
         // One confirmation per entity, each with its own count; an unknown count is refused
         // before it is put to the confirmation.
-        operator
+        let mut report = operator
             .purge(plans, &StderrProgress::new(), &cancel)
-            .await
-            .map_err(anyhow::Error::from)
+            .await?;
+        report
+            .notes
+            .extend(empty.iter().map(|e| format!("{e}: nothing to purge")));
+        Ok::<_, anyhow::Error>(Some((report, run)))
     }
     .await;
     operator.explorer().close().await;
-    Ok(finish_job(&result?, format, &args.mutate))
+    let Some((report, run)) = result? else {
+        eprintln!(
+            "(nothing to purge in {}; nothing was changed)",
+            sanitize(
+                &entities
+                    .iter()
+                    .map(EntityPath::base)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        );
+        return Ok(JobExit::Ok);
+    };
+    if denied_reasons(&report).len() >= run {
+        // Every entity was denied: nothing ran, so there is no job result to print.
+        return purge_exit(&report, run, JobExit::Ok);
+    }
+    let exit = finish_job(&report, format, &args.mutate);
+    purge_exit(&report, run, exit)
 }
 
 pub async fn deferred_delete(
@@ -1374,6 +1452,221 @@ mod tests {
                 EntityPath::queue("orders"),
                 EntityPath::subscription("t", "s")
             ]
+        );
+    }
+
+    fn item(seq: Option<i64>, outcome: ItemOutcome) -> dispatched_core::ItemResult {
+        dispatched_core::ItemResult {
+            sequence_number: seq,
+            message_id: None,
+            session_id: None,
+            entity: "orders".into(),
+            new_sequence_number: None,
+            outcome,
+        }
+    }
+
+    fn report(items: Vec<dispatched_core::ItemResult>) -> JobReport {
+        JobReport {
+            op_id: None,
+            kind: dispatched_core::JobKind::Purge,
+            entity: "orders, events".into(),
+            target: None,
+            started_at: time::OffsetDateTime::now_utc(),
+            finished_at: time::OffsetDateTime::now_utc(),
+            cancelled: false,
+            items,
+            notes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_denied_purge_is_an_error_or_an_incomplete_job() {
+        let denied = || {
+            item(
+                None,
+                ItemOutcome::Skipped {
+                    reason: "denied: not confirmed; nothing was changed".into(),
+                },
+            )
+        };
+        let removed = || item(Some(4), ItemOutcome::Succeeded { detail: None });
+        // Every entity denied: exit 1 with the denial.
+        let e = purge_exit(&report(vec![denied(), denied()]), 2, JobExit::Ok)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(e, "denied: not confirmed; nothing was changed");
+        // Some denied, some purged: exit 2.
+        assert_eq!(
+            purge_exit(&report(vec![removed(), denied()]), 2, JobExit::Ok).unwrap(),
+            JobExit::Incomplete
+        );
+        // None denied: the job's own exit. A locked session is a skip, not a denial.
+        let locked = item(
+            None,
+            ItemOutcome::Skipped {
+                reason: "session locked by another receiver".into(),
+            },
+        );
+        assert_eq!(
+            purge_exit(&report(vec![removed(), locked]), 1, JobExit::Ok).unwrap(),
+            JobExit::Ok
+        );
+        assert_eq!(
+            purge_exit(&report(vec![removed()]), 1, JobExit::Incomplete).unwrap(),
+            JobExit::Incomplete
+        );
+        // A failed entity (an unknown count) next to a denied one is still incomplete.
+        let failed = item(
+            None,
+            ItemOutcome::Failed {
+                kind: "invalid",
+                reason: "the number of messages to purge in events is not known".into(),
+            },
+        );
+        assert_eq!(
+            purge_exit(&report(vec![failed, denied()]), 2, JobExit::Incomplete).unwrap(),
+            JobExit::Incomplete
+        );
+    }
+
+    #[test]
+    fn an_empty_plan_is_not_confirmed_but_a_capped_one_is() {
+        let plan = |total, truncated| PurgePlan {
+            entity: EntityPath::queue("orders"),
+            scope: PurgeScope::All,
+            per_queue: vec![(SubQueue::Active, total)],
+            deferred: 0,
+            deferred_truncated: truncated,
+            total,
+            requires_session: None,
+        };
+        assert!(nothing_to_purge(&plan(CountEstimate::Exact(0), false)));
+        assert!(
+            !nothing_to_purge(&plan(CountEstimate::Exact(0), true)),
+            "more deferred may remain"
+        );
+        assert!(!nothing_to_purge(&plan(CountEstimate::Exact(3), false)));
+        assert!(!nothing_to_purge(&plan(CountEstimate::AtLeast(0), false)));
+    }
+
+    #[test]
+    fn conflicting_property_edits_are_refused() {
+        let e = resubmit_spec_from(&parse([
+            "resubmit",
+            "q",
+            "--seq",
+            "1",
+            "--set-prop",
+            "k=1",
+            "--remove-prop",
+            "k",
+        ]))
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("--remove-prop both name k"), "{e}");
+        let e = resubmit_spec_from(&parse([
+            "resubmit",
+            "q",
+            "--seq",
+            "1",
+            "--set-prop",
+            "k=1",
+            "--set-prop",
+            "k=2",
+        ]))
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("more than once"), "{e}");
+        assert!(
+            resubmit_spec_from(&parse([
+                "resubmit",
+                "q",
+                "--seq",
+                "1",
+                "--set-prop",
+                "k=1",
+                "--remove-prop",
+                "j",
+            ]))
+            .is_ok()
+        );
+    }
+
+    /// Without --yes and without a terminal, every mutating command is refused before it
+    /// connects (a purge before it counts, an --all selection before it is peeked), logged once.
+    #[tokio::test]
+    async fn without_yes_or_a_terminal_nothing_is_counted_or_selected() {
+        let ctx = Ctx::for_test_with_profiles(&[]);
+        let cs =
+            "Endpoint=sb://dev.servicebus.invalid/;SharedAccessKeyName=k;SharedAccessKey=topsecret";
+        for (args, verb, named) in [
+            (vec!["purge", "orders", "events"], "purge", "orders, events"),
+            (vec!["dlq", "purge", "orders"], "purge", "orders"),
+            (vec!["delete", "orders", "--all"], "delete", "orders"),
+            (
+                vec!["dlq", "move", "orders", "--all", "--to", "retry"],
+                "move",
+                "orders, retry",
+            ),
+            (vec!["send", "orders", "--body", "x"], "send", "orders"),
+        ] {
+            let mut argv = vec!["dispatched", "--connection-string", cs];
+            argv.extend(args.iter().copied());
+            let list = || {
+                ctx.activity()
+                    .unwrap()
+                    .list(&dispatched_core::ActivityQuery::default())
+                    .unwrap()
+            };
+            let before = list().len();
+            let cli = crate::Cli::try_parse_from(argv).unwrap();
+            let e = crate::run_command(&ctx, cli).await.unwrap_err().to_string();
+            assert_eq!(
+                e,
+                format!(
+                    "{verb} on {named} needs a confirmation and there is no terminal to ask on. \
+                     Pass --yes to confirm without a prompt"
+                ),
+                "{args:?}"
+            );
+            let log = list();
+            assert_eq!(log.len(), before + 1, "{args:?}");
+            assert_eq!(log[0].action, verb);
+            assert_eq!(log[0].outcome, dispatched_core::Outcome::Denied);
+            assert_eq!(
+                log[0].summary,
+                format!("{verb} on {named} refused before connecting")
+            );
+            assert!(!format!("{:?}", log[0]).contains("topsecret"));
+        }
+    }
+
+    #[test]
+    fn a_prompt_or_yes_passes_the_confirmable_check() {
+        let dev = dispatched_core::ProfileRef {
+            name: "dev".into(),
+            production: false,
+        };
+        let orders = [EntityPath::queue("orders")];
+        let no_tty = Ctx::for_test_with_profiles(&[]);
+        let yes = MutateArgs {
+            yes: true,
+            ..MutateArgs::default()
+        };
+        crate::safety::precheck_confirmable(&no_tty, &dev, &yes, PURGE, &orders).unwrap();
+        let tty = Ctx::for_test_with_profiles(&[]).interactive_for_test(true);
+        crate::safety::precheck_confirmable(&tty, &dev, &MutateArgs::default(), PURGE, &orders)
+            .unwrap();
+        assert!(
+            crate::safety::precheck_confirmable(
+                &no_tty,
+                &dev,
+                &MutateArgs::default(),
+                PURGE,
+                &orders
+            )
+            .is_err()
         );
     }
 }

@@ -32,6 +32,9 @@ pub struct Ctx {
     /// The OS keychain in production; an in-memory store in tests.
     pub secrets: Arc<dyn CredentialStore>,
     pub session: Arc<EntraSession>,
+    /// Whether a confirmation can be asked; `None` asks the terminal (stdin and stderr).
+    /// Test contexts set `Some(false)`, so a test never depends on how it was started.
+    interactive: Option<bool>,
 }
 
 impl StoreSource for Ctx {
@@ -73,6 +76,7 @@ impl Ctx {
             activity_opener: Box::new(|| Ok(dispatched_core::paths::open_activity_log()?)),
             secrets,
             session,
+            interactive: None,
         }
     }
 
@@ -86,6 +90,7 @@ impl Ctx {
             secrets,
         );
         ctx.activity_opener = Box::new(|| Ok(ActivityLog::open_in_memory()?));
+        ctx.interactive = Some(false);
         let _ = ctx.store.set(store);
         ctx
     }
@@ -103,6 +108,13 @@ impl Ctx {
             store,
             Arc::new(horizon_azure_kit::secrets::MemoryStore::new()),
         )
+    }
+
+    #[cfg(test)]
+    /// The context, with prompts possible (`true`) or not.
+    pub fn interactive_for_test(mut self, interactive: bool) -> Self {
+        self.interactive = Some(interactive);
+        self
     }
 
     #[cfg(test)]
@@ -129,6 +141,13 @@ impl Ctx {
             )
             .expect("placeholder token saved");
         self
+    }
+
+    /// Whether a confirmation prompt can be shown: stdin and stderr are terminals.
+    pub fn interactive(&self) -> bool {
+        use std::io::IsTerminal;
+        self.interactive
+            .unwrap_or_else(|| std::io::stdin().is_terminal() && std::io::stderr().is_terminal())
     }
 
     /// The activity log, opened (creating `{config_dir}/activity.db`) on first use, so
