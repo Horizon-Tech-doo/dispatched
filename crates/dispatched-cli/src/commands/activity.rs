@@ -7,6 +7,7 @@ use crate::output::{sanitize, table, thousands};
 use clap::{Subcommand, ValueEnum};
 use dispatched_core::{ActivityEntry, ActivityQuery};
 use horizon_azure_kit::safety::Origin;
+use std::io::Write;
 use std::path::Path;
 use time::format_description::well_known::Rfc3339;
 
@@ -58,6 +59,16 @@ pub fn run(
     format: Option<Format>,
     profile: Option<&str>,
 ) -> anyhow::Result<()> {
+    run_to(&mut std::io::stdout().lock(), ctx, cmd, format, profile)
+}
+
+fn run_to(
+    out: &mut dyn Write,
+    ctx: &Ctx,
+    cmd: ActivityCmd,
+    format: Option<Format>,
+    profile: Option<&str>,
+) -> anyhow::Result<()> {
     let log = ctx.activity()?;
     // Entries carry the profile's saved name; accept it in any case.
     let profile = profile.map(|name| {
@@ -77,10 +88,11 @@ pub fn run(
             })?;
             match format.unwrap_or(Format::Table) {
                 Format::Json | Format::Ndjson => {
-                    println!("{}", serde_json::to_string_pretty(&entries)?)
+                    writeln!(out, "{}", serde_json::to_string_pretty(&entries)?)?
                 }
-                Format::Table if entries.is_empty() => println!("No activity recorded."),
-                Format::Table => println!(
+                Format::Table if entries.is_empty() => writeln!(out, "No activity recorded.")?,
+                Format::Table => writeln!(
+                    out,
                     "{}",
                     table(
                         &[
@@ -89,7 +101,7 @@ pub fn run(
                         ],
                         &rows(&entries),
                     )
-                ),
+                )?,
             }
         }
         ActivityCmd::Export { out, force } => {
@@ -221,5 +233,67 @@ mod tests {
         assert_eq!(row[5], "denied");
         assert_eq!(row[6], "5");
         assert!(row[7].ends_with("; error: orders is on production profile prod-weu"));
+    }
+
+    #[test]
+    fn ls_filters_by_origin_profile_and_limit() {
+        use dispatched_core::Audit;
+        let ctx = Ctx::for_test_with_profiles(&[("prod-weu", "prod.servicebus.windows.net", true)]);
+        let log = ctx.activity().unwrap();
+        for (origin, profile) in [
+            (Origin::Cli, "dev"),
+            (Origin::Gui, "dev"),
+            (Origin::Cli, "prod-weu"),
+        ] {
+            let mut e = entry();
+            e.origin = origin;
+            e.profile = profile.into();
+            log.record(&e).unwrap();
+        }
+        let ls = |origin, limit, profile: Option<&str>| {
+            let mut out = Vec::new();
+            run_to(
+                &mut out,
+                &ctx,
+                ActivityCmd::Ls { limit, origin },
+                Some(Format::Json),
+                profile,
+            )
+            .unwrap();
+            let v: Vec<serde_json::Value> = serde_json::from_slice(&out).unwrap();
+            v.iter()
+                .map(|e| {
+                    format!(
+                        "{}:{}",
+                        e["origin"].as_str().unwrap(),
+                        e["profile"].as_str().unwrap()
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ls(Some(OriginArg::Gui), 100, None), ["gui:dev"]);
+        assert_eq!(
+            ls(None, 100, Some("PROD-WEU")),
+            ["cli:prod-weu"],
+            "the saved profile name in any case"
+        );
+        assert_eq!(
+            ls(None, 2, None),
+            ["cli:prod-weu", "gui:dev"],
+            "newest first, limited"
+        );
+        let mut out = Vec::new();
+        run_to(
+            &mut out,
+            &ctx,
+            ActivityCmd::Ls {
+                limit: 100,
+                origin: Some(OriginArg::Mcp),
+            },
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "No activity recorded.\n");
     }
 }

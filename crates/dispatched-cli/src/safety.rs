@@ -6,6 +6,7 @@
 
 use crate::context::Ctx;
 use crate::output::sanitize;
+use crate::resolve::Resolved;
 use anyhow::Context as _;
 use async_trait::async_trait;
 use clap::Args;
@@ -31,6 +32,21 @@ pub struct MutateArgs {
     /// Write the per-message result report here (JSON, or NDJSON for .ndjson/.jsonl).
     #[arg(long)]
     pub report: Option<PathBuf>,
+    /// Replace the --report file if it exists.
+    #[arg(long, requires = "report")]
+    pub force_report: bool,
+}
+
+/// What a mutating command will do, known before any I/O: the same kind and verb as the
+/// [`dispatched_core::Operation`] it builds later (`Operation.mutation`, `Operation::verb()`).
+/// Each command declares its own as a constant, e.g. `Planned { kind: Mutation::Purge, verb:
+/// "purge" }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Planned {
+    /// The mutation kind the activity log records.
+    pub kind: Mutation,
+    /// The short verb (the activity entry's action).
+    pub verb: &'static str,
 }
 
 /// Reads the answer to a confirmation question (the question is passed in).
@@ -77,7 +93,7 @@ impl CliPolicy {
         let args = MutateArgs {
             yes,
             confirm_prod: confirm_prod.iter().map(|s| s.to_string()).collect(),
-            report: None,
+            ..MutateArgs::default()
         };
         Self::new(
             &args,
@@ -89,7 +105,9 @@ impl CliPolicy {
     }
 }
 
-/// Show `question` on stderr and read one line from stdin.
+/// Show `question` on stderr and read one line from stdin. Commands arm
+/// [`crate::jobs::cancel_on_ctrl_c`] only after the gate confirmed, so a Ctrl-C at this prompt
+/// ends the process (the default signal handling) instead of only cancelling a token.
 fn ask_on_terminal(question: &str) -> io::Result<String> {
     let mut err = io::stderr().lock();
     err.write_all(question.as_bytes())?;
@@ -99,11 +117,26 @@ fn ask_on_terminal(question: &str) -> io::Result<String> {
     Ok(line)
 }
 
-/// The `--confirm-prod` values as entities.
+/// The `--confirm-prod` values as entities. A sub-queue path (`orders/$DeadLetterQueue`) is
+/// refused with the entity to name instead: confirmations name the entity.
 fn confirm_prod_entities(args: &MutateArgs) -> anyhow::Result<Vec<EntityPath>> {
     args.confirm_prod
         .iter()
-        .map(|s| EntityPath::parse(s).with_context(|| format!("--confirm-prod {s}")))
+        .map(|s| {
+            let lower = s.to_ascii_lowercase();
+            for suffix in ["/$transfer/$deadletterqueue", "/$deadletterqueue"] {
+                if let Some(base) = lower
+                    .trim_end_matches('/')
+                    .strip_suffix(suffix)
+                    .map(|b| &s[..b.len()])
+                {
+                    anyhow::bail!(
+                        "--confirm-prod {s}: name the entity without the sub-queue: --confirm-prod {base}"
+                    );
+                }
+            }
+            EntityPath::parse(s).with_context(|| format!("--confirm-prod {s}"))
+        })
         .collect()
 }
 
@@ -152,58 +185,103 @@ impl Policy for CliPolicy {
     }
 }
 
-/// The mutation kind a command verb is logged under (the pre-check has only the verb).
-/// Unknown verbs count as deletes, the stricter reading.
-fn mutation_for(verb: &str) -> Mutation {
-    match verb {
-        "send" | "schedule" | "import" => Mutation::Send,
-        "complete" | "abandon" | "defer" | "dead-letter" => Mutation::Settle,
-        "purge" => Mutation::Purge,
-        "set-session-state" | "clear-session-state" => Mutation::SessionState,
-        _ => Mutation::Delete,
+/// The refusal when a production operation names no entity yet.
+fn production_refusal_without_entity(profile: &str) -> String {
+    format!("this operation is on production profile {profile}: pass --yes --confirm-prod <entity>")
+}
+
+/// Refuse an existing `--report` file (unless `--force-report`), a directory, or a path whose
+/// directory does not exist, before anything runs: a job that ran must never fail on its
+/// report path.
+pub fn check_report_path(args: &MutateArgs) -> anyhow::Result<()> {
+    let Some(path) = &args.report else {
+        return Ok(());
+    };
+    let shown = sanitize(&path.display().to_string());
+    if path.is_dir() {
+        anyhow::bail!("--report {shown} is a directory; choose a file (nothing was changed)");
     }
+    if path.exists() && !args.force_report && !dispatched_core::export::is_special(path) {
+        anyhow::bail!(
+            "{shown} exists; pass --force-report to replace it, or choose another --report \
+             (nothing was changed)"
+        );
+    }
+    let dir = path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    if !dir.is_dir() {
+        anyhow::bail!(
+            "the directory of --report {shown} does not exist; create it or choose another \
+             --report (nothing was changed)"
+        );
+    }
+    Ok(())
+}
+
+/// Everything a mutating command checks right after `resolve`, before any I/O: the report
+/// path, then the production flags.
+pub fn preflight(
+    ctx: &Ctx,
+    resolved: &Resolved,
+    args: &MutateArgs,
+    planned: Planned,
+    entities: &[EntityPath],
+) -> anyhow::Result<()> {
+    check_report_path(args)?;
+    precheck_production(ctx, &resolved.profile, args, planned, entities)
 }
 
 /// The CLI's production check, made **before any I/O** (before connecting, counting for a
-/// purge plan or resolving a `--all` selection): on a production profile every entity must be
-/// named by a `--confirm-prod` and `--yes` must be given. A refusal is logged as one finished,
-/// denied entry and fails with the same text `CliPolicy` gives. `CliPolicy` in the gate stays
-/// the authoritative check.
+/// purge plan or resolving a `--all` selection): on a production profile `--yes` must be given
+/// and every entity must be named by a `--confirm-prod`; an operation that names no entity is
+/// refused. A refusal is logged as one finished, denied entry and fails with the same text
+/// `CliPolicy` gives. `CliPolicy` in the gate stays the authoritative check.
 pub fn precheck_production(
     ctx: &Ctx,
     profile: &ProfileRef,
     args: &MutateArgs,
-    verb: &str,
+    planned: Planned,
     entities: &[EntityPath],
 ) -> anyhow::Result<()> {
     if !profile.production {
         return Ok(());
     }
     let confirm_prod = confirm_prod_entities(args)?;
-    let Some(target) = entities
-        .iter()
-        .map(EntityPath::base)
-        .find(|t| !args.yes || !names(&confirm_prod, t))
-    else {
-        return Ok(());
+    let (target, refusal) = if entities.is_empty() {
+        (None, production_refusal_without_entity(&profile.name))
+    } else {
+        let Some(target) = entities
+            .iter()
+            .map(EntityPath::base)
+            .find(|t| !args.yes || !names(&confirm_prod, t))
+        else {
+            return Ok(());
+        };
+        let refusal = production_refusal(&target, &profile.name);
+        (Some(target), refusal)
     };
-    let refusal = production_refusal(&target, &profile.name);
+    let verb = planned.verb;
     let entry = ActivityEntry {
         id: 0,
         op_id: format!("op-{}", uuid::Uuid::new_v4().simple()),
         at: OffsetDateTime::now_utc(),
         origin: Origin::Cli,
         profile: profile.name.clone(),
-        entity: Some(target.clone()),
+        entity: target.clone(),
         action: verb.to_string(),
-        kind: OpKind::Mutating(mutation_for(verb)),
+        kind: OpKind::Mutating(planned.kind),
         phase: Phase::Finished,
         outcome: Outcome::Denied,
         count: None,
         succeeded: None,
         failed: None,
         skipped: None,
-        summary: format!("{verb} on {target} refused before connecting"),
+        summary: match &target {
+            Some(t) => format!("{verb} on {t} refused before connecting"),
+            None => format!("{verb} refused before connecting"),
+        },
         error: Some(refusal.clone()),
         note: None,
     };
@@ -214,8 +292,9 @@ pub fn precheck_production(
 }
 
 /// The gate for a mutating command: [`CliPolicy`] for this terminal, the activity log, origin
-/// `cli`.
-pub fn cli_gate(ctx: &Ctx, profile: ProfileRef, args: &MutateArgs) -> anyhow::Result<Gate> {
+/// `cli`. The profile comes from [`Resolved`] only, so production cannot be set by hand.
+pub fn cli_gate(ctx: &Ctx, resolved: &Resolved, args: &MutateArgs) -> anyhow::Result<Gate> {
+    let profile = resolved.profile.clone();
     let policy = CliPolicy::for_terminal(args, &profile.name)?;
     let audit: Arc<dyn Audit> = ctx.activity()?.clone();
     Ok(Gate::new(
@@ -232,6 +311,23 @@ pub fn cli_gate(ctx: &Ctx, profile: ProfileRef, args: &MutateArgs) -> anyhow::Re
 mod tests {
     use super::*;
     use dispatched_core::ActivityQuery;
+
+    const PURGE: Planned = Planned {
+        kind: Mutation::Purge,
+        verb: "purge",
+    };
+
+    /// A resolved production target (a connection string to a host saved as production).
+    fn prod_resolved(ctx: &Ctx) -> Resolved {
+        crate::resolve::resolve_for_test(
+            ctx,
+            crate::resolve::TestSelection::ConnectionString(
+                "Endpoint=sb://prod.servicebus.windows.net/;SharedAccessKeyName=k;SharedAccessKey=x"
+                    .into(),
+            ),
+        )
+        .unwrap()
+    }
 
     fn req(target: &str, production: bool) -> ConfirmRequest {
         ConfirmRequest {
@@ -272,6 +368,11 @@ mod tests {
         assert_eq!(
             p.mutate.report.as_deref(),
             Some(std::path::Path::new("r.ndjson"))
+        );
+        assert!(!p.mutate.force_report);
+        assert!(
+            Purge::try_parse_from(["purge", "orders", "--force-report"]).is_err(),
+            "--force-report needs --report"
         );
         let e = CliPolicy::new(
             &MutateArgs {
@@ -383,14 +484,14 @@ mod tests {
         let flags = |yes, confirm: &[&str]| MutateArgs {
             yes,
             confirm_prod: confirm.iter().map(|s| s.to_string()).collect(),
-            report: None,
+            ..MutateArgs::default()
         };
         let both = [EntityPath::queue("orders"), EntityPath::queue("events")];
-        let e = precheck_production(&ctx, &prod, &flags(false, &[]), "purge", &both[..1])
+        let e = precheck_production(&ctx, &prod, &flags(false, &[]), PURGE, &both[..1])
             .unwrap_err()
             .to_string();
         assert!(e.contains("--confirm-prod orders"), "{e}");
-        let e = precheck_production(&ctx, &prod, &flags(true, &["orders"]), "purge", &both)
+        let e = precheck_production(&ctx, &prod, &flags(true, &["orders"]), PURGE, &both)
             .unwrap_err()
             .to_string();
         assert!(
@@ -401,7 +502,7 @@ mod tests {
             &ctx,
             &prod,
             &flags(true, &["ORDERS", "events"]),
-            "purge",
+            PURGE,
             &both,
         )
         .unwrap();
@@ -412,7 +513,7 @@ mod tests {
                 production: false,
             },
             &flags(false, &[]),
-            "purge",
+            PURGE,
             &both,
         )
         .unwrap();
@@ -439,7 +540,7 @@ mod tests {
             &ctx,
             &prod,
             &MutateArgs::default(),
-            "purge",
+            PURGE,
             &[EntityPath::subscription("events", "all")],
         )
         .unwrap_err()
@@ -469,12 +570,10 @@ mod tests {
     #[tokio::test]
     async fn the_gate_denies_production_without_flags_and_logs_it() {
         use dispatched_core::{CountEstimate, Operation, SubQueue, Target};
-        let ctx = Ctx::for_test_with_profiles(&[]);
-        let prod = ProfileRef {
-            name: "prod-weu".into(),
-            production: true,
-        };
-        let gate = cli_gate(&ctx, prod, &MutateArgs::default()).unwrap();
+        let ctx = Ctx::for_test_with_profiles(&[("prod-weu", "prod.servicebus.windows.net", true)]);
+        let resolved = prod_resolved(&ctx);
+        assert!(resolved.profile.production);
+        let gate = cli_gate(&ctx, &resolved, &MutateArgs::default()).unwrap();
         let op = Operation::purge(
             Target::new(EntityPath::queue("orders"), SubQueue::DeadLetter),
             CountEstimate::Exact(3),
@@ -496,5 +595,203 @@ mod tests {
         assert_eq!(log.len(), 1);
         assert_eq!(log[0].outcome, Outcome::Denied);
         assert_eq!(log[0].origin, Origin::Cli);
+    }
+
+    #[test]
+    fn production_with_no_entities_is_refused_and_logged() {
+        let ctx = Ctx::for_test_with_profiles(&[]);
+        let prod = ProfileRef {
+            name: "prod-weu".into(),
+            production: true,
+        };
+        let args = MutateArgs {
+            yes: true,
+            confirm_prod: vec!["orders".into()],
+            ..MutateArgs::default()
+        };
+        let e = precheck_production(&ctx, &prod, &args, PURGE, &[])
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            e,
+            "this operation is on production profile prod-weu: pass --yes --confirm-prod <entity>"
+        );
+        let log = ctx
+            .activity()
+            .unwrap()
+            .list(&ActivityQuery::default())
+            .unwrap();
+        let [entry] = log.as_slice() else {
+            panic!("one entry: {log:?}")
+        };
+        assert_eq!(entry.outcome, Outcome::Denied);
+        assert_eq!(entry.entity, None);
+        assert_eq!(entry.summary, "purge refused before connecting");
+        // Off production an empty list is the command's business.
+        precheck_production(
+            &ctx,
+            &ProfileRef {
+                name: "dev".into(),
+                production: false,
+            },
+            &args,
+            PURGE,
+            &[],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_precheck_logs_the_planned_kind() {
+        let ctx = Ctx::for_test_with_profiles(&[]);
+        let prod = ProfileRef {
+            name: "prod-weu".into(),
+            production: true,
+        };
+        let resubmit = Planned {
+            kind: Mutation::Send,
+            verb: "resubmit",
+        };
+        precheck_production(
+            &ctx,
+            &prod,
+            &MutateArgs::default(),
+            resubmit,
+            &[EntityPath::queue("orders")],
+        )
+        .unwrap_err();
+        let log = ctx
+            .activity()
+            .unwrap()
+            .list(&ActivityQuery::default())
+            .unwrap();
+        assert_eq!(log[0].kind, OpKind::Mutating(Mutation::Send));
+        assert_eq!(log[0].action, "resubmit");
+    }
+
+    #[test]
+    fn an_existing_report_file_is_refused_before_anything_runs() {
+        let ctx = Ctx::for_test_with_profiles(&[("prod-weu", "prod.servicebus.windows.net", true)]);
+        let resolved = prod_resolved(&ctx);
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("r.json");
+        std::fs::write(&existing, "{}").unwrap();
+        // All production flags given: only the report path stops it.
+        let args = |report: std::path::PathBuf, force_report| MutateArgs {
+            yes: true,
+            confirm_prod: vec!["orders".into()],
+            report: Some(report),
+            force_report,
+        };
+        let orders = [EntityPath::queue("orders")];
+        let e = preflight(
+            &ctx,
+            &resolved,
+            &args(existing.clone(), false),
+            PURGE,
+            &orders,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            e.contains("--force-report") && e.contains("nothing was changed"),
+            "{e}"
+        );
+        preflight(
+            &ctx,
+            &resolved,
+            &args(existing.clone(), true),
+            PURGE,
+            &orders,
+        )
+        .unwrap();
+        let e = preflight(
+            &ctx,
+            &resolved,
+            &args(dir.path().into(), true),
+            PURGE,
+            &orders,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("is a directory"), "{e}");
+        let e = preflight(
+            &ctx,
+            &resolved,
+            &args(dir.path().join("missing/r.json"), false),
+            PURGE,
+            &orders,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("does not exist"), "{e}");
+        preflight(
+            &ctx,
+            &resolved,
+            &args(dir.path().join("new.json"), false),
+            PURGE,
+            &orders,
+        )
+        .unwrap();
+        assert!(
+            ctx.activity()
+                .unwrap()
+                .list(&ActivityQuery::default())
+                .unwrap()
+                .is_empty(),
+            "report path refusals happen before anything is logged or run"
+        );
+    }
+
+    #[test]
+    fn confirm_prod_must_name_the_entity_not_a_sub_queue() {
+        for (input, base) in [
+            ("orders/$DeadLetterQueue", "orders"),
+            (
+                "events/subscriptions/all/$deadletterqueue",
+                "events/subscriptions/all",
+            ),
+            ("orders/$Transfer/$DeadLetterQueue", "orders"),
+        ] {
+            let e = CliPolicy::new(
+                &MutateArgs {
+                    confirm_prod: vec![input.into()],
+                    ..MutateArgs::default()
+                },
+                "p",
+                false,
+                Box::new(|_| Ok(String::new())),
+            )
+            .err()
+            .expect("refused")
+            .to_string();
+            assert!(
+                e.ends_with(&format!(
+                    "name the entity without the sub-queue: --confirm-prod {base}"
+                )),
+                "{e}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_prompt_shows_the_summary_and_the_question() {
+        let asked = Arc::new(std::sync::Mutex::new(String::new()));
+        let seen = asked.clone();
+        let policy = CliPolicy::new(
+            &MutateArgs::default(),
+            "dev",
+            true,
+            Box::new(move |q| {
+                *seen.lock().unwrap() = q.to_string();
+                Ok("y".into())
+            }),
+        )
+        .unwrap();
+        assert_eq!(policy.confirm(&req("orders", false)).await, Decision::Allow);
+        assert_eq!(
+            *asked.lock().unwrap(),
+            "Remove 3 messages from orders/$DeadLetterQueue on prod-weu\nContinue? [y/N] "
+        );
     }
 }

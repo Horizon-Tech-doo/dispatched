@@ -6,7 +6,7 @@
 
 use crate::Format;
 use crate::output::{sanitize, table};
-use anyhow::Context as _;
+use crate::safety::MutateArgs;
 use dispatched_core::{ExportFormat, ItemOutcome, JobEvent, JobReport, Progress};
 use horizon_azure_kit::safety::CancellationToken;
 use std::future::Future;
@@ -77,23 +77,48 @@ fn job_exit(report: &JobReport) -> JobExit {
 }
 
 /// Print the result (the summary line, a table of failures and every note; or the report as
-/// JSON with `--format json`), write the report file when asked, and say how the job ended.
-/// Everything printed or written is the scrubbed report.
-pub fn finish_job(
-    report: &JobReport,
-    format: Format,
-    report_path: Option<&Path>,
-) -> anyhow::Result<JobExit> {
-    finish_job_to(&mut std::io::stdout().lock(), report, format, report_path)
+/// JSON with `--format json`), write the `--report` file when asked (replacing it only with
+/// `--force-report`), and say how the job ended. Everything printed or written is the scrubbed
+/// report. The job already ran, so nothing here fails the command: a result or report that
+/// cannot be written is a warning on stderr and the exit is [`JobExit::Incomplete`] (exit 2).
+pub fn finish_job(report: &JobReport, format: Format, args: &MutateArgs) -> JobExit {
+    finish_job_to(
+        &mut std::io::stdout().lock(),
+        &mut std::io::stderr().lock(),
+        report,
+        format,
+        args,
+    )
 }
 
 fn finish_job_to(
     out: &mut dyn Write,
+    err: &mut dyn Write,
     report: &JobReport,
     format: Format,
-    report_path: Option<&Path>,
-) -> anyhow::Result<JobExit> {
+    args: &MutateArgs,
+) -> JobExit {
     let report = report.scrubbed();
+    let mut exit = job_exit(&report);
+    if let Err(e) = print_result(out, &report, format) {
+        let _ = writeln!(err, "warning: the result could not be printed: {e}");
+        exit = JobExit::Incomplete;
+    }
+    if let Some(path) = &args.report
+        && let Err(e) = report.write(path, report_format(path), args.force_report)
+    {
+        let _ = writeln!(
+            err,
+            "warning: the report could not be written to {}: {}",
+            sanitize(&path.display().to_string()),
+            sanitize(&e.to_string())
+        );
+        exit = JobExit::Incomplete;
+    }
+    exit
+}
+
+fn print_result(out: &mut dyn Write, report: &JobReport, format: Format) -> anyhow::Result<()> {
     match format {
         Format::Table => {
             writeln!(out, "{}", sanitize(&report.summary_line()))?;
@@ -121,21 +146,11 @@ fn finish_job_to(
         }
         // `--format ndjson` is refused before a job runs; the report prints as JSON.
         Format::Json | Format::Ndjson => {
-            writeln!(out, "{}", serde_json::to_string_pretty(&report)?)?;
+            writeln!(out, "{}", serde_json::to_string_pretty(report)?)?;
         }
     }
     out.flush()?;
-    if let Some(path) = report_path {
-        report
-            .write(path, report_format(path), false)
-            .with_context(|| {
-                format!(
-                    "the job finished, but its report could not be written to {}",
-                    path.display()
-                )
-            })?;
-    }
-    Ok(job_exit(&report))
+    Ok(())
 }
 
 /// NDJSON for `.ndjson` and `.jsonl`, JSON otherwise.
@@ -235,12 +250,32 @@ mod tests {
     }
 
     fn finish_job_for_test(r: &JobReport) -> JobExit {
-        finish_job_to(&mut Vec::new(), r, Format::Table, None).unwrap()
+        finish_job_to(
+            &mut Vec::new(),
+            &mut Vec::new(),
+            r,
+            Format::Table,
+            &MutateArgs::default(),
+        )
+    }
+
+    fn to_file(path: &Path, force_report: bool) -> MutateArgs {
+        MutateArgs {
+            report: Some(path.to_path_buf()),
+            force_report,
+            ..MutateArgs::default()
+        }
     }
 
     fn table_output(r: &JobReport) -> String {
         let mut out = Vec::new();
-        finish_job_to(&mut out, r, Format::Table, None).unwrap();
+        finish_job_to(
+            &mut out,
+            &mut Vec::new(),
+            r,
+            Format::Table,
+            &MutateArgs::default(),
+        );
         String::from_utf8(out).unwrap()
     }
 
@@ -269,11 +304,23 @@ mod tests {
         ));
         assert_eq!(finish_job_for_test(&not_reached), JobExit::Incomplete);
         let mut skipped = report(1, 0);
-        skipped.items.push(item(8, ItemOutcome::Missing));
+        skipped.items.push(item(
+            8,
+            ItemOutcome::Skipped {
+                reason: "session locked by another receiver".into(),
+            },
+        ));
         assert_eq!(
             finish_job_for_test(&skipped),
             JobExit::Ok,
             "skipped is fine"
+        );
+        let mut missing = report(1, 0);
+        missing.items.push(item(9, ItemOutcome::Missing));
+        assert_eq!(
+            finish_job_for_test(&missing),
+            JobExit::Ok,
+            "missing counts as skipped (decision 17)"
         );
     }
 
@@ -310,7 +357,13 @@ mod tests {
         r.notes = vec![format!("note with {secret}")];
         assert!(!table_output(&r).contains("topsecretvalue"));
         let mut json = Vec::new();
-        finish_job_to(&mut json, &r, Format::Json, None).unwrap();
+        finish_job_to(
+            &mut json,
+            &mut Vec::new(),
+            &r,
+            Format::Json,
+            &MutateArgs::default(),
+        );
         let json = String::from_utf8(json).unwrap();
         assert!(!json.contains("topsecretvalue"));
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -319,7 +372,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         for name in ["r.json", "r.ndjson"] {
             let path = dir.path().join(name);
-            let exit = finish_job_to(&mut Vec::new(), &r, Format::Table, Some(&path)).unwrap();
+            let exit = finish_job_to(
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &r,
+                Format::Table,
+                &to_file(&path, false),
+            );
             assert_eq!(exit, JobExit::Incomplete);
             let text = std::fs::read_to_string(&path).unwrap();
             assert!(!text.contains("topsecretvalue"));
@@ -356,5 +415,54 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), token.cancelled())
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn a_report_that_cannot_be_written_after_the_job_is_a_warning_and_exit_2() {
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("r.json");
+        std::fs::write(&existing, "old").unwrap();
+        // The file appeared after the pre-check: the job still ran, so no error, exit 2.
+        let mut err = Vec::new();
+        let exit = finish_job_to(
+            &mut Vec::new(),
+            &mut err,
+            &report(2, 0),
+            Format::Table,
+            &to_file(&existing, false),
+        );
+        assert_eq!(exit, JobExit::Incomplete);
+        let err = String::from_utf8(err).unwrap();
+        assert!(
+            err.starts_with(&format!(
+                "warning: the report could not be written to {}",
+                existing.display()
+            )),
+            "{err}"
+        );
+        assert_eq!(std::fs::read_to_string(&existing).unwrap(), "old");
+        // A missing directory too.
+        let exit = finish_job_to(
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &report(2, 0),
+            Format::Table,
+            &to_file(&dir.path().join("gone/r.json"), false),
+        );
+        assert_eq!(exit, JobExit::Incomplete);
+        // --force-report replaces it.
+        let exit = finish_job_to(
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &report(2, 0),
+            Format::Table,
+            &to_file(&existing, true),
+        );
+        assert_eq!(exit, JobExit::Ok);
+        assert!(
+            std::fs::read_to_string(&existing)
+                .unwrap()
+                .contains("\"items\"")
+        );
     }
 }

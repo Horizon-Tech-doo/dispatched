@@ -601,9 +601,10 @@ mod tests {
 
         #[test]
         fn a_profile_on_a_production_host_is_production_even_if_not_marked() {
+            // Saved hosts are lowercased, so this tests the "not marked" rule, not case.
             let ctx = Ctx::for_test_with_profiles(&[
                 ("prod-weu", "prod.servicebus.windows.net", true),
-                ("prod-alias", "Prod.servicebus.windows.net", false),
+                ("prod-alias", "prod.servicebus.windows.net", false),
             ]);
             let r = resolve_for_test(&ctx, Selection::Profile("prod-alias".into())).unwrap();
             assert_eq!(

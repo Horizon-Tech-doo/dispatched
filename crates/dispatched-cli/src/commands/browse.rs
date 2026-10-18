@@ -3,7 +3,7 @@
 use crate::Format;
 use crate::context::Ctx;
 use crate::output::{ellipsize, sanitize, table, thousands};
-use crate::resolve::{Selection, needs_sign_in, resolve_namespace};
+use crate::resolve::{Resolved, Selection, needs_sign_in, resolve_namespace, resolve_selected};
 use clap::Args;
 use dispatched_core::messaging::DEFAULT_SCAN_LIMIT;
 pub use dispatched_core::namespace::known_entities;
@@ -34,9 +34,18 @@ pub(crate) fn namespace(ctx: &Ctx, sel: &Selection<'_>) -> anyhow::Result<Namesp
     )
 }
 
-/// An explorer for the namespace the user selected.
+/// An explorer for the namespace the user selected, for **read commands only**: it skips the
+/// production check. Mutating commands use [`mutating_target`].
 pub(crate) fn explorer_for(ctx: &Ctx, sel: &Selection<'_>) -> anyhow::Result<Explorer> {
     Ok(Explorer::new(namespace(ctx, sel)?)?)
+}
+
+/// The resolved target of a mutating command, with its production flag (see
+/// [`crate::resolve::resolve`]). Run [`crate::safety::preflight`] on the `Resolved` before
+/// calling `Explorer::new` on its namespace or anything else that does I/O.
+#[allow(dead_code)] // Used by the mutating commands of Tasks 19-21.
+pub(crate) fn mutating_target(ctx: &Ctx, sel: &Selection<'_>) -> anyhow::Result<Resolved> {
+    resolve_selected(ctx, sel)
 }
 
 /// The entities pinned on the profile the selection resolves to. Empty when
