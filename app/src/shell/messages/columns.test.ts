@@ -21,6 +21,11 @@ describe("message columns", () => {
     expect(propText({ type: "ushort", value: 65_535 })).toBe("65535");
     expect(propText({ type: "uint", value: 4_294_967_295 })).toBe("4294967295");
     expect(propText({ type: "ulong", value: 5_000_000_000 })).toBe("5000000000");
+    // Signed widths and float keep theirs too; a symbol shows as text.
+    expect(propText({ type: "byte", value: -128 })).toBe("-128");
+    expect(propText({ type: "short", value: -32_768 })).toBe("-32768");
+    expect(propText({ type: "float", value: 1.5 })).toBe("1.5");
+    expect(propText({ type: "symbol", value: "sym" })).toBe("sym");
   });
   it("show time to live in its two largest units", () => {
     expect(formatTtl(null)).toBe("");

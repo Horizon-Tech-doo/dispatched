@@ -172,7 +172,11 @@ pub enum PropValue {
     Null,
     /// bool
     Bool(bool),
-    /// 32-bit signed integer (AMQP byte, short or int)
+    /// 8-bit signed integer (AMQP byte)
+    Byte(i8),
+    /// 16-bit signed integer (AMQP short)
+    Short(i16),
+    /// 32-bit signed integer (AMQP int)
     Int(i32),
     /// 64-bit signed integer (AMQP long)
     Long(i64),
@@ -184,10 +188,14 @@ pub enum PropValue {
     UInt(u32),
     /// 64-bit unsigned integer (AMQP ulong)
     ULong(u64),
-    /// float / double
+    /// 32-bit float (AMQP float)
+    Float(f32),
+    /// 64-bit float (AMQP double)
     Double(f64),
-    /// string or symbol
+    /// string
     String(String),
+    /// AMQP symbol (kept apart from string, so a copy sends it as a symbol again)
+    Symbol(String),
     /// timestamp
     #[serde(with = "time::serde::rfc3339")]
     Timestamp(OffsetDateTime),
@@ -278,21 +286,22 @@ pub(crate) fn simple_to_prop(v: &SimpleValue) -> PropValue {
     match v {
         SimpleValue::Null => PropValue::Null,
         SimpleValue::Bool(b) => PropValue::Bool(*b),
-        SimpleValue::Byte(n) => PropValue::Int(i32::from(*n)),
-        SimpleValue::Short(n) => PropValue::Int(i32::from(*n)),
+        SimpleValue::Byte(n) => PropValue::Byte(*n),
+        SimpleValue::Short(n) => PropValue::Short(*n),
         SimpleValue::Int(n) => PropValue::Int(*n),
         SimpleValue::Long(n) => PropValue::Long(*n),
         SimpleValue::Ubyte(n) => PropValue::UByte(*n),
         SimpleValue::Ushort(n) => PropValue::UShort(*n),
         SimpleValue::Uint(n) => PropValue::UInt(*n),
         SimpleValue::Ulong(n) => PropValue::ULong(*n),
-        SimpleValue::Float(f) => PropValue::Double(f64::from(f.into_inner())),
+        SimpleValue::Float(f) => PropValue::Float(f.into_inner()),
         SimpleValue::Double(f) => PropValue::Double(f.into_inner()),
         SimpleValue::String(s) => PropValue::String(s.clone()),
-        SimpleValue::Symbol(s) => PropValue::String(s.0.clone()),
+        SimpleValue::Symbol(s) => PropValue::Symbol(s.0.clone()),
         SimpleValue::Timestamp(t) => match timestamp_to_datetime(t) {
             Some(dt) => PropValue::Timestamp(dt),
-            None => PropValue::Long(t.milliseconds()),
+            // Outside what a time can hold: never sent again as another type.
+            None => PropValue::Other(format!("timestamp {} ms", t.milliseconds())),
         },
         SimpleValue::Uuid(u) => PropValue::Uuid(uuid::Uuid::from(u.clone())),
         SimpleValue::Binary(b) => PropValue::Binary(b.to_vec()),
@@ -503,6 +512,59 @@ pub(crate) fn test_message(seq: i64) -> PeekedMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_amqp_property_type_is_widened() {
+        use fe2o3_amqp::types::primitives::{Dec32, Dec64, Dec128, Symbol, Timestamp};
+        let at = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        for (v, p) in [
+            (SimpleValue::Bool(true), PropValue::Bool(true)),
+            (SimpleValue::Ubyte(1), PropValue::UByte(1)),
+            (SimpleValue::Ushort(2), PropValue::UShort(2)),
+            (SimpleValue::Uint(3), PropValue::UInt(3)),
+            (SimpleValue::Ulong(4), PropValue::ULong(4)),
+            (SimpleValue::Byte(-5), PropValue::Byte(-5)),
+            (SimpleValue::Short(-6), PropValue::Short(-6)),
+            (SimpleValue::Int(-7), PropValue::Int(-7)),
+            (SimpleValue::Long(-8), PropValue::Long(-8)),
+            (SimpleValue::Float(1.5.into()), PropValue::Float(1.5)),
+            (SimpleValue::Double(2.5.into()), PropValue::Double(2.5)),
+            (
+                SimpleValue::Timestamp(Timestamp::from(1_700_000_000_000)),
+                PropValue::Timestamp(at),
+            ),
+            (
+                SimpleValue::String("s".into()),
+                PropValue::String("s".into()),
+            ),
+            (
+                SimpleValue::Symbol(Symbol::from("y")),
+                PropValue::Symbol("y".into()),
+            ),
+            (
+                SimpleValue::Binary(vec![1].into()),
+                PropValue::Binary(vec![1]),
+            ),
+            (SimpleValue::Null, PropValue::Null),
+        ] {
+            assert_eq!(simple_to_prop(&v), p, "{v:?}");
+        }
+        // What has no faithful representation is `other` (never copied silently), not a
+        // wider type.
+        for v in [
+            SimpleValue::Char('c'),
+            SimpleValue::Decimal32(Dec32::from([0; 4])),
+            SimpleValue::Decimal64(Dec64::from([0; 8])),
+            SimpleValue::Decimal128(Dec128::from([0; 16])),
+            SimpleValue::Timestamp(Timestamp::from(i64::MAX)),
+        ] {
+            assert!(
+                matches!(simple_to_prop(&v), PropValue::Other(_)),
+                "{v:?} -> {:?}",
+                simple_to_prop(&v)
+            );
+        }
+    }
     use fe2o3_amqp::types::messaging::message::__private::Serializable;
     use fe2o3_amqp::types::messaging::{
         AmqpSequence, AmqpValue, ApplicationProperties, Batch, Data, Header, MessageAnnotations,
@@ -777,12 +839,14 @@ mod tests {
         assert_eq!(m.enqueued_time, None);
         assert_eq!(m.scheduled_enqueue_time, None);
         assert_eq!(m.locked_until, None);
-        assert_eq!(m.application_properties["max"], PropValue::Long(i64::MAX));
-        assert_eq!(m.application_properties["min"], PropValue::Long(i64::MIN));
-        assert_eq!(
-            m.application_properties["far"],
-            PropValue::Long(300_000_000_000_000)
-        );
+        // Not a time anyone can hold: `other` (never copied as another type), with the raw value.
+        for k in ["max", "min", "far"] {
+            assert!(
+                matches!(&m.application_properties[k], PropValue::Other(t) if t.starts_with("timestamp ")),
+                "{k}: {:?}",
+                m.application_properties[k]
+            );
+        }
         assert!(matches!(
             m.application_properties["ok"],
             PropValue::Timestamp(_)

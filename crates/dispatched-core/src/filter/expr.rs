@@ -422,14 +422,19 @@ fn field_value(msg: &PeekedMessage, field: &Field) -> FieldValue {
         Field::User(name) => match user_property(msg, name) {
             None | Some(PropValue::Null) => FieldValue::Null,
             Some(PropValue::Bool(b)) => FieldValue::Bool(*b),
+            Some(PropValue::Byte(n)) => FieldValue::Num(f64::from(*n)),
+            Some(PropValue::Short(n)) => FieldValue::Num(f64::from(*n)),
             Some(PropValue::Int(n)) => FieldValue::Num(f64::from(*n)),
+            Some(PropValue::Float(f)) => FieldValue::Num(f64::from(*f)),
             Some(PropValue::Long(n)) => FieldValue::Num(*n as f64),
             Some(PropValue::UByte(n)) => FieldValue::Num(f64::from(*n)),
             Some(PropValue::UShort(n)) => FieldValue::Num(f64::from(*n)),
             Some(PropValue::UInt(n)) => FieldValue::Num(f64::from(*n)),
             Some(PropValue::ULong(n)) => FieldValue::Num(*n as f64),
             Some(PropValue::Double(d)) => FieldValue::Num(*d),
-            Some(PropValue::String(s)) | Some(PropValue::Other(s)) => FieldValue::Str(s.clone()),
+            Some(PropValue::String(s)) | Some(PropValue::Symbol(s)) | Some(PropValue::Other(s)) => {
+                FieldValue::Str(s.clone())
+            }
             Some(PropValue::Uuid(u)) => FieldValue::Str(u.to_string()),
             Some(PropValue::TimeSpan(d)) => FieldValue::Num(d.as_seconds_f64()),
             Some(PropValue::Timestamp(t)) => FieldValue::Time(*t),

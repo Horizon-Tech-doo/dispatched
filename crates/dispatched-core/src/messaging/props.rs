@@ -89,6 +89,14 @@ pub enum TypedValue {
     Guid(uuid::Uuid),
     /// AMQP null (a copy keeps it; there is no syntax to type one).
     Null,
+    /// 8-bit signed integer (AMQP byte).
+    Byte(i8),
+    /// 16-bit signed integer (AMQP short).
+    Short(i16),
+    /// 32-bit float (AMQP float).
+    Float(f32),
+    /// AMQP symbol.
+    Symbol(String),
     /// Bytes (AMQP binary).
     Binary(Vec<u8>),
     /// 8-bit unsigned integer (AMQP ubyte).
@@ -157,6 +165,10 @@ impl TypedValue {
             })),
             TypedValue::Guid(u) => SimpleValue::Uuid((*u).into()),
             TypedValue::Null => SimpleValue::Null,
+            TypedValue::Byte(n) => SimpleValue::Byte(*n),
+            TypedValue::Short(n) => SimpleValue::Short(*n),
+            TypedValue::Float(f) => SimpleValue::Float((*f).into()),
+            TypedValue::Symbol(s) => SimpleValue::Symbol(Symbol::from(s.as_str())),
             TypedValue::Binary(b) => SimpleValue::Binary(b.clone().into()),
             TypedValue::UByte(n) => SimpleValue::Ubyte(*n),
             TypedValue::UShort(n) => SimpleValue::Ushort(*n),
@@ -183,6 +195,10 @@ impl TypedValue {
             PropValue::TimeSpan(d) => TypedValue::TimeSpan(*d),
             PropValue::Uuid(u) => TypedValue::Guid(*u),
             PropValue::Null => TypedValue::Null,
+            PropValue::Byte(n) => TypedValue::Byte(*n),
+            PropValue::Short(n) => TypedValue::Short(*n),
+            PropValue::Float(f) => TypedValue::Float(*f),
+            PropValue::Symbol(s) => TypedValue::Symbol(s.clone()),
             PropValue::Binary(b) => TypedValue::Binary(b.clone()),
             PropValue::Other(_) => return None,
         })

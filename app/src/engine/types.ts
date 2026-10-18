@@ -177,12 +177,12 @@ export interface AppInfo { version: string; startup_error: string | null }
 export type PeekView = "active" | "scheduled" | "deferred" | "dead-letter" | "transfer-dead-letter";
 export type MessageState = "active" | "deferred" | "scheduled";
 /** An application property; `binary` values are base64, `timestamp` RFC 3339, `timespan` ISO 8601 duration.
- *  Integers keep their AMQP width: `int` (byte, short, int), `long`, `ubyte`, `ushort`, `uint`, `ulong`. */
+ *  Numbers keep their AMQP type: `byte`, `short`, `int`, `long`, `ubyte`, `ushort`, `uint`, `ulong`, `float`, `double`. */
 export type PropValue =
   | { type: "null" }
   | { type: "bool"; value: boolean }
-  | { type: "int" | "long" | "ubyte" | "ushort" | "uint" | "ulong" | "double"; value: number }
-  | { type: "string" | "timestamp" | "timespan" | "uuid" | "binary" | "other"; value: string };
+  | { type: "byte" | "short" | "int" | "long" | "ubyte" | "ushort" | "uint" | "ulong" | "float" | "double"; value: number }
+  | { type: "string" | "symbol" | "timestamp" | "timespan" | "uuid" | "binary" | "other"; value: string };
 /** `binary` values are base64. `value` and `sequence` bodies are AMQP values rendered as JSON. */
 export type MessageBody =
   | { kind: "binary"; value: string }

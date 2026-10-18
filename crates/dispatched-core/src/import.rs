@@ -84,6 +84,11 @@ fn non_empty(s: Option<String>) -> Option<String> {
     s.filter(|s| !s.is_empty())
 }
 
+/// A JSON integer that fits the signed type `T`.
+fn signed<T: TryFrom<i64>>(v: &serde_json::Value) -> Option<T> {
+    T::try_from(v.as_i64()?).ok()
+}
+
 /// A JSON integer that fits the unsigned type `T`.
 fn unsigned<T: TryFrom<u64>>(v: &serde_json::Value) -> Option<T> {
     T::try_from(v.as_u64()?).ok()
@@ -109,15 +114,18 @@ fn prop_value(name: &str, p: &RawProp) -> Result<PropValue> {
             }
         }
         "long" | "int64" => PropValue::Long(p.value.as_i64().ok_or_else(|| bad("an integer"))?),
+        "byte" => PropValue::Byte(signed(&p.value).ok_or_else(|| bad("an 8-bit integer"))?),
+        "short" => PropValue::Short(signed(&p.value).ok_or_else(|| bad("a 16-bit integer"))?),
         "ubyte" => {
             PropValue::UByte(unsigned(&p.value).ok_or_else(|| bad("an 8-bit unsigned integer"))?)
         }
         "ushort" => {
             PropValue::UShort(unsigned(&p.value).ok_or_else(|| bad("a 16-bit unsigned integer"))?)
         }
-        "uint" => {
-            PropValue::UInt(unsigned(&p.value).ok_or_else(|| bad("a 32-bit unsigned integer"))?)
-        }
+        "uint" => PropValue::UInt(
+            unsigned(&p.value)
+                .ok_or_else(|| bad("a 32-bit unsigned integer; use ulong for wider values"))?,
+        ),
         "ulong" => PropValue::ULong(p.value.as_u64().ok_or_else(|| bad("an unsigned integer"))?),
         "double" if p.value.is_null() => {
             return Err(Error::Invalid(format!(
@@ -125,6 +133,19 @@ fn prop_value(name: &str, p: &RawProp) -> Result<PropValue> {
             )));
         }
         "double" => PropValue::Double(p.value.as_f64().ok_or_else(|| bad("a number"))?),
+        "float" if p.value.is_null() => {
+            return Err(Error::Invalid(format!(
+                "property '{name}' (float) has no value; NaN and infinity cannot be imported"
+            )));
+        }
+        "float" => {
+            let f = p.value.as_f64().ok_or_else(|| bad("a number"))? as f32;
+            if !f.is_finite() {
+                return Err(bad("a 32-bit float"));
+            }
+            PropValue::Float(f)
+        }
+        "symbol" => PropValue::Symbol(text()?.to_string()),
         "string" => PropValue::String(text()?.to_string()),
         "timestamp" => PropValue::Timestamp(
             OffsetDateTime::parse(text()?, &Rfc3339).map_err(|_| bad("an RFC 3339 time"))?,
@@ -368,6 +389,14 @@ mod tests {
             .insert("u".into(), PropValue::UInt(u32::MAX));
         m.application_properties
             .insert("ul".into(), PropValue::ULong(u64::MAX));
+        m.application_properties
+            .insert("sb".into(), PropValue::Byte(i8::MIN));
+        m.application_properties
+            .insert("ss".into(), PropValue::Short(i16::MIN));
+        m.application_properties
+            .insert("f".into(), PropValue::Float(1.5));
+        m.application_properties
+            .insert("sym".into(), PropValue::Symbol("y".into()));
         let dir = tempfile::tempdir().unwrap();
         for format in [ExportFormat::Json, ExportFormat::Ndjson] {
             let path = dir.path().join(format!("{format:?}"));
@@ -400,6 +429,10 @@ mod tests {
             assert_eq!(p["s"], TypedValue::UShort(65_535));
             assert_eq!(p["u"], TypedValue::UInt(u32::MAX));
             assert_eq!(p["ul"], TypedValue::ULong(u64::MAX));
+            assert_eq!(p["sb"], TypedValue::Byte(i8::MIN));
+            assert_eq!(p["ss"], TypedValue::Short(i16::MIN));
+            assert_eq!(p["f"], TypedValue::Float(1.5));
+            assert_eq!(p["sym"], TypedValue::Symbol("y".into()));
             assert!(read[0].notes.is_empty(), "{:?}", read[0].notes);
         }
     }
@@ -462,6 +495,19 @@ mod tests {
             "only `other` is lost"
         );
         assert_eq!(r[2].lost, ["o"]);
+    }
+
+    #[test]
+    fn a_uint_too_wide_suggests_ulong() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("x.ndjson");
+        std::fs::write(
+            &p,
+            "{\"schema\":\"dispatched.message/v1\",\"body\":{\"kind\":\"empty\"},\"application_properties\":{\"n\":{\"type\":\"uint\",\"value\":5000000000}}}\n",
+        )
+        .unwrap();
+        let e = read_messages(&p).unwrap_err().to_string();
+        assert!(e.contains("use ulong"), "{e}");
     }
 
     #[test]

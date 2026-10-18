@@ -996,6 +996,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_move_keeps_the_type_of_every_property() {
+        // Each AMQP type a property can have arrives with the same type on the copy: a .NET
+        // consumer that casts `(sbyte)`, `(short)`, `(float)` or `(uint)` must not throw.
+        let at = time::macros::datetime!(2026-10-18 12:00 UTC);
+        let props = [
+            ("bool", PropValue::Bool(true)),
+            ("ubyte", PropValue::UByte(u8::MAX)),
+            ("ushort", PropValue::UShort(u16::MAX)),
+            ("uint", PropValue::UInt(u32::MAX)),
+            ("ulong", PropValue::ULong(u64::MAX)),
+            ("byte", PropValue::Byte(i8::MIN)),
+            ("short", PropValue::Short(i16::MIN)),
+            ("int", PropValue::Int(i32::MIN)),
+            ("long", PropValue::Long(i64::MIN)),
+            ("float", PropValue::Float(1.5)),
+            ("double", PropValue::Double(2.25)),
+            ("timestamp", PropValue::Timestamp(at)),
+            ("timespan", PropValue::TimeSpan(time::Duration::minutes(5))),
+            ("uuid", PropValue::Uuid(uuid::Uuid::from_u128(7))),
+            ("binary", PropValue::Binary(vec![0, 255])),
+            ("string", PropValue::String("s".into())),
+            ("symbol", PropValue::Symbol("sym".into())),
+            ("null", PropValue::Null),
+        ];
+        let b = FakeBroker::default();
+        let dl = "q/$DeadLetterQueue";
+        let mut m = FakeMsg::active("x");
+        for (k, v) in props.clone() {
+            m = m.prop(k, v);
+        }
+        let s = b.add(dl, m);
+        let r = run(
+            &mut b.clone(),
+            &move_spec(dl, &[s], "t"),
+            &[s],
+            &NoProgress,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.succeeded(), 1, "{:?}", r.items);
+        assert!(r.notes.is_empty(), "{:?}", r.notes);
+        let copy = &b.all("t")[0].application_properties;
+        for (k, v) in props {
+            assert_eq!(copy[k], v, "{k} kept its type");
+        }
+    }
+
+    #[tokio::test]
     async fn a_move_that_would_lose_a_property_fails_and_keeps_the_original() {
         let b = FakeBroker::default();
         let dl = "q/$DeadLetterQueue";
