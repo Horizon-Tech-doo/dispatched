@@ -193,22 +193,14 @@ impl Explorer {
     /// identity may not read descriptions (`Forbidden`), a one-message `peek-message` probe
     /// decides. `Ok(None)` means it cannot be told; a missing entity stays `NotFound`.
     pub async fn resolve_kind(&self, entity: &EntityPath) -> Result<Option<EntityKind>> {
-        if entity.subscription.is_some() {
-            return Ok(Some(EntityKind::Subscription));
-        }
-        match self.mgmt.entity_kind(&entity.entity).await {
-            Ok(kind) => Ok(Some(kind)),
-            Err(Error::Forbidden { .. }) => {
-                let mut opts = PeekOptions::new(1);
-                opts.scan_limit = 1;
-                let probe = self
-                    .peek(entity, PeekView::Active, &opts)
-                    .await
-                    .map(|page| page.messages);
-                Ok(kind_from_probe(&probe))
-            }
-            Err(e) => Err(e),
-        }
+        resolve_kind_via(&self.mgmt, entity, || async {
+            let mut opts = PeekOptions::new(1);
+            opts.scan_limit = 1;
+            self.peek(entity, PeekView::Active, &opts)
+                .await
+                .map(|page| page.messages)
+        })
+        .await
     }
 
     /// The rules of a subscription.
@@ -739,8 +731,6 @@ where
     }
 }
 
-/// The entity to count by peeking for `kind` at `path`. The known kind decides, so a queue named
-/// like a subscription path stays a queue. Topics have nothing to peek.
 /// What a `peek-message` probe of a name says about it: a successful peek (even of an empty
 /// entity) means a queue; a service refusal of the peek means a topic, which has no messages
 /// to peek. Anything that could be the caller's rights, the network or load says nothing.
@@ -756,12 +746,35 @@ pub(crate) fn kind_from_probe(result: &Result<Vec<PeekedMessage>>) -> Option<Ent
                 .split_once(" returned ")
                 .and_then(|(_, rest)| rest.split(':').next())
                 .and_then(|s| s.trim().parse::<u16>().ok())?;
-            (400..500).contains(&status).then_some(EntityKind::Topic)
+            // 408 is a timeout: it says nothing about the kind.
+            ((400..500).contains(&status) && status != 408).then_some(EntityKind::Topic)
         }
         Err(_) => None,
     }
 }
 
+/// [`Explorer::resolve_kind`] with the probe passed in, so tests need no broker.
+async fn resolve_kind_via<F, Fut>(
+    mgmt: &ManagementClient,
+    entity: &EntityPath,
+    probe: F,
+) -> Result<Option<EntityKind>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<PeekedMessage>>>,
+{
+    if entity.subscription.is_some() {
+        return Ok(Some(EntityKind::Subscription));
+    }
+    match mgmt.entity_kind(&entity.entity).await {
+        Ok(kind) => Ok(Some(kind)),
+        Err(Error::Forbidden { .. }) => Ok(kind_from_probe(&probe().await)),
+        Err(e) => Err(e),
+    }
+}
+
+/// The entity to count by peeking for `kind` at `path`. The known kind decides, so a queue named
+/// like a subscription path stays a queue. Topics have nothing to peek.
 fn peek_target(kind: EntityKind, path: &str) -> Result<EntityPath> {
     match kind {
         EntityKind::Queue => Ok(EntityPath::queue(path)),
@@ -823,6 +836,126 @@ mod tests {
         ] {
             assert_eq!(kind_from_probe(&Err(e)), None);
         }
+        // A timeout, a server fault and unreadable text say nothing about the kind.
+        for text in [
+            "com.microsoft:peek-message returned 408: timed out",
+            "com.microsoft:peek-message returned 500: boom",
+            "something odd happened",
+        ] {
+            assert_eq!(
+                kind_from_probe(&Err(Error::Protocol(text.into()))),
+                None,
+                "{text}"
+            );
+        }
+    }
+
+    struct FixedToken;
+    #[async_trait]
+    impl crate::tokens::TokenSource for FixedToken {
+        async fn token(&self, _audience: &str) -> Result<crate::tokens::ServiceBusToken> {
+            Ok(crate::tokens::ServiceBusToken {
+                token: secrecy::SecretString::from(
+                    "SharedAccessSignature sr=x&sig=y&se=9999999999&skn=k",
+                ),
+                kind: crate::tokens::TokenKind::Sas,
+                expires_on: OffsetDateTime::now_utc() + time::Duration::hours(1),
+            })
+        }
+        fn describe(&self) -> String {
+            "fixed".into()
+        }
+    }
+
+    async fn resolve(
+        server: &mockito::Server,
+        path: &str,
+        probe: Result<Vec<PeekedMessage>>,
+    ) -> (Result<Option<EntityKind>>, bool) {
+        let mgmt = ManagementClient::with_base(server.url(), std::sync::Arc::new(FixedToken));
+        let probed = std::cell::Cell::new(false);
+        let r = resolve_kind_via(&mgmt, &EntityPath::parse(path).unwrap(), || {
+            probed.set(true);
+            async { probe }
+        })
+        .await;
+        (r, probed.get())
+    }
+
+    #[tokio::test]
+    async fn resolve_kind_subscription_makes_no_call() {
+        let mut server = mockito::Server::new_async().await;
+        let any = server
+            .mock("GET", mockito::Matcher::Any)
+            .expect(0)
+            .create_async()
+            .await;
+        let (r, probed) = resolve(&server, "events/subscriptions/audit", Ok(vec![])).await;
+        assert_eq!(r.unwrap(), Some(EntityKind::Subscription));
+        assert!(!probed);
+        any.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn resolve_kind_reads_queue_and_topic_from_atom_without_probing() {
+        let mut server = mockito::Server::new_async().await;
+        for (name, body) in [
+            ("orders", include_str!("../tests/fixtures/queue_entry.xml")),
+            ("events", include_str!("../tests/fixtures/topic_entry.xml")),
+        ] {
+            server
+                .mock("GET", format!("/{name}").as_str())
+                .match_query(mockito::Matcher::Any)
+                .with_status(200)
+                .with_body(body)
+                .create_async()
+                .await;
+        }
+        let (r, probed) = resolve(&server, "orders", Err(Error::Network("no".into()))).await;
+        assert_eq!(r.unwrap(), Some(EntityKind::Queue));
+        assert!(!probed);
+        let (r, probed) = resolve(&server, "events", Err(Error::Network("no".into()))).await;
+        assert_eq!(r.unwrap(), Some(EntityKind::Topic));
+        assert!(!probed);
+    }
+
+    #[tokio::test]
+    async fn resolve_kind_falls_back_to_the_probe_on_forbidden() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/locked")
+            .match_query(mockito::Matcher::Any)
+            .with_status(403)
+            .with_body("Forbidden")
+            .create_async()
+            .await;
+        let (r, probed) = resolve(&server, "locked", Ok(vec![])).await;
+        assert_eq!(r.unwrap(), Some(EntityKind::Queue));
+        assert!(probed);
+        let refused = Err(Error::Protocol(
+            "com.microsoft:peek-message returned 400: no".into(),
+        ));
+        let (r, _) = resolve(&server, "locked", refused).await;
+        assert_eq!(r.unwrap(), Some(EntityKind::Topic));
+        // A probe that cannot tell is Ok(None), not an error.
+        let (r, probed) = resolve(&server, "locked", Err(Error::Network("down".into()))).await;
+        assert_eq!(r.unwrap(), None);
+        assert!(probed);
+    }
+
+    #[tokio::test]
+    async fn resolve_kind_not_found_propagates_without_probing() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/ghost")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(include_str!("../tests/fixtures/empty_feed.xml"))
+            .create_async()
+            .await;
+        let (r, probed) = resolve(&server, "ghost", Ok(vec![])).await;
+        assert!(matches!(r, Err(Error::NotFound(_))));
+        assert!(!probed);
     }
 
     fn assert_send<T: Send>(_: &T) {}
