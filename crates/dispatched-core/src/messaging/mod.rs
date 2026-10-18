@@ -7,6 +7,7 @@ mod message;
 pub mod outgoing;
 pub mod peek;
 pub mod props;
+mod receiver;
 pub mod scan;
 pub mod sessions;
 pub mod summary;
@@ -27,6 +28,10 @@ pub use outgoing::{
     BodySource, CloneOptions, Cloned, Edits, MessageIdSource, OutgoingBody, OutgoingMessage,
 };
 pub use props::{PropType, TypedValue, parse_duration, parse_prop_arg, parse_when};
+pub use receiver::{
+    LockToken, ReceiveMode, ReceivedMessage, ReceiverSpec, SessionChoice, Settlement,
+    lock_token_from_tag,
+};
 pub use scan::{
     DEFAULT_SCAN_LIMIT, PeekOptions, PeekPage, PeekSource, SequenceCollection, StateCounts,
     collect_sequences, count_messages, last_sequence, peek_one, peek_tail, scan_messages,

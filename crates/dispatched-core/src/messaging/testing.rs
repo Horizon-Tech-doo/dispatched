@@ -2,6 +2,8 @@
 //! receive and settle (with policy confirmation) arrive in M2.
 
 use super::connection::ServiceBusConnection;
+use super::message::{PeekedMessage, PropValue};
+use super::receiver::{AmqpReceiver, LockToken, ReceivedMessage, ReceiverSpec, Settlement};
 use crate::{Error, Result};
 use fe2o3_amqp::link::receiver::CreditMode;
 use fe2o3_amqp::types::definitions::{
@@ -400,4 +402,165 @@ pub async fn drain(
         empty_passes = if pass == 0 { empty_passes + 1 } else { 0 };
     }
     Ok(drained)
+}
+
+/// What the M2a link-semantics probe observed (see [`probe_m2a_link_semantics`]).
+#[derive(Debug, Clone)]
+pub struct LinkProbe {
+    /// (a) Delivery count after a peek-lock receive and a link `released` (expected 0).
+    pub released_delivery_count: u32,
+    /// (b) Delivery count after a further receive and `settle(Abandon)` (expected 1).
+    pub abandoned_delivery_count: u32,
+    /// (c) Whether `update-disposition` completed a link-received message.
+    pub management_complete_removed: bool,
+    /// (c) The refusal, when `update-disposition` failed.
+    pub management_complete_error: Option<String>,
+    /// (d) Messages a receive-and-delete `receive(3, 2 s)` returned with 2 available.
+    pub drain_returned: usize,
+    /// (d) `drain_shortfall()` after that receive.
+    pub drain_credit_left: u32,
+    /// (d) Tagged messages still in the queue after closing and waiting 2 s.
+    pub left_after_drain: usize,
+}
+
+fn probe_tagged(m: &PeekedMessage, tag: &str) -> bool {
+    matches!(m.application_properties.get("probe"), Some(PropValue::String(s)) if s == tag)
+}
+
+/// Every message in `address` (all states), paged by sequence number.
+async fn peek_everything(
+    conn: &mut ServiceBusConnection,
+    address: &str,
+) -> Result<Vec<PeekedMessage>> {
+    let mut all = Vec::new();
+    let mut from = 0;
+    loop {
+        let page = super::peek::peek(conn, address, from, super::peek::MAX_PER_REQUEST).await?;
+        let Some(last) = page.last() else {
+            return Ok(all);
+        };
+        from = last.sequence_number + 1;
+        all.extend(page);
+    }
+}
+
+async fn peek_sequence(
+    conn: &mut ServiceBusConnection,
+    address: &str,
+    seq: i64,
+) -> Result<Option<PeekedMessage>> {
+    Ok(super::peek::peek(conn, address, seq, 1)
+        .await?
+        .into_iter()
+        .find(|m| m.sequence_number == seq))
+}
+
+/// Receive (peek-lock) until the message tagged `tag` arrives; others met on
+/// the way are released afterwards so the broker cannot hand them straight back.
+async fn receive_probe_message(rx: &mut AmqpReceiver, tag: &str) -> Result<ReceivedMessage> {
+    let mut others = Vec::new();
+    let mut found = None;
+    for _ in 0..50 {
+        let Some(m) = rx.receive(1, Duration::from_secs(10)).await?.pop() else {
+            break;
+        };
+        if probe_tagged(&m.message, tag) {
+            found = Some(m);
+            break;
+        }
+        others.extend(m.lock_token);
+    }
+    for token in others {
+        let _ = rx.release(token).await;
+    }
+    found.ok_or_else(|| Error::Timeout(format!("the probe message {tag} did not arrive")))
+}
+
+fn token_of(m: &ReceivedMessage) -> Result<LockToken> {
+    m.lock_token
+        .ok_or_else(|| Error::Protocol("a peek-lock delivery came without a lock token".into()))
+}
+
+/// Check the link semantics the M2a operations rest on, on `address` (the
+/// emulator's `m1a-browse`): (a) `released` leaves the delivery count alone,
+/// (b) abandon raises it, (c) `update-disposition` completes a link-received
+/// message, (d) a receive-and-delete drain returns what was available and
+/// removes nothing after it. Empties the queue first.
+pub async fn probe_m2a_link_semantics(
+    conn: &mut ServiceBusConnection,
+    address: &str,
+) -> Result<LinkProbe> {
+    drain(conn, address, Duration::from_secs(1)).await?;
+    let run = uuid::Uuid::new_v4().simple().to_string();
+    let tag_a = format!("{run}-a");
+    let tag_d = format!("{run}-d");
+    let settle_pause = Duration::from_secs(1);
+
+    send_text(conn, address, "m2a probe a", &[("probe", &tag_a)]).await?;
+    let mut rx = conn
+        .open_receiver(&ReceiverSpec::peek_lock(address))
+        .await?;
+
+    // (a) release over the link.
+    let m = receive_probe_message(&mut rx, &tag_a).await?;
+    let seq = m.message.sequence_number;
+    rx.release(token_of(&m)?).await?;
+    tokio::time::sleep(settle_pause).await;
+    let released_delivery_count = peek_sequence(conn, address, seq)
+        .await?
+        .ok_or_else(|| Error::Protocol(format!("(a) message {seq} vanished after release")))?
+        .delivery_count;
+
+    // (b) abandon through update-disposition (control case).
+    let m = receive_probe_message(&mut rx, &tag_a).await?;
+    rx.settle(token_of(&m)?, &Settlement::Abandon).await?;
+    tokio::time::sleep(settle_pause).await;
+    let abandoned_delivery_count = peek_sequence(conn, address, seq)
+        .await?
+        .ok_or_else(|| Error::Protocol(format!("(b) message {seq} vanished after abandon")))?
+        .delivery_count;
+
+    // (c) complete a link-received message through update-disposition.
+    let m = receive_probe_message(&mut rx, &tag_a).await?;
+    let token = token_of(&m)?;
+    let management_complete_error = rx
+        .settle(token, &Settlement::Complete)
+        .await
+        .err()
+        .map(|e| e.to_string());
+    tokio::time::sleep(settle_pause).await;
+    let management_complete_removed =
+        management_complete_error.is_none() && peek_sequence(conn, address, seq).await?.is_none();
+    if management_complete_error.is_some() {
+        // Clean up over the link; the probe reports the refusal above.
+        let _ = rx.settle_on_link(token, &Settlement::Complete).await;
+    }
+    rx.close().await;
+
+    // (d) receive-and-delete with more credit than messages.
+    send_text(conn, address, "m2a probe d1", &[("probe", &tag_d)]).await?;
+    send_text(conn, address, "m2a probe d2", &[("probe", &tag_d)]).await?;
+    let mut rd = conn
+        .open_receiver(&ReceiverSpec::receive_and_delete(address))
+        .await?;
+    let got = rd.receive(3, Duration::from_secs(2)).await?;
+    let drain_returned = got.len();
+    let drain_credit_left = rd.drain_shortfall();
+    rd.close().await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let left_after_drain = peek_everything(conn, address)
+        .await?
+        .iter()
+        .filter(|m| probe_tagged(m, &tag_d))
+        .count();
+
+    Ok(LinkProbe {
+        released_delivery_count,
+        abandoned_delivery_count,
+        management_complete_removed,
+        management_complete_error,
+        drain_returned,
+        drain_credit_left,
+        left_after_drain,
+    })
 }

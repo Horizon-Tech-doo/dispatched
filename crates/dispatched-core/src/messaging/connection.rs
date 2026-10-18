@@ -2,6 +2,7 @@
 //! plus cached management links per entity address.
 
 use super::management::{ManagementLink, SETUP_TIMEOUT, map_put_token_error};
+use super::receiver::{AmqpReceiver, ReceiverSpec, SessionChoice};
 use super::tokens_ledger::{LinkLru, TokenLedger, must_reattach};
 use crate::namespace::Namespace;
 use crate::{Error, Result};
@@ -122,6 +123,39 @@ impl ServiceBusConnection {
                 .forget(&self.ns.amqp_audience(&format!("{evicted}/$management")));
         }
         Ok(self.management.get_mut(address).expect("inserted above"))
+    }
+
+    /// Open a receiver for `spec`: put tokens for the address and its
+    /// `$management`, then attach the data link and a private management
+    /// link on this connection's session.
+    #[allow(dead_code)] // callers arrive with the operations (Task 12)
+    pub(crate) async fn open_receiver(&mut self, spec: &ReceiverSpec) -> Result<AmqpReceiver> {
+        self.authorize_receiver(&spec.address).await?;
+        AmqpReceiver::attach(&mut self.session, spec, None)
+            .await?
+            .ok_or_else(|| Error::Protocol(format!("attach receiver to {}", spec.address)))
+    }
+
+    /// Accept the next available session of `spec.address`, waiting at most
+    /// `wait`; `Ok(None)` when no session is available.
+    #[allow(dead_code)] // callers arrive with the operations (Task 12)
+    pub(crate) async fn try_accept_next(
+        &mut self,
+        spec: &ReceiverSpec,
+        wait: Duration,
+    ) -> Result<Option<AmqpReceiver>> {
+        self.authorize_receiver(&spec.address).await?;
+        let next = ReceiverSpec {
+            session: SessionChoice::NextAvailable,
+            ..spec.clone()
+        };
+        AmqpReceiver::attach(&mut self.session, &next, Some(wait)).await
+    }
+
+    async fn authorize_receiver(&mut self, address: &str) -> Result<()> {
+        self.ensure_authorized(address).await?;
+        self.ensure_authorized(&format!("{address}/$management"))
+            .await
     }
 
     /// The AMQP session (for data links).

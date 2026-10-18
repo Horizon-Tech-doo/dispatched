@@ -22,8 +22,10 @@ pub(crate) const SETUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Map an error the peer sent when refusing a link or operation, by its AMQP
 /// condition: `amqp:unauthorized-access` is a missing right (`Forbidden`),
-/// `amqp:not-found` is a missing entity (`NotFound(address)`); anything else
-/// stays a `Protocol` error.
+/// `amqp:not-found` is a missing entity (`NotFound(address)`),
+/// `com.microsoft:session-cannot-be-locked` is a session held by another
+/// receiver (`Conflict`), a lost message or session lock is `LockLost`, and
+/// `com.microsoft:timeout` is `Timeout`; anything else stays a `Protocol` error.
 pub(crate) fn map_remote_error(what: &str, address: &str, err: &AmqpRemoteError) -> Error {
     let detail = err
         .description
@@ -38,7 +40,22 @@ pub(crate) fn map_remote_error(what: &str, address: &str, err: &AmqpRemoteError)
         ErrorCondition::Custom(sym) if sym.as_str() == "com.microsoft:entity-not-found" => {
             Error::NotFound(address.to_string())
         }
+        ErrorCondition::Custom(sym) if sym.as_str() == TIMEOUT => {
+            Error::Timeout(format!("{what}: {detail}"))
+        }
+        ErrorCondition::Custom(sym) => condition_error(what, sym.as_str(), &detail)
+            .unwrap_or_else(|| Error::Protocol(format!("{what}: {detail}"))),
         _ => Error::Protocol(format!("{what}: {detail}")),
+    }
+}
+
+/// The outcome of a next-available session attach: a `Timeout` means no
+/// session was available, which is `Ok(None)`, not an error.
+pub(crate) fn next_available_outcome<T>(r: Result<T>) -> Result<Option<T>> {
+    match r {
+        Ok(v) => Ok(Some(v)),
+        Err(Error::Timeout(_)) => Ok(None),
+        Err(e) => Err(e),
     }
 }
 
@@ -183,6 +200,7 @@ impl MgmtResponse {
 const MESSAGE_LOCK_LOST: &str = "com.microsoft:message-lock-lost";
 const SESSION_LOCK_LOST: &str = "com.microsoft:session-lock-lost";
 const SESSION_CANNOT_BE_LOCKED: &str = "com.microsoft:session-cannot-be-locked";
+const TIMEOUT: &str = "com.microsoft:timeout";
 
 fn lock_lost(operation: &str, detail: &str) -> Error {
     Error::LockLost(format!(
@@ -425,6 +443,43 @@ mod tests {
         assert!(matches!(
             map_remote_error("attach sender to q/$management", "q", &err),
             Error::Protocol(m) if m == "attach sender to q/$management: boom"
+        ));
+    }
+
+    // The real carrier for a locked session is the attach refusal.
+    #[test]
+    fn attach_refusals_map_to_conflict_lock_lost_and_no_session() {
+        let remote = |c: &str| {
+            AmqpRemoteError::new(
+                ErrorCondition::Custom(Symbol::from(c)),
+                Some("x".to_string()),
+                None,
+            )
+        };
+        assert!(
+            matches!(map_remote_error("attach receiver to s", "s", &remote("com.microsoft:session-cannot-be-locked")), Error::Conflict(m) if m.contains("locked by another receiver"))
+        );
+        assert!(matches!(
+            map_remote_error("x", "s", &remote("com.microsoft:message-lock-lost")),
+            Error::LockLost(_)
+        ));
+        assert!(matches!(
+            map_remote_error("x", "s", &remote("com.microsoft:session-lock-lost")),
+            Error::LockLost(_)
+        ));
+        let timeout = map_remote_error(
+            "attach receiver to s",
+            "s",
+            &remote("com.microsoft:timeout"),
+        );
+        assert!(matches!(timeout, Error::Timeout(_)));
+        assert!(
+            matches!(next_available_outcome::<()>(Err(timeout)), Ok(None)),
+            "next-available: no session is not an error"
+        );
+        assert!(matches!(
+            next_available_outcome::<()>(Err(Error::Network("down".into()))),
+            Err(Error::Network(_))
         ));
     }
 
