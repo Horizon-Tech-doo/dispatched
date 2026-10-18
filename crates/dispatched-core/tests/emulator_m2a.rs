@@ -137,6 +137,8 @@ async fn peek_ours(
 /// [`peek_ours`] again until it shows `want` messages or 10 s pass, returning the last peek.
 /// The emulator applies some writes (topic fan-out, dead-lettering) a moment after it
 /// accepted them, so a count read at once can be short; the caller still asserts it exactly.
+/// Only for messages that should appear: once the count is reached, one more peek after
+/// 500 ms is returned, so a late extra copy (a duplicate send) still fails the caller.
 async fn peek_want(
     explorer: &Explorer,
     entity: &EntityPath,
@@ -147,14 +149,16 @@ async fn peek_want(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         let got = peek_ours(explorer, entity, view, filter.clone()).await;
-        if got.len() == want || tokio::time::Instant::now() >= deadline {
-            if got.len() != want {
-                eprintln!(
-                    "GATE-NOTE peek of {} {view:?} still shows {} of {want} after 10 s",
-                    entity.base(),
-                    got.len()
-                );
-            }
+        if got.len() == want {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            return peek_ours(explorer, entity, view, filter).await;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            eprintln!(
+                "GATE-NOTE peek of {} {view:?} still shows {} of {want} after 10 s",
+                entity.base(),
+                got.len()
+            );
             return got;
         }
         eprintln!(
@@ -188,17 +192,21 @@ fn assert_logged(log: &ActivityLog, op_id: &str, outcome: Outcome, step: &str) {
             ..Default::default()
         })
         .unwrap();
+    let started: Vec<_> = entries
+        .iter()
+        .filter(|e| e.phase == Phase::Started)
+        .collect();
+    let finished: Vec<_> = entries
+        .iter()
+        .filter(|e| e.phase == Phase::Finished)
+        .collect();
     assert!(
-        entries
-            .iter()
-            .any(|e| e.phase == Phase::Started && e.outcome == Outcome::Pending),
-        "{step}: no started entry for {op_id}: {entries:?}"
+        matches!(started.as_slice(), [e] if e.outcome == Outcome::Pending),
+        "{step}: not exactly one started entry for {op_id}: {entries:?}"
     );
     assert!(
-        entries
-            .iter()
-            .any(|e| e.phase == Phase::Finished && e.outcome == outcome),
-        "{step}: no finished entry with {outcome:?} for {op_id}: {entries:?}"
+        matches!(finished.as_slice(), [e] if e.outcome == outcome),
+        "{step}: not exactly one finished entry with {outcome:?} for {op_id}: {entries:?}"
     );
 }
 
@@ -439,15 +447,9 @@ async fn m2a_operate() {
         "3: the unknown number is missing"
     );
     assert!(
-        peek_want(
-            &explorer,
-            &q,
-            PeekView::Scheduled,
-            ours(&run, Some("s3")),
-            0
-        )
-        .await
-        .is_empty(),
+        peek_ours(&explorer, &q, PeekView::Scheduled, ours(&run, Some("s3")))
+            .await
+            .is_empty(),
         "3: cancelled"
     );
 
@@ -455,6 +457,7 @@ async fn m2a_operate() {
     testing::drain(&mut conn, OPS, IDLE).await.unwrap();
     seed(&mut conn, OPS, &run, "s4", 4).await;
     let mut settled = Vec::new();
+    let mut manual_dlq_seq = None;
     for how in [
         Settlement::Abandon,
         Settlement::Defer,
@@ -512,6 +515,7 @@ async fn m2a_operate() {
                 .expect("4: in the DLQ");
                 assert_eq!(dl.dead_letter_reason.as_deref(), Some("Manual"));
                 assert_eq!(dl.dead_letter_description.as_deref(), Some("gate"));
+                manual_dlq_seq = Some(dl.sequence_number);
             }
             Settlement::Complete => {
                 for view in [PeekView::Active, PeekView::Deferred] {
@@ -540,6 +544,19 @@ async fn m2a_operate() {
     eprintln!("5 receive-and-delete notes: {:?}", out.report.notes);
     logged_report(&log, &out.report, "5 receive-and-delete");
     assert_eq!(out.messages.len(), 3, "5: exactly three returned");
+    for m in &out.messages {
+        assert_eq!(
+            (
+                m.application_properties.get("run"),
+                m.application_properties.get("tag")
+            ),
+            (
+                Some(&PropValue::String(run.clone())),
+                Some(&PropValue::String("s5".into()))
+            ),
+            "5: a message of this step"
+        );
+    }
     assert_eq!(
         peek_ours(&explorer, &q, PeekView::Active, ours(&run, Some("s5")))
             .await
@@ -647,15 +664,9 @@ async fn m2a_operate() {
     logged_report(&log, &report, "9 move");
     assert_eq!(report.succeeded(), 2, "9: {report:?}");
     assert!(
-        peek_want(
-            &explorer,
-            &q,
-            PeekView::DeadLetter,
-            ours(&run, Some("s9")),
-            0
-        )
-        .await
-        .is_empty(),
+        peek_ours(&explorer, &q, PeekView::DeadLetter, ours(&run, Some("s9")))
+            .await
+            .is_empty(),
         "9: none of this run left in the DLQ"
     );
     let mut at_target: Vec<String> = peek_want(
@@ -812,10 +823,21 @@ async fn m2a_operate() {
     logged_report(&log, &report, "11 delete in session");
     assert_eq!(report.succeeded(), 1, "11: {report:?}");
     assert!(
-        peek_want(&explorer, &sq, PeekView::Active, in_b, 0)
+        peek_ours(&explorer, &sq, PeekView::Active, in_b)
             .await
             .is_empty(),
         "11: session B's message gone"
+    );
+    let in_a = MessageFilter {
+        session_id: Some(a.clone()),
+        ..ours(&run, Some("s11"))
+    };
+    assert_eq!(
+        peek_ours(&explorer, &sq, PeekView::Active, in_a)
+            .await
+            .len(),
+        2,
+        "11: session A untouched by the delete in session B"
     );
 
     // 12. DLQ summary.
@@ -823,14 +845,21 @@ async fn m2a_operate() {
         .dlq_summary(&q, SubQueue::DeadLetter)
         .await
         .unwrap();
+    // The DLQ was drained at the start, so the Manual/gate group is exactly this run's one
+    // step 4 message.
+    let manual_dlq_seq = manual_dlq_seq.expect("4: dead-lettered");
+    let groups: Vec<_> = summary
+        .groups
+        .iter()
+        .filter(|g| {
+            g.reason.as_deref() == Some("Manual") && g.description.as_deref() == Some("gate")
+        })
+        .collect();
     assert!(
-        summary
-            .groups
-            .iter()
-            .any(|g| g.reason.as_deref() == Some("Manual")
-                && g.description.as_deref() == Some("gate")
-                && g.count >= 1),
-        "12: {summary:?}"
+        matches!(groups.as_slice(), [g] if g.count == 1
+            && g.first_sequence == manual_dlq_seq
+            && g.last_sequence == manual_dlq_seq),
+        "12: one Manual/gate group holding this run's message {manual_dlq_seq}: {summary:?}"
     );
 
     // 13. Purge across entities, bounded by the plan.
@@ -953,15 +982,19 @@ async fn m2a_operate() {
     assert_eq!(plan.total.bound(), Some(1));
     let report = denying.purge(vec![plan], &np, &cancel).await.unwrap();
     eprintln!("16 denied purge: {report:?}");
+    // The shape the CLI's purge exit code reads (Task 20): one Skipped item without a
+    // sequence number whose reason starts "denied: ", and one "(denied)" op note.
     assert!(
         matches!(
             report.items.as_slice(),
-            [i] if matches!(&i.outcome, ItemOutcome::Skipped { reason } if reason.to_lowercase().contains("denied"))
+            [i] if i.sequence_number.is_none()
+                && i.entity == PURGE_A
+                && matches!(&i.outcome, ItemOutcome::Skipped { reason } if reason.starts_with("denied: "))
         ),
         "16: one skipped item for the denial: {report:?}"
     );
     assert!(
-        report.notes.iter().any(|n| n.ends_with("(denied)")),
+        matches!(report.notes.as_slice(), [n] if n.starts_with(&format!("{PURGE_A}: activity op op-")) && n.ends_with(" (denied)")),
         "16: {:?}",
         report.notes
     );
@@ -973,10 +1006,10 @@ async fn m2a_operate() {
         })
         .unwrap();
     assert!(
-        entries
-            .iter()
-            .any(|e| e.phase == Phase::Finished && e.outcome == Outcome::Denied),
-        "16: a denied entry: {entries:?}"
+        matches!(entries.as_slice(), [e] if e.phase == Phase::Finished
+            && e.outcome == Outcome::Denied
+            && e.error.as_deref().is_some_and(|m| m.starts_with("denied: "))),
+        "16: exactly one denied entry and no started entry: {entries:?}"
     );
     assert_eq!(
         peek_ours(&explorer, &pa, PeekView::Active, everything())

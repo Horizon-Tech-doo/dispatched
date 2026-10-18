@@ -596,29 +596,35 @@ pub async fn renew_lock_once(
             .await?
             .pop()
             .ok_or_else(|| Error::Timeout(format!("no message arrived in {address} to renew")))?;
+        // Without a token there is nothing to abandon; `close` releases what the link holds.
         let token = token_of(&m)?;
-        let before = m.message.locked_until.ok_or_else(|| {
-            Error::Protocol("a peek-lock delivery came without a locked-until time".into())
-        })?;
-        // Let the clock move on, so a renewed lock ends measurably later.
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        let renewed = rx.renew_lock(&[token]).await;
-        let abandoned = rx.settle(token, &Settlement::Abandon).await;
-        let after = match renewed?.as_slice() {
-            [after] => *after,
-            other => {
+        let checked = async {
+            let before = m.message.locked_until.ok_or_else(|| {
+                Error::Protocol("a peek-lock delivery came without a locked-until time".into())
+            })?;
+            // Let the clock move on, so a renewed lock ends measurably later.
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let after = match rx.renew_lock(&[token]).await?.as_slice() {
+                [after] => *after,
+                other => {
+                    return Err(Error::Protocol(format!(
+                        "renew-lock answered {} expiries for 1 lock",
+                        other.len()
+                    )));
+                }
+            };
+            if after <= before {
                 return Err(Error::Protocol(format!(
-                    "renew-lock answered {} expiries for 1 lock",
-                    other.len()
+                    "the renewed lock ends at {after}, not after {before}"
                 )));
             }
-        };
-        abandoned?;
-        if after <= before {
-            return Err(Error::Protocol(format!(
-                "the renewed lock ends at {after}, not after {before}"
-            )));
+            Ok((before, after))
         }
+        .await;
+        // Abandon on every path once the token is known, so no stale lock outlives the call.
+        let abandoned = rx.settle(token, &Settlement::Abandon).await;
+        let (before, after) = checked?;
+        abandoned?;
         Ok((before, after))
     }
     .await;

@@ -989,6 +989,28 @@ mod tests {
     }
 
     #[test]
+    fn accepted_session_reads_a_plain_or_described_id() {
+        use serde_amqp::described::Described;
+        use serde_amqp::descriptor::Descriptor;
+        let with = |v: Value| {
+            let mut filter = FilterSet::new();
+            filter.insert(Symbol::from(SESSION_FILTER), v);
+            Source::builder().address("s").filter(filter).build()
+        };
+        let plain = with(Value::String("A".into()));
+        assert_eq!(accepted_session(Some(&plain)), Some("A".to_string()));
+        let described = with(Value::Described(Box::new(Described {
+            descriptor: Descriptor::Code(0x0000_0137_0000_000C),
+            value: Value::String("B".into()),
+        })));
+        assert_eq!(accepted_session(Some(&described)), Some("B".to_string()));
+        assert_eq!(accepted_session(Some(&with(Value::Null))), None);
+        let none = Source::builder().address("s").build();
+        assert_eq!(accepted_session(Some(&none)), None);
+        assert_eq!(accepted_session(None), None);
+    }
+
+    #[test]
     fn session_filter_is_the_plain_session_id_or_null() {
         // Plain values, as the Azure SDKs send them: the broker's gateway reads a described
         // filter value as a selector and refuses the attach (seen on the emulator, Task 22).
