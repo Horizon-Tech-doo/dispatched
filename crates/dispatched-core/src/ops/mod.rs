@@ -5,6 +5,7 @@
 //! The public methods are thin wrappers. Every loop and per-message decision lives in a
 //! `pub(crate)` function over a [`MessagingBackend`], so tests drive it with the fake broker.
 
+pub mod import;
 pub mod locate;
 pub mod purge;
 pub mod receive;
@@ -14,6 +15,7 @@ pub mod send;
 pub mod session_state;
 
 pub use crate::messaging::sender::send_target;
+pub use import::ImportOptions;
 pub use locate::LocateLimits;
 pub use purge::{PurgePlan, PurgeScope};
 pub use receive::{ReceiveAction, ReceiveOutcome, ReceiveRequest};
@@ -315,6 +317,29 @@ impl Operator {
             async move {
                 let mut p = explorer.plane();
                 send::run(&mut p, &req, progress, cancel).await
+            }
+        })
+        .await
+    }
+
+    /// Send messages read from an export file to a queue or topic, one sender for the job.
+    /// The confirmation lists the source sequence numbers.
+    pub async fn import(
+        &self,
+        target: String,
+        messages: Vec<crate::ImportedMessage>,
+        opts: ImportOptions,
+        progress: &dyn Progress,
+        cancel: &CancellationToken,
+    ) -> Result<JobReport> {
+        let address = Target::new(send_target(&target)?, SubQueue::Active);
+        let sources: Vec<i64> = messages.iter().filter_map(|m| m.source_sequence).collect();
+        let op = Operation::import(address, messages.len() as u64).with_sequences(&sources);
+        gated(&self.gate, &op, || {
+            let explorer = self.explorer.clone();
+            async move {
+                let mut p = explorer.plane();
+                import::run(&mut p, &target, messages, &opts, progress, cancel).await
             }
         })
         .await
