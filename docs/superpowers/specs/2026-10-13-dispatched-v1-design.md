@@ -394,7 +394,7 @@ Every milestone ends with a tagged release and a live-verification note.
 | **M1 — Browse** | Profiles, lazy tree, search, counts and colouring, dashboard, entity Overview, all peek views, filters (property and body), viewer, export. App shell and visual system set (impeccable and taste). |
 | **M2 — Operate** | Receive and settle, composer, clone & resend, DLQ resubmit/move/delete, purge, scheduled cancel, deferred, sessions and session state, Jobs drawer, Activity log, production checks. |
 | **M3 — Manage** | Full entity, rule and SAS-policy CRUD; status changes; duplicate and rename; XML import/export (incumbent-compatible); listener. |
-| **M4 — Agents + v1.0** | Full CLI and MCP surfaces, impeccable audit of every screen, installers for all targets, docs, README with "Migrating from ServiceBusExplorer". |
+| **M4 — Agents + v1.0** | Full CLI and MCP surfaces, impeccable audit of every screen, installers for all targets, store builds (a Microsoft Store MSIX that the Store signs, and a sandboxed Mac App Store build with the updater off and no Azure CLI sign-in), docs, README with "Migrating from ServiceBusExplorer". |
 
 ## 12. Open items (not blocking the plan)
 
