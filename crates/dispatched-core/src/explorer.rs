@@ -1,9 +1,12 @@
 //! The facade every surface uses: one namespace, lazily-opened AMQP connection.
 
+use crate::messaging::backend::{Each, LockReceiver, MessageSender, MessagingBackend};
+use crate::messaging::receiver::{AmqpReceiver, ReceiverSpec, SessionChoice};
+use crate::messaging::sender::AmqpSender;
 use crate::messaging::{
-    PeekOptions, PeekPage, PeekSource, PeekedMessage, SequenceCollection, ServiceBusConnection,
-    StateCounts, collect_sequences, count_messages, peek_one, peek_tail, scan_messages, sessions,
-    sessions::SessionListing,
+    OutgoingMessage, PeekOptions, PeekPage, PeekSource, PeekedMessage, SequenceCollection,
+    ServiceBusConnection, StateCounts, collect_sequences, count_messages, peek_one, peek_tail,
+    scan_messages, sessions, sessions::SessionListing,
 };
 use crate::mgmt::{
     EntityCounts, EntityDetails, EntityKind, ManagementClient, QueueInfo, RuleInfo,
@@ -14,6 +17,8 @@ use crate::{Error, Result};
 use async_trait::async_trait;
 use horizon_azure_kit::safety::CancellationToken;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+use time::OffsetDateTime;
 use tokio::sync::{Mutex, MutexGuard};
 
 type Guard<'a, C> = MutexGuard<'a, Option<C>>;
@@ -325,11 +330,184 @@ impl Explorer {
         }
     }
 
+    /// The message plane over the cached connection (see [`ExplorerPlane`]).
+    #[allow(dead_code)] // callers arrive with the operations (Task 12)
+    pub(crate) fn plane(&self) -> ExplorerPlane<'_> {
+        ExplorerPlane(self)
+    }
+
     /// Close the AMQP connection, if open, for good: reads started before, including long
     /// per-batch scans, stop at their next batch with [`Error::Cancelled`], and later reads fail
     /// the same way without connecting. Management (HTTP) calls are unaffected.
     pub async fn close(&self) {
         self.amqp.close(&self.ns).await;
+    }
+}
+
+/// The explorer's message plane. Each call locks the cached connection for that call only; links
+/// it opens live on after the lock is released. Opening a link may retry once on a
+/// connection-level error ([`retry_open_only`]); schedule and cancel run once, and a broken
+/// connection is dropped and the error returned. Peeks lock per batch ([`PerBatch`]).
+pub(crate) struct ExplorerPlane<'a>(&'a Explorer);
+
+impl ExplorerPlane<'_> {
+    async fn open_sender_once(&self, address: &str) -> Result<AmqpSender> {
+        let mut guard = self.0.connection().await?;
+        let result = guard.as_mut().expect("opened").open_sender(address).await;
+        drop_if_broken(&self.0.ns, &mut guard, result).await
+    }
+
+    async fn open_receiver_once(
+        &self,
+        spec: &ReceiverSpec,
+        wait: Duration,
+    ) -> Result<Option<AmqpReceiver>> {
+        let mut guard = self.0.connection().await?;
+        let conn = guard.as_mut().expect("opened");
+        let result = match spec.session {
+            SessionChoice::NextAvailable => conn.try_accept_next(spec, wait).await,
+            _ => conn.open_receiver(spec).await.map(Some),
+        };
+        drop_if_broken(&self.0.ns, &mut guard, result).await
+    }
+
+    /// The management description's `requires_session` and counts of `entity`; `None` when
+    /// the identity may not read it.
+    async fn description(
+        &self,
+        entity: &EntityPath,
+    ) -> Result<Option<(bool, Option<EntityCounts>)>> {
+        let found = match &entity.subscription {
+            None => self
+                .0
+                .mgmt
+                .get_queue(&entity.entity)
+                .await
+                .map(|q| (q.requires_session, q.counts)),
+            Some(sub) => self
+                .0
+                .mgmt
+                .list_subscriptions(&entity.entity)
+                .await
+                .and_then(|subs| {
+                    subs.into_iter()
+                        .find(|s| s.name.eq_ignore_ascii_case(sub))
+                        .map(|s| (s.requires_session, s.counts))
+                        .ok_or_else(|| Error::NotFound(format!("subscription `{}`", entity.base())))
+                }),
+        };
+        match found {
+            Ok(d) => Ok(Some(d)),
+            Err(Error::Forbidden { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+#[async_trait]
+impl PeekSource for ExplorerPlane<'_> {
+    async fn peek_batch(
+        &mut self,
+        address: &str,
+        from: i64,
+        max: u32,
+    ) -> Result<Vec<PeekedMessage>> {
+        self.0.per_batch().peek_batch(address, from, max).await
+    }
+
+    async fn peek_session_batch(
+        &mut self,
+        address: &str,
+        session_id: &str,
+        from: i64,
+        max: u32,
+    ) -> Result<Vec<PeekedMessage>> {
+        self.0
+            .per_batch()
+            .peek_session_batch(address, session_id, from, max)
+            .await
+    }
+}
+
+#[async_trait]
+impl MessagingBackend for ExplorerPlane<'_> {
+    async fn open_sender(&mut self, address: &str) -> Result<Box<dyn MessageSender>> {
+        let sender = plane_call(PlaneOp::OpenSender, |_| self.open_sender_once(address)).await?;
+        Ok(Box::new(sender))
+    }
+
+    async fn schedule(
+        &mut self,
+        address: &str,
+        batch: &[OutgoingMessage],
+        at: OffsetDateTime,
+        each: Each<'_, i64>,
+    ) -> Result<()> {
+        debug_assert!(!retry_open_only(PlaneOp::Schedule));
+        let mut guard = self.0.connection().await?;
+        let result = guard
+            .as_mut()
+            .expect("opened")
+            .schedule(address, batch, at, each)
+            .await;
+        drop_if_broken(&self.0.ns, &mut guard, result).await
+    }
+
+    async fn cancel_scheduled(
+        &mut self,
+        address: &str,
+        seqs: &[i64],
+        each: Each<'_, ()>,
+    ) -> Result<()> {
+        debug_assert!(!retry_open_only(PlaneOp::CancelScheduled));
+        let mut guard = self.0.connection().await?;
+        let result = guard
+            .as_mut()
+            .expect("opened")
+            .cancel_scheduled(address, seqs, each)
+            .await;
+        drop_if_broken(&self.0.ns, &mut guard, result).await
+    }
+
+    async fn open_receiver(
+        &mut self,
+        spec: &ReceiverSpec,
+        wait: Duration,
+    ) -> Result<Option<Box<dyn LockReceiver>>> {
+        let receiver = plane_call(PlaneOp::OpenReceiver, |_| {
+            self.open_receiver_once(spec, wait)
+        })
+        .await?;
+        Ok(receiver.map(|r| Box::new(r) as Box<dyn LockReceiver>))
+    }
+
+    async fn entity_counts(&mut self, entity: &EntityPath) -> Result<Option<EntityCounts>> {
+        Ok(self
+            .description(entity)
+            .await?
+            .and_then(|(_, counts)| counts))
+    }
+
+    async fn requires_session(&mut self, entity: &EntityPath) -> Result<Option<bool>> {
+        Ok(self
+            .description(entity)
+            .await?
+            .map(|(sessions, _)| sessions))
+    }
+
+    async fn session_ids(&mut self, address: &str) -> Result<Vec<String>> {
+        let broker = with_one_retry(|_| async {
+            let mut guard = self.0.connection().await?;
+            let result = sessions::list_session_ids(guard.as_mut().expect("opened"), address).await;
+            drop_if_broken(&self.0.ns, &mut guard, result).await
+        })
+        .await;
+        let tally = with_one_retry(|_| async {
+            sessions::tally_sessions(&mut self.0.per_batch(), address, Explorer::COUNT_CAP).await
+        })
+        .await;
+        let listing = sessions::combine(broker, tally)?;
+        Ok(listing.sessions.into_iter().map(|s| s.id).collect())
     }
 }
 
@@ -470,6 +648,44 @@ pub fn retry_after(err: &Error, attempt: u32) -> bool {
             err,
             Error::Auth(_) | Error::Network(_) | Error::Protocol(_) | Error::Timeout(_)
         )
+}
+
+/// A message-plane call, for the retry policy.
+#[allow(dead_code)] // callers arrive with the operations (Task 12)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlaneOp {
+    /// Attach a sender link.
+    OpenSender,
+    /// Attach a receiver link.
+    OpenReceiver,
+    /// `schedule-message`.
+    Schedule,
+    /// `cancel-scheduled-message`.
+    CancelScheduled,
+}
+
+/// Whether `op` may run once more on a fresh connection.
+/// Only opening a link (no broker side effect) is retried; a mutation that failed on a broken
+/// connection is reported, never repeated.
+#[allow(dead_code)] // callers arrive with the operations (Task 12)
+pub(crate) fn retry_open_only(op: PlaneOp) -> bool {
+    match op {
+        PlaneOp::OpenSender | PlaneOp::OpenReceiver => true,
+        PlaneOp::Schedule | PlaneOp::CancelScheduled => false,
+    }
+}
+
+/// Run `f` once, or with one retry when [`retry_open_only`] allows it for `op`.
+async fn plane_call<T, F, Fut>(op: PlaneOp, mut f: F) -> Result<T>
+where
+    F: FnMut(u32) -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    if retry_open_only(op) {
+        with_one_retry(f).await
+    } else {
+        f(0).await
+    }
 }
 
 /// Run `f(attempt)` and, if [`retry_after`] says so, run it once more.
@@ -889,6 +1105,40 @@ mod tests {
             Err(Error::Cancelled)
         ));
         assert!(matches!(e.list_sessions(&q).await, Err(Error::Cancelled)));
+    }
+
+    /// Compile-time check: the plane is a `MessagingBackend` the jobs can take as a trait
+    /// object. Never called.
+    #[allow(dead_code)]
+    fn the_plane_is_an_object_safe_backend(e: &Explorer) {
+        let mut plane = e.plane();
+        let _: &mut dyn MessagingBackend = &mut plane;
+    }
+
+    #[test]
+    fn only_opening_a_link_may_retry() {
+        assert!(retry_open_only(PlaneOp::OpenSender) && retry_open_only(PlaneOp::OpenReceiver));
+        assert!(!retry_open_only(PlaneOp::Schedule) && !retry_open_only(PlaneOp::CancelScheduled));
+    }
+
+    #[test]
+    fn a_failed_mutation_drops_a_broken_connection() {
+        let mut slot = Some("conn");
+        assert_eq!(
+            take_if_broken(&mut slot, &Err::<(), _>(Error::Network("reset".into()))),
+            Some("conn")
+        );
+        assert!(
+            slot.is_none(),
+            "the next call opens a fresh connection; this one is not repeated"
+        );
+        let mut slot = Some("conn");
+        assert_eq!(
+            take_if_broken(&mut slot, &Err::<(), _>(Error::LockLost("x".into()))),
+            None,
+            "a healthy service answered"
+        );
+        assert!(slot.is_some());
     }
 
     #[tokio::test]

@@ -1,15 +1,18 @@
 //! AMQP data plane: connection, CBS, management link, message model, peek.
 
+pub(crate) mod backend;
 mod connection;
+#[cfg(test)]
+pub(crate) mod fake;
 pub mod lockops;
 mod management;
 mod message;
 pub mod outgoing;
 pub mod peek;
 pub mod props;
-mod receiver;
+pub(crate) mod receiver;
 pub mod scan;
-mod sender;
+pub(crate) mod sender;
 pub mod sessions;
 pub mod summary;
 pub mod template;

@@ -2,14 +2,14 @@
 //! plus cached management links per entity address.
 
 use super::lockops::{
-    CANCEL_SCHEDULED, SCHEDULE, ScheduleEntry, cancel_scheduled_request, parse_schedule_response,
+    CANCEL_SCHEDULED, SCHEDULE, cancel_scheduled_request, parse_schedule_response,
     parse_status_only, schedule_request,
 };
 use super::management::map_sender_attach_error;
 use super::management::{ManagementLink, SETUP_TIMEOUT, map_put_token_error};
 use super::outgoing::OutgoingMessage;
 use super::receiver::{AmqpReceiver, ReceiverSpec, SessionChoice};
-use super::sender::{AmqpSender, encode_for_schedule, run_chunks, send_target};
+use super::sender::{AmqpSender, Chunked, encode_for_schedule, send_target};
 use super::tokens_ledger::{LinkLru, TokenLedger, must_reattach};
 use crate::namespace::Namespace;
 use crate::{Error, Result};
@@ -203,7 +203,7 @@ impl ServiceBusConnection {
         address: &str,
         batch: &[OutgoingMessage],
         at: OffsetDateTime,
-        each: impl FnMut(usize, Result<i64>),
+        mut each: impl FnMut(usize, Result<i64>),
     ) -> Result<()> {
         let target = send_target(address)?.base();
         let now = OffsetDateTime::now_utc();
@@ -211,16 +211,17 @@ impl ServiceBusConnection {
             .iter()
             .map(|m| encode_for_schedule(m, at, now))
             .collect();
-        run_chunks(
-            entries,
-            async |chunk: &[ScheduleEntry]| {
+        let mut chunks = Chunked::new(entries, &mut each);
+        while let Some(chunk) = chunks.next_chunk() {
+            let outcome = async {
                 let link = self.management(&target).await?;
                 let resp = link.call(SCHEDULE, schedule_request(chunk)).await?;
                 parse_schedule_response(resp)
-            },
-            each,
-        )
-        .await
+            }
+            .await;
+            chunks.finish(outcome, &mut each)?;
+        }
+        Ok(())
     }
 
     /// Cancel scheduled messages by sequence number, 100 per request.
@@ -231,22 +232,23 @@ impl ServiceBusConnection {
         &mut self,
         address: &str,
         seqs: &[i64],
-        each: impl FnMut(usize, Result<()>),
+        mut each: impl FnMut(usize, Result<()>),
     ) -> Result<()> {
         let target = send_target(address)?.base();
-        run_chunks(
-            seqs.iter().map(|s| Ok(*s)).collect(),
-            async |chunk: &[i64]| {
+        let mut chunks = Chunked::new(seqs.iter().map(|s| Ok(*s)).collect(), &mut each);
+        while let Some(chunk) = chunks.next_chunk() {
+            let outcome = async {
                 let link = self.management(&target).await?;
                 let resp = link
                     .call(CANCEL_SCHEDULED, cancel_scheduled_request(chunk))
                     .await?;
                 parse_status_only(resp, CANCEL_SCHEDULED)?;
                 Ok(vec![(); chunk.len()])
-            },
-            each,
-        )
-        .await
+            }
+            .await;
+            chunks.finish(outcome, &mut each)?;
+        }
+        Ok(())
     }
 
     async fn authorize_receiver(&mut self, address: &str) -> Result<()> {

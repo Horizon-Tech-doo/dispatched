@@ -79,51 +79,94 @@ pub(crate) fn encode_for_schedule(
 }
 
 /// Run `items` through `call` in chunks of [`REQUEST_CHUNK`], reporting a result per
-/// original index. See the tests for the contract.
+/// original index. See the tests for the contract; [`Chunked`] is the same loop for callers
+/// that cannot pass an async closure (one inside an `async_trait` future must be `Send`
+/// for every lifetime, which rustc cannot prove for a closure borrowing its captures).
+#[cfg(test)]
 pub(crate) async fn run_chunks<T, R>(
     items: Vec<Result<T>>,
     mut call: impl AsyncFnMut(&[T]) -> Result<Vec<R>>,
     mut each: impl FnMut(usize, Result<R>),
 ) -> Result<()> {
-    // Items that failed to encode are reported at once and left out of the requests.
-    let mut indexes = Vec::with_capacity(items.len());
-    let mut values = Vec::with_capacity(items.len());
-    for (i, item) in items.into_iter().enumerate() {
-        match item {
-            Ok(v) => {
-                indexes.push(i);
-                values.push(v);
+    let mut chunks = Chunked::new(items, &mut each);
+    while let Some(chunk) = chunks.next_chunk() {
+        let outcome = call(chunk).await;
+        chunks.finish(outcome, &mut each)?;
+    }
+    Ok(())
+}
+
+/// Items split into request-sized chunks, with the result of each chunk reported per
+/// original index. Drive it with `next_chunk` / `finish` until `next_chunk` is `None` or
+/// `finish` fails.
+pub(crate) struct Chunked<T> {
+    indexes: Vec<usize>,
+    values: Vec<T>,
+    first: usize,
+}
+
+impl<T> Chunked<T> {
+    /// Items that failed to encode are reported through `each` at once and left out of
+    /// the requests.
+    pub(crate) fn new<R>(items: Vec<Result<T>>, each: &mut impl FnMut(usize, Result<R>)) -> Self {
+        let mut indexes = Vec::with_capacity(items.len());
+        let mut values = Vec::with_capacity(items.len());
+        for (i, item) in items.into_iter().enumerate() {
+            match item {
+                Ok(v) => {
+                    indexes.push(i);
+                    values.push(v);
+                }
+                Err(e) => each(i, Err(e)),
             }
-            Err(e) => each(i, Err(e)),
+        }
+        Self {
+            indexes,
+            values,
+            first: 0,
         }
     }
-    for (c, chunk) in chunks(&values).enumerate() {
-        let first = c * REQUEST_CHUNK;
-        let ids = &indexes[first..first + chunk.len()];
-        let outcome = match call(chunk).await {
-            Ok(got) if got.len() == chunk.len() => Ok(got),
+
+    /// The next chunk to send, `None` when all were sent.
+    pub(crate) fn next_chunk(&self) -> Option<&[T]> {
+        chunks(&self.values[self.first..]).next()
+    }
+
+    /// Report the outcome of the chunk `next_chunk` gave. A failure (or a result count that
+    /// does not match the chunk) fails that chunk's items and every later one, and is
+    /// returned.
+    pub(crate) fn finish<R>(
+        &mut self,
+        outcome: Result<Vec<R>>,
+        each: &mut impl FnMut(usize, Result<R>),
+    ) -> Result<()> {
+        let len = (self.values.len() - self.first).min(REQUEST_CHUNK);
+        let outcome = match outcome {
+            Ok(got) if got.len() == len => Ok(got),
             Ok(got) => Err(Error::Protocol(format!(
                 "the broker handled {} messages but returned {} results; they may have taken effect, check the entity before retrying",
-                chunk.len(),
+                len,
                 got.len()
             ))),
             Err(e) => Err(e),
         };
         match outcome {
             Ok(got) => {
-                for (i, r) in ids.iter().zip(got) {
+                for (i, r) in self.indexes[self.first..self.first + len].iter().zip(got) {
                     each(*i, Ok(r));
                 }
+                self.first += len;
+                Ok(())
             }
             Err(e) => {
-                for i in &indexes[first..] {
+                for i in &self.indexes[self.first..] {
                     each(*i, Err(copy_error(&e)));
                 }
-                return Err(e);
+                self.first = self.values.len();
+                Err(e)
             }
         }
     }
-    Ok(())
 }
 
 /// What the pipeline needs from a link; the real one wraps [`Sender`].
@@ -313,7 +356,7 @@ fn link_error(e: &SendError) -> Error {
 }
 
 /// `Error` is not `Clone`; every message after a link failure gets a copy.
-fn copy_error(e: &Error) -> Error {
+pub(crate) fn copy_error(e: &Error) -> Error {
     match e {
         Error::Timeout(m) => Error::Timeout(m.clone()),
         Error::NotFound(m) => Error::NotFound(m.clone()),

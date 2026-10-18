@@ -347,6 +347,16 @@ fn annotation_string(m: &Message<Body<Value>>, key: &str) -> Option<String> {
     }
 }
 
+/// `dead_letter_reason` and `dead_letter_description` from the `DeadLetterReason` and
+/// `DeadLetterErrorDescription` application properties (string values only). The one
+/// derivation, shared by decoding and the test broker.
+pub(crate) fn dead_letter_fields(
+    props: &BTreeMap<String, PropValue>,
+) -> (Option<String>, Option<String>) {
+    let text = |key: &str| props.get(key).and_then(|v| v.as_str()).map(str::to_string);
+    (text("DeadLetterReason"), text("DeadLetterErrorDescription"))
+}
+
 /// Convert an AMQP message into the display model.
 pub fn decode_message(m: Message<Body<Value>>) -> PeekedMessage {
     let sequence_number = match annotation(&m, "x-opt-sequence-number") {
@@ -366,14 +376,7 @@ pub fn decode_message(m: Message<Body<Value>>) -> PeekedMessage {
             application_properties.insert(k.clone(), simple_to_prop(v));
         }
     }
-    let dead_letter_reason = application_properties
-        .get("DeadLetterReason")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-    let dead_letter_description = application_properties
-        .get("DeadLetterErrorDescription")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
+    let (dead_letter_reason, dead_letter_description) = dead_letter_fields(&application_properties);
     let body = match &m.body {
         Body::Data(batch) => {
             let bytes: Vec<u8> = batch.iter().flat_map(|d| d.0.iter().copied()).collect();
