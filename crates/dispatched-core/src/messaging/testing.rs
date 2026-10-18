@@ -421,6 +421,12 @@ pub struct LinkProbe {
     pub drain_credit_left: u32,
     /// (d) Tagged messages still in the queue after closing and waiting 2 s.
     pub left_after_drain: usize,
+    /// (d) A message sent after the drained `receive` returned, while the link
+    /// stayed open for `DRAIN_GRACE` plus 1 s, is still in the queue after
+    /// close: the drained link stayed quiet (expected true).
+    pub late_arrival_kept: bool,
+    /// (d) Receive-and-delete messages `close` reported as removed but not returned (expected 0).
+    pub removed_unreturned: usize,
 }
 
 fn probe_tagged(m: &PeekedMessage, tag: &str) -> bool {
@@ -484,8 +490,9 @@ fn token_of(m: &ReceivedMessage) -> Result<LockToken> {
 /// Check the link semantics the M2a operations rest on, on `address` (the
 /// emulator's `m1a-browse`): (a) `released` leaves the delivery count alone,
 /// (b) abandon raises it, (c) `update-disposition` completes a link-received
-/// message, (d) a receive-and-delete drain returns what was available and
-/// removes nothing after it. Empties the queue first.
+/// message, (d) a receive-and-delete drain returns what was available, and
+/// a message sent after it while the link stays open is not removed. Empties
+/// the queue first and last.
 pub async fn probe_m2a_link_semantics(
     conn: &mut ServiceBusConnection,
     address: &str,
@@ -546,13 +553,18 @@ pub async fn probe_m2a_link_semantics(
     let got = rd.receive(3, Duration::from_secs(2)).await?;
     let drain_returned = got.len();
     let drain_credit_left = rd.drain_shortfall();
-    rd.close().await;
+    // A late arrival while the drained link is still open: a link that kept
+    // credit would remove it.
+    let tag_late = format!("{run}-late");
+    send_text(conn, address, "m2a probe late", &[("probe", &tag_late)]).await?;
+    tokio::time::sleep(super::receiver::DRAIN_GRACE + Duration::from_secs(1)).await;
+    let removed_unreturned = rd.close().await;
     tokio::time::sleep(Duration::from_secs(2)).await;
-    let left_after_drain = peek_everything(conn, address)
-        .await?
-        .iter()
-        .filter(|m| probe_tagged(m, &tag_d))
-        .count();
+    let after = peek_everything(conn, address).await?;
+    let left_after_drain = after.iter().filter(|m| probe_tagged(m, &tag_d)).count();
+    let late_arrival_kept = after.iter().any(|m| probe_tagged(m, &tag_late));
+    // Leave the queue empty for the next gate.
+    drain(conn, address, Duration::from_secs(1)).await?;
 
     Ok(LinkProbe {
         released_delivery_count,
@@ -562,5 +574,7 @@ pub async fn probe_m2a_link_semantics(
         drain_returned,
         drain_credit_left,
         left_after_drain,
+        late_arrival_kept,
+        removed_unreturned,
     })
 }

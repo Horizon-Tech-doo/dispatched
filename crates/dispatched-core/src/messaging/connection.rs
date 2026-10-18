@@ -130,6 +130,11 @@ impl ServiceBusConnection {
     /// link on this connection's session.
     #[allow(dead_code)] // callers arrive with the operations (Task 12)
     pub(crate) async fn open_receiver(&mut self, spec: &ReceiverSpec) -> Result<AmqpReceiver> {
+        if spec.session == SessionChoice::NextAvailable {
+            return Err(Error::Invalid(
+                "a next-available session receiver is opened with try_accept_next, which can wait for a session".into(),
+            ));
+        }
         self.authorize_receiver(&spec.address).await?;
         AmqpReceiver::attach(&mut self.session, spec, None)
             .await?
@@ -137,13 +142,20 @@ impl ServiceBusConnection {
     }
 
     /// Accept the next available session of `spec.address`, waiting at most
-    /// `wait`; `Ok(None)` when no session is available.
+    /// `wait`; `Ok(None)` when no session is available. `spec.session` must
+    /// be `None` or `NextAvailable` (a named session is opened with
+    /// [`open_receiver`](Self::open_receiver)).
     #[allow(dead_code)] // callers arrive with the operations (Task 12)
     pub(crate) async fn try_accept_next(
         &mut self,
         spec: &ReceiverSpec,
         wait: Duration,
     ) -> Result<Option<AmqpReceiver>> {
+        if let SessionChoice::Id(_) = spec.session {
+            return Err(Error::Invalid(
+                "try_accept_next takes the next available session; open a named session with open_receiver".into(),
+            ));
+        }
         self.authorize_receiver(&spec.address).await?;
         let next = ReceiverSpec {
             session: SessionChoice::NextAvailable,

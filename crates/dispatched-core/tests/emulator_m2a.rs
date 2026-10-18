@@ -52,4 +52,12 @@ async fn m2a_link_semantics() {
         p.left_after_drain, 0,
         "(d) nothing arrived or was left after the drain"
     );
+    assert!(
+        p.late_arrival_kept,
+        "(d) a message sent after the drain was removed while the link stayed open: the drain did not stop the link"
+    );
+    assert_eq!(
+        p.removed_unreturned, 0,
+        "(d) close found no removed-but-unreturned messages"
+    );
 }

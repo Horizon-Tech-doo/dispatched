@@ -33,7 +33,7 @@ use fe2o3_amqp::types::primitives::{OrderedMap, Symbol, Value};
 use fe2o3_amqp::{Delivery, Receiver};
 use serde_amqp::described::Described;
 use serde_amqp::descriptor::Descriptor;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt::Display;
 use std::future::Future;
 use std::time::Duration;
@@ -49,6 +49,9 @@ const CREDIT_CHUNK: u32 = 50;
 
 /// Upper bound for closing a link; an unresponsive peer must not hang callers.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long `close` waits for late deliveries before closing.
+const CLOSE_SWEEP_IDLE: Duration = Duration::from_millis(200);
 
 /// How a receiver settles what it receives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -327,10 +330,91 @@ async fn bounded<T, E: Display>(
     }
 }
 
+fn bad_tag() -> Error {
+    Error::Protocol("a peek-lock delivery carried no 16-byte lock token; it was released".into())
+}
+
 fn not_held() -> Error {
     Error::Invalid(
         "this receiver holds no message with that lock token; it was settled, released or never received here".into(),
     )
+}
+
+/// What a receiver has taken off the link but not yet handed to a caller,
+/// plus the shortfall and failure of the last `receive`. All of a `receive`'s
+/// bookkeeping lives here, so a `receive` future dropped half-way (a `select!`
+/// with a cancel token) loses nothing: its messages are returned by the next
+/// call, or counted by `close`.
+#[derive(Debug, Default)]
+struct Intake {
+    ready: VecDeque<ReceivedMessage>,
+    shortfall: u32,
+    /// A failure after some messages were taken; those are returned first and
+    /// the failure is reported by the next call (whatever kind it is).
+    pending_error: Option<Error>,
+}
+
+impl Intake {
+    /// What a `receive` of `max` returns without touching the link: buffered
+    /// messages behind a pending failure, or the failure itself.
+    fn settled_before(&mut self, max: u32) -> Option<Result<Vec<ReceivedMessage>>> {
+        let e = self.pending_error.take()?;
+        if self.ready.is_empty() {
+            Some(Err(e))
+        } else {
+            // The failure stays pending until everything buffered was returned.
+            self.pending_error = Some(e);
+            Some(Ok(self.take(max)))
+        }
+    }
+
+    /// Start a `receive` of up to `max`: buffered messages count toward it.
+    fn begin(&mut self, max: u32) -> CreditPlan {
+        self.shortfall = 0;
+        let buffered = u64::try_from(self.ready.len()).unwrap_or(u64::MAX);
+        CreditPlan::new(u64::from(max).saturating_sub(buffered), CREDIT_CHUNK)
+    }
+
+    /// Credit was granted: until the receive ends, all of it counts as shortfall.
+    fn granted(&mut self, plan: &CreditPlan) {
+        self.shortfall = plan.outstanding;
+    }
+
+    /// A delivery came off the link (`None`: one that cannot be returned).
+    fn arrived(&mut self, plan: &mut CreditPlan, message: Option<ReceivedMessage>) {
+        plan.delivered(1);
+        self.ready.extend(message);
+        self.shortfall = plan.outstanding;
+    }
+
+    /// The receive failed: credit still out is the shortfall; buffered
+    /// messages are returned and the failure waits for the next call.
+    fn stop(&mut self, plan: &CreditPlan, e: Error, max: u32) -> Result<Vec<ReceivedMessage>> {
+        self.shortfall = plan.outstanding;
+        if self.ready.is_empty() {
+            Err(e)
+        } else {
+            tracing::warn!(error = %e, "receive stopped early; returning what arrived");
+            self.pending_error = Some(e);
+            Ok(self.take(max))
+        }
+    }
+
+    /// The receive ended normally with `credit_left` (0 when it was spent).
+    fn finish(&mut self, plan: &CreditPlan, credit_left: u32, max: u32) -> Vec<ReceivedMessage> {
+        self.shortfall = plan.shortfall(credit_left);
+        self.take(max)
+    }
+
+    fn take(&mut self, max: u32) -> Vec<ReceivedMessage> {
+        let n = self.ready.len().min(max as usize);
+        self.ready.drain(..n).collect()
+    }
+
+    /// Drop a buffered peek-lock message (it was settled or released).
+    fn forget(&mut self, token: LockToken) {
+        self.ready.retain(|m| m.lock_token != Some(token));
+    }
 }
 
 /// A receiver link with its own management link on the same session.
@@ -341,10 +425,9 @@ pub(crate) struct AmqpReceiver {
     management: ManagementLink,
     session_id: Option<String>,
     held: HashMap<LockToken, Delivery<Body<Value>>>,
-    shortfall: u32,
-    /// A link failure after some deliveries of a `receive` were taken; those
-    /// are returned and the failure is reported by the next call.
-    pending_error: Option<Error>,
+    /// Peek-lock deliveries without a usable lock token, released at the next chance.
+    unkeyed: Vec<Delivery<Body<Value>>>,
+    intake: Intake,
 }
 
 impl AmqpReceiver {
@@ -433,8 +516,8 @@ impl AmqpReceiver {
             management,
             session_id,
             held: HashMap::new(),
-            shortfall: 0,
-            pending_error: None,
+            unkeyed: Vec::new(),
+            intake: Intake::default(),
         }))
     }
 
@@ -454,25 +537,31 @@ impl AmqpReceiver {
     }
 
     /// Receive up to `max` messages, waiting at most `wait` (plus the drain
-    /// grace time when credit is still outstanding then).
+    /// grace time when credit is still outstanding then). Messages buffered
+    /// by an earlier call (one that failed or was cancelled) come first and
+    /// count toward `max`.
+    ///
+    /// Cancel-safe: every delivery goes into the receiver's buffer as it
+    /// arrives and leaves it only on return, so dropping this future loses
+    /// nothing; [`drain_shortfall`](Self::drain_shortfall) then still counts
+    /// the credit that was out.
     pub(crate) async fn receive(
         &mut self,
         max: u32,
         wait: Duration,
     ) -> Result<Vec<ReceivedMessage>> {
-        if let Some(e) = self.pending_error.take() {
-            return Err(e);
+        if let Some(out) = self.intake.settled_before(max) {
+            return out;
         }
-        self.shortfall = 0;
-        let mut plan = CreditPlan::new(u64::from(max), CREDIT_CHUNK);
-        let mut out = Vec::new();
+        let mut plan = self.intake.begin(max);
         let deadline = Instant::now() + wait;
         loop {
             if plan.outstanding == 0 {
                 let grant = plan.next_grant();
                 if grant == 0 {
-                    return Ok(out);
+                    return Ok(self.intake.finish(&plan, 0, max));
                 }
+                self.intake.granted(&plan);
                 if let Err(e) = bounded(
                     "grant credit",
                     SETUP_TIMEOUT,
@@ -480,17 +569,22 @@ impl AmqpReceiver {
                 )
                 .await
                 {
-                    return self.failed(out, e);
+                    return self.stop(&plan, e, max).await;
                 }
             }
             match tokio::time::timeout_at(deadline, self.receiver.recv::<Body<Value>>()).await {
                 Err(_) => break,
-                Ok(Err(e)) => return self.failed(out, Error::Protocol(format!("receive: {e}"))),
+                Ok(Err(e)) => {
+                    return self
+                        .stop(&plan, Error::Protocol(format!("receive: {e}")), max)
+                        .await;
+                }
                 Ok(Ok(delivery)) => {
-                    plan.delivered(1);
-                    match self.take(delivery).await {
-                        Ok(m) => out.push(m),
-                        Err(e) => return self.failed(out, e),
+                    let taken = self.take(delivery);
+                    let failed = taken.is_err();
+                    self.intake.arrived(&mut plan, taken.ok());
+                    if failed {
+                        return self.stop(&plan, bad_tag(), max).await;
                     }
                 }
             }
@@ -498,50 +592,68 @@ impl AmqpReceiver {
         // `wait` passed with credit outstanding: drain, then read until the
         // credit is spent or the grace time passes without a delivery.
         if let Err(e) = bounded("drain", SETUP_TIMEOUT, self.receiver.drain()).await {
-            self.shortfall = plan.outstanding;
-            return self.failed(out, e);
+            return self.stop(&plan, e, max).await;
         }
         let mut last = Instant::now();
         loop {
             let left = self.receiver.credit().min(plan.outstanding);
             if plan.drain_done(left, last.elapsed()) {
-                self.shortfall = plan.shortfall(left);
-                return Ok(out);
+                return Ok(self.intake.finish(&plan, left, max));
             }
             match tokio::time::timeout_at(last + DRAIN_GRACE, self.receiver.recv::<Body<Value>>())
                 .await
             {
                 Err(_) => {}
                 Ok(Err(e)) => {
-                    self.shortfall = plan.shortfall(left);
-                    return self.failed(out, Error::Protocol(format!("receive: {e}")));
+                    return self
+                        .stop(&plan, Error::Protocol(format!("receive: {e}")), max)
+                        .await;
                 }
                 Ok(Ok(delivery)) => {
-                    plan.delivered(1);
                     last = Instant::now();
-                    match self.take(delivery).await {
-                        Ok(m) => out.push(m),
-                        Err(e) => return self.failed(out, e),
+                    let taken = self.take(delivery);
+                    let failed = taken.is_err();
+                    self.intake.arrived(&mut plan, taken.ok());
+                    if failed {
+                        return self.stop(&plan, bad_tag(), max).await;
                     }
                 }
             }
         }
     }
 
-    /// A failure during `receive`: with nothing taken yet it is returned;
-    /// otherwise what was taken is returned (receive-and-delete messages are
-    /// already removed) and the failure waits for the next call.
-    fn failed(&mut self, out: Vec<ReceivedMessage>, e: Error) -> Result<Vec<ReceivedMessage>> {
-        if out.is_empty() {
-            Err(e)
-        } else {
-            tracing::warn!(error = %e, "receive stopped early; returning what arrived");
-            self.pending_error = Some(e);
-            Ok(out)
-        }
+    /// End a `receive` early (see [`Intake::stop`]), releasing deliveries
+    /// that carried no lock token.
+    async fn stop(
+        &mut self,
+        plan: &CreditPlan,
+        e: Error,
+        max: u32,
+    ) -> Result<Vec<ReceivedMessage>> {
+        let out = self.intake.stop(plan, e, max);
+        self.release_unkeyed().await;
+        out
     }
 
-    async fn take(&mut self, delivery: Delivery<Body<Value>>) -> Result<ReceivedMessage> {
+    async fn release_unkeyed(&mut self) -> u64 {
+        let mut released = 0;
+        for delivery in std::mem::take(&mut self.unkeyed) {
+            if bounded("release", SETUP_TIMEOUT, self.receiver.release(&delivery))
+                .await
+                .is_ok()
+            {
+                released += 1;
+            }
+        }
+        released
+    }
+
+    /// Decode a delivery; a peek-lock one is held under its lock token. Not
+    /// async, so nothing can be lost between the link and the buffer.
+    fn take(
+        &mut self,
+        delivery: Delivery<Body<Value>>,
+    ) -> std::result::Result<ReceivedMessage, ()> {
         match self.mode {
             ReceiveMode::ReceiveAndDelete => Ok(ReceivedMessage {
                 message: decode_message(delivery.into_message()),
@@ -549,12 +661,8 @@ impl AmqpReceiver {
             }),
             ReceiveMode::PeekLock => {
                 let Some(token) = lock_token_from_tag(delivery.delivery_tag()) else {
-                    let _ =
-                        bounded("release", SETUP_TIMEOUT, self.receiver.release(&delivery)).await;
-                    return Err(Error::Protocol(
-                        "a peek-lock delivery carried no 16-byte lock token; it was released"
-                            .into(),
-                    ));
+                    self.unkeyed.push(delivery);
+                    return Err(());
                 };
                 let message = decode_message(delivery.message().clone());
                 self.held.insert(token, delivery);
@@ -566,16 +674,26 @@ impl AmqpReceiver {
         }
     }
 
-    /// Credit still outstanding when the last `receive`'s drain ended by
-    /// [`DRAIN_GRACE`] instead of spent credit; 0 otherwise. On a
-    /// receive-and-delete link up to this many more messages may have been
-    /// removed after the wait.
+    /// Credit still outstanding when the last `receive` ended: by the drain
+    /// grace time instead of spent credit, by a failure, or by being
+    /// cancelled; 0 when all its credit was used. On a receive-and-delete
+    /// link up to this many more messages may have been removed after the
+    /// wait.
     pub(crate) fn drain_shortfall(&self) -> u32 {
-        self.shortfall
+        self.intake.shortfall
+    }
+
+    /// Messages taken off the link but not yet returned by `receive` (left
+    /// by a failed or cancelled call). On a receive-and-delete link they are
+    /// already removed from the entity.
+    pub(crate) fn buffered(&self) -> usize {
+        self.intake.ready.len()
     }
 
     /// Settle a peek-lock message through `update-disposition` (the only
-    /// settlement answer fe2o3 surfaces). A lost lock is `LockLost`.
+    /// settlement answer fe2o3 surfaces). A lost lock is `LockLost`. Any
+    /// other failure (timeout, network) leaves the outcome unknown: the
+    /// message may already be settled, so callers report it and never retry.
     pub(crate) async fn settle(&mut self, token: LockToken, how: &Settlement) -> Result<()> {
         if self.mode == ReceiveMode::ReceiveAndDelete {
             return Err(Error::Invalid(
@@ -591,6 +709,7 @@ impl AmqpReceiver {
         if matches!(result, Ok(()) | Err(Error::LockLost(_))) {
             // Settled (or gone) at the broker: drop it without a link disposition.
             self.held.remove(&token);
+            self.intake.forget(token);
         }
         result
     }
@@ -603,6 +722,7 @@ impl AmqpReceiver {
         how: &Settlement,
     ) -> Result<()> {
         let delivery = self.held.remove(&token).ok_or_else(not_held)?;
+        self.intake.forget(token);
         let what = "settle on the link";
         match outcome_for(how) {
             LinkOutcome::Accepted => {
@@ -635,24 +755,34 @@ impl AmqpReceiver {
     /// Unlock a held message (AMQP `released`).
     pub(crate) async fn release(&mut self, token: LockToken) -> Result<()> {
         let delivery = self.held.remove(&token).ok_or_else(not_held)?;
+        self.intake.forget(token);
         bounded("release", SETUP_TIMEOUT, self.receiver.release(&delivery)).await
     }
 
-    /// Release every held message; returns how many were released.
+    /// Release every held message, buffered ones included; returns how many
+    /// were released.
     pub(crate) async fn release_all(&mut self) -> Result<u64> {
-        let mut released = 0;
+        // Buffered peek-lock messages are held too; once released they must not be returned.
+        self.intake.ready.retain(|m| m.lock_token.is_none());
+        let mut released = self.release_unkeyed().await;
+        let mut failed = 0u64;
         let mut first_error = None;
         for (_, delivery) in self.held.drain() {
             match bounded("release", SETUP_TIMEOUT, self.receiver.release(&delivery)).await {
                 Ok(()) => released += 1,
                 Err(e) => {
+                    failed += 1;
                     first_error.get_or_insert(e);
                 }
             }
         }
         match first_error {
             Some(e) if released == 0 => Err(e),
-            _ => Ok(released),
+            Some(e) => {
+                tracing::warn!(released, failed, error = %e, "some held messages could not be released; their locks expire");
+                Ok(released)
+            }
+            None => Ok(released),
         }
     }
 
@@ -737,11 +867,36 @@ impl AmqpReceiver {
         self.management.call_for_link(op, body, Some(&name)).await
     }
 
-    /// Release what is held (closing a link with locks held counts as a lost
-    /// lock and raises the delivery count), then close both links.
-    pub(crate) async fn close(mut self) {
+    /// Stop the link, release what is held (closing a link with locks held
+    /// counts as a lost lock and raises the delivery count), then close both
+    /// links. Deliveries the broker sent after the last `receive` are swept
+    /// first: peek-lock ones are released.
+    ///
+    /// Returns how many receive-and-delete messages were removed from the
+    /// entity but never returned to a caller (those [`buffered`](Self::buffered)
+    /// plus any swept here); callers report them. Always 0 for peek-lock.
+    pub(crate) async fn close(mut self) -> usize {
+        if bounded("drain", CLOSE_TIMEOUT, self.receiver.drain())
+            .await
+            .is_ok()
+        {
+            while let Ok(Ok(delivery)) =
+                tokio::time::timeout(CLOSE_SWEEP_IDLE, self.receiver.recv::<Body<Value>>()).await
+            {
+                if let Ok(m) = self.take(delivery) {
+                    self.intake.ready.push_back(m);
+                }
+            }
+        }
         if let Err(e) = self.release_all().await {
             tracing::warn!(error = %e, "releasing held messages before closing failed");
+        }
+        let unreturned = self.intake.ready.len();
+        if unreturned > 0 {
+            tracing::warn!(
+                unreturned,
+                "receive-and-delete messages were removed but not returned"
+            );
         }
         if tokio::time::timeout(CLOSE_TIMEOUT, self.receiver.close())
             .await
@@ -750,6 +905,7 @@ impl AmqpReceiver {
             tracing::warn!("closing a receiver link timed out; dropped it");
         }
         close_management(self.management).await;
+        unreturned
     }
 }
 
@@ -919,5 +1075,101 @@ mod tests {
                 .get("disposition-status"),
             Some(&Value::String("defered".into()))
         );
+    }
+    fn received(seq: i64) -> ReceivedMessage {
+        ReceivedMessage {
+            message: crate::messaging::test_message(seq),
+            lock_token: None,
+        }
+    }
+
+    fn seqs(v: &[ReceivedMessage]) -> Vec<i64> {
+        v.iter().map(|m| m.message.sequence_number).collect()
+    }
+
+    #[test]
+    fn buffered_messages_come_first_and_count_toward_max() {
+        let mut intake = Intake::default();
+        intake.ready.extend([received(1), received(2)]);
+        // receive(3): only 1 more is wanted from the link.
+        let mut plan = intake.begin(3);
+        assert_eq!(plan.next_grant(), 1);
+        intake.granted(&plan);
+        intake.arrived(&mut plan, Some(received(3)));
+        assert_eq!(plan.next_grant(), 0);
+        assert_eq!(seqs(&intake.finish(&plan, 0, 3)), [1, 2, 3]);
+        assert_eq!(intake.shortfall, 0);
+        // More buffered than wanted: no credit, the rest stays buffered.
+        intake.ready.extend([received(4), received(5)]);
+        let mut plan = intake.begin(1);
+        assert_eq!(plan.next_grant(), 0);
+        assert_eq!(seqs(&intake.finish(&plan, 0, 1)), [4]);
+        assert_eq!(seqs(&intake.ready.iter().cloned().collect::<Vec<_>>()), [5]);
+    }
+
+    #[test]
+    fn an_early_failure_keeps_the_outstanding_credit_as_shortfall() {
+        let mut intake = Intake::default();
+        let mut plan = intake.begin(5);
+        assert_eq!(plan.next_grant(), 5);
+        intake.granted(&plan);
+        intake.arrived(&mut plan, Some(received(1)));
+        let out = intake
+            .stop(&plan, Error::Network("down".into()), 5)
+            .unwrap();
+        assert_eq!(seqs(&out), [1], "what arrived is returned");
+        assert_eq!(
+            intake.shortfall, 4,
+            "credit still out is never reported as 0"
+        );
+        // The failure is reported by the next call.
+        assert!(matches!(
+            intake.settled_before(5),
+            Some(Err(Error::Network(_)))
+        ));
+        // A failure before anything arrived is returned at once, with the shortfall.
+        let mut plan = intake.begin(2);
+        plan.next_grant();
+        intake.granted(&plan);
+        assert!(
+            intake
+                .stop(&plan, Error::Network("down".into()), 2)
+                .is_err()
+        );
+        assert_eq!(intake.shortfall, 2);
+    }
+
+    #[test]
+    fn a_cancelled_receive_leaves_its_messages_for_the_next_call() {
+        let mut intake = Intake::default();
+        // A receive(2) that took one delivery and was then dropped (no finish).
+        {
+            let mut plan = intake.begin(2);
+            plan.next_grant();
+            intake.granted(&plan);
+            intake.arrived(&mut plan, Some(received(7)));
+        }
+        assert_eq!(
+            intake.shortfall, 1,
+            "the cancelled call's credit still counts"
+        );
+        // The next receive(1) returns it without asking the link for more.
+        assert!(intake.settled_before(1).is_none());
+        let mut plan = intake.begin(1);
+        assert_eq!(plan.next_grant(), 0);
+        assert_eq!(seqs(&intake.finish(&plan, 0, 1)), [7]);
+    }
+
+    #[test]
+    fn released_or_settled_messages_leave_the_buffer() {
+        let mut intake = Intake::default();
+        let t = LockToken(Uuid::from_u128(9));
+        intake.ready.push_back(ReceivedMessage {
+            message: crate::messaging::test_message(1),
+            lock_token: Some(t),
+        });
+        intake.ready.push_back(received(2));
+        intake.forget(t);
+        assert_eq!(seqs(&intake.take(5)), [2]);
     }
 }
