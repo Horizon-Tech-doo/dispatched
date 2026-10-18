@@ -78,15 +78,19 @@ pub(crate) fn session_required_error(address: &str) -> Error {
     Error::Invalid(format!("{address} {SESSION_REQUIRED}"))
 }
 
+/// Whether a refusal's description says the entity requires sessions (not the reverse refusal,
+/// "an entity that does not require sessions", for a session receiver on a plain entity).
+fn says_sessions_required(text: &str) -> bool {
+    let t = text.to_ascii_lowercase();
+    t.contains("requires sessions") && !t.contains("not require")
+}
+
 /// Whether `e` refuses a receiver because the entity needs sessions: the mapped error of
 /// [`session_required_error`], or, as a fallback, any error whose text says "requires sessions".
 pub(crate) fn is_session_required(e: &Error) -> bool {
     match e {
         Error::Invalid(m) if m.ends_with(SESSION_REQUIRED) => true,
-        e => e
-            .to_string()
-            .to_ascii_lowercase()
-            .contains("requires sessions"),
+        e => says_sessions_required(&e.to_string()),
     }
 }
 
@@ -104,7 +108,7 @@ pub(crate) fn map_receiver_attach_error(
                 && err
                     .description
                     .as_deref()
-                    .is_some_and(|d| d.to_ascii_lowercase().contains("session")) =>
+                    .is_some_and(says_sessions_required) =>
         {
             session_required_error(address)
         }
@@ -533,6 +537,19 @@ mod tests {
             !crate::explorer::retry_after(&e, 0),
             "not retried, keeps the connection"
         );
+        // The reverse refusal (a session receiver on a plain entity) is not session-required.
+        let reverse = ReceiverAttachError::RemoteClosedWithError(remote(
+            AmqpError::NotAllowed,
+            Some(
+                "It is not possible for an entity that does not require sessions to create a sessionful message receiver.",
+            ),
+        ));
+        let e = map_receiver_attach_error("q", "q", reverse);
+        assert!(
+            matches!(&e, Error::Protocol(m) if !m.contains("open a session receiver")),
+            "{e:?}"
+        );
+        assert!(!is_session_required(&e));
         // Another not-allowed refusal stays what it was.
         let other =
             ReceiverAttachError::RemoteClosedWithError(remote(AmqpError::NotAllowed, Some("no")));

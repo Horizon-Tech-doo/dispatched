@@ -253,6 +253,8 @@ pub struct Operation {
     sequences: Vec<i64>,
     /// The selection matched only within this many examined messages.
     matched_within: Option<u64>,
+    /// A purge's deferred count stopped at its cap: at least this many are deferred.
+    deferred_at_least: Option<u64>,
 }
 
 fn messages(n: u64) -> String {
@@ -270,6 +272,7 @@ impl Operation {
             lock_search: false,
             sequences: Vec::new(),
             matched_within: None,
+            deferred_at_least: None,
         }
     }
 
@@ -445,6 +448,12 @@ impl Operation {
         self
     }
 
+    /// Say that the purge's deferred count is a lower bound (its peek stopped at the cap).
+    pub fn deferred_at_least(mut self, n: u64) -> Self {
+        self.deferred_at_least = Some(n);
+        self
+    }
+
     /// Mark the operation as finding its messages with a peek-lock search: the sentence then says
     /// that examined messages stay locked while it runs.
     pub fn searched(mut self) -> Self {
@@ -549,6 +558,12 @@ impl Operation {
                 if let CountEstimate::AtLeast(n) = self.count {
                     s.push_str(&format!(
                         " (at least {} are there; run purge again for the rest)",
+                        count_text(n)
+                    ));
+                }
+                if let Some(n) = self.deferred_at_least {
+                    s.push_str(&format!(
+                        "; deferred messages: at least {} (the count stopped at its cap)",
                         count_text(n)
                     ));
                 }
@@ -1004,6 +1019,19 @@ mod tests {
             format!(
                 "Delete 21 messages (sequence numbers {listed} and 1 more) from orders/$DeadLetterQueue on prod-weu"
             )
+        );
+    }
+
+    #[test]
+    fn a_capped_deferred_count_says_at_least() {
+        let op = Operation::purge(
+            Target::all(EntityPath::queue("orders")),
+            CountEstimate::AtLeast(3),
+        )
+        .deferred_at_least(0);
+        assert_eq!(
+            op.summary(&prod()),
+            "Remove up to 3 messages from orders (active, deferred and dead-lettered) on prod-weu (at least 3 are there; run purge again for the rest); deferred messages: at least 0 (the count stopped at its cap). Scheduled messages are kept; cancel them with `scheduled cancel --all`"
         );
     }
 

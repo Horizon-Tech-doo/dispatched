@@ -74,6 +74,9 @@ pub struct PurgePlan {
     pub per_queue: Vec<(SubQueue, CountEstimate)>,
     /// Deferred messages to remove (scope `All` only), counted by peek.
     pub deferred: u64,
+    /// The deferred peek stopped at [`PURGE_COUNT_CAP`]: `deferred` is a lower bound, and more
+    /// deferred messages may lie beyond the messages examined.
+    pub deferred_truncated: bool,
     /// The whole purge: what the gate confirms and the most it removes.
     pub total: CountEstimate,
     /// Whether the entity is session-enabled; `None` when management cannot say.
@@ -91,7 +94,17 @@ impl PurgePlan {
 
     /// The operation the gate confirms for this plan.
     pub fn operation(&self) -> Operation {
-        Operation::purge(self.target(), self.total)
+        let op = Operation::purge(self.target(), self.total);
+        if self.deferred_truncated {
+            op.deferred_at_least(self.deferred)
+        } else {
+            op
+        }
+    }
+
+    /// The deferred count: `AtLeast` when its peek stopped at the cap.
+    pub fn deferred_estimate(&self) -> CountEstimate {
+        peeked_exact(self.deferred, self.deferred_truncated)
     }
 
     /// The most messages the plan removes; refused when the total or a line is not bounded
@@ -201,18 +214,17 @@ pub(crate) async fn plan<B: MessagingBackend + ?Sized>(
         (PurgeScope::All, Some(m)) => m.deferred,
         _ => 0,
     };
+    let deferred_truncated = scope == PurgeScope::All && main.as_ref().is_some_and(|m| m.truncated);
     let mut parts: Vec<CountEstimate> = per_queue.iter().map(|(_, c)| *c).collect();
-    if deferred > 0 {
-        parts.push(peeked_exact(
-            deferred,
-            main.as_ref().is_some_and(|m| m.truncated),
-        ));
+    if deferred > 0 || deferred_truncated {
+        parts.push(peeked_exact(deferred, deferred_truncated));
     }
     Ok(PurgePlan {
         entity: entity.clone(),
         scope,
         per_queue,
         deferred,
+        deferred_truncated,
         total: combined(&parts),
         requires_session,
     })
@@ -621,25 +633,34 @@ pub(crate) async fn run<B: MessagingBackend + ?Sized>(
     } else {
         0
     };
+    let mut left_over = Leftover {
+        more: false,
+        // Deferred messages beyond the plan's capped count may remain even with no allowance.
+        truncated: plan.scope == PurgeScope::All && plan.deferred_truncated,
+    };
+    let mut removed = 0;
     if !cancelled && allowance > 0 {
         if cancel.is_cancelled() {
             cancelled = true;
         } else {
-            let (d, left_over) = p.deferred(allowance).await;
+            let (d, found) = p.deferred(allowance).await;
             cancelled |= d.cancelled;
-            let address = plan.entity.address(SubQueue::Active);
-            match (d.cancelled, left_over.more, left_over.truncated) {
-                (true, ..) => {}
-                (false, true, _) => p.job.note(format!(
-                    "{} deferred removed from {address}; more remain, run purge again",
-                    count_text(d.removed)
-                )),
-                (false, false, true) => p.job.note(format!(
-                    "more deferred messages may remain in {address}; run purge again"
-                )),
-                (false, false, false) => {}
-            }
+            removed = d.removed;
+            left_over.more = found.more;
+            left_over.truncated |= found.truncated;
         }
+    }
+    let address = plan.entity.address(SubQueue::Active);
+    match (cancelled, left_over.more, left_over.truncated) {
+        (true, ..) => {}
+        (false, true, _) => p.job.note(format!(
+            "{} deferred removed from {address}; more remain, run purge again",
+            count_text(removed)
+        )),
+        (false, false, true) => p.job.note(format!(
+            "more deferred messages may remain in {address}; run purge again"
+        )),
+        (false, false, false) => {}
     }
     Ok(p.job.finish(cancelled))
 }
@@ -741,6 +762,7 @@ mod tests {
             scope,
             per_queue: vec![(scope.sub_queues()[0], n)],
             deferred: 0,
+            deferred_truncated: false,
             total: n,
             requires_session: None,
         }
@@ -762,6 +784,7 @@ mod tests {
                 .map(|(q, n)| (*q, CountEstimate::Exact(*n)))
                 .collect(),
             deferred,
+            deferred_truncated: false,
             total: CountEstimate::Exact(sum),
             requires_session: None,
         }
@@ -1211,6 +1234,46 @@ mod tests {
             PURGE_COUNT_CAP as usize + 1,
             "nothing removed"
         );
+        assert!(
+            r.notes
+                .iter()
+                .any(|n| n == "more deferred messages may remain in q; run purge again"),
+            "{:?}",
+            r.notes
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_plan_whose_deferred_count_hit_the_cap_says_so_and_the_run_notes_it() {
+        // Through the real plan: 10,000 scheduled messages (never purged), then deferred ones
+        // the capped peek never sees, so the plan counts 0 deferred, at least.
+        let b = FakeBroker::default();
+        for _ in 0..PURGE_COUNT_CAP {
+            b.add("q", FakeMsg::active("s").scheduled());
+        }
+        for _ in 0..2 {
+            b.add("q", FakeMsg::active("d").deferred());
+        }
+        let plan = purge::plan(&mut b.clone(), &EntityPath::queue("q"), PurgeScope::All)
+            .await
+            .unwrap();
+        assert_eq!((plan.deferred, plan.deferred_truncated), (0, true));
+        assert_eq!(plan.deferred_estimate(), CountEstimate::AtLeast(0));
+        let dev = crate::safety::ProfileRef {
+            name: "dev".into(),
+            production: false,
+        };
+        let text = plan.operation().summary(&dev);
+        assert!(
+            text.contains("; deferred messages: at least 0 (the count stopped at its cap)"),
+            "{text}"
+        );
+        let confirmed = plan.total.bound().unwrap();
+        let before = b.all("q").len();
+        let r = purge(&b, &plan).await;
+        let removed = (before - b.all("q").len()) as u64;
+        assert!(removed <= confirmed, "{removed} > {confirmed}");
+        assert_eq!(removed, r.succeeded());
         assert!(
             r.notes
                 .iter()
