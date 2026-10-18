@@ -135,6 +135,8 @@ struct State {
     at_close: Vec<(String, FakeMsg)>,
     /// The next close does not complete (its detach times out).
     close_fails: bool,
+    /// The next this many receive-and-delete deliveries cannot be decoded (removed, lost).
+    undecodable: u32,
     /// After this many more deliveries a receive fails, holding the error back (as `Intake`).
     fail_after: Option<(u32, Error)>,
     /// The next `send_all` fails with this before reporting any message's outcome.
@@ -175,6 +177,7 @@ impl Default for State {
             stall: 0,
             at_close: Vec::new(),
             close_fails: false,
+            undecodable: 0,
             fail_after: None,
             lose_send_outcome: None,
             credit_max: 0,
@@ -642,6 +645,12 @@ impl FakeBroker {
         self.with(|s| s.at_close.push((address.to_string(), m)));
     }
 
+    /// The next `n` receive-and-delete deliveries cannot be decoded: the broker removed them,
+    /// and the receiver can only count them (as `AmqpReceiver` counts a `MessageDecode`).
+    pub(crate) fn undecodable_next(&self, n: u32) {
+        self.with(|s| s.undecodable = n);
+    }
+
     /// The next close does not complete (its detach times out), so the credit still out
     /// stays uncertain.
     pub(crate) fn fail_next_close(&self) {
@@ -812,6 +821,7 @@ impl MessagingBackend for FakeBroker {
             buffer: VecDeque::new(),
             pending: None,
             shortfall: 0,
+            undecodable: 0,
         })))
     }
 
@@ -937,6 +947,8 @@ struct FakeReceiver {
     tokens: HashSet<LockToken>,
     buffer: VecDeque<ReceivedMessage>,
     shortfall: u32,
+    /// Receive-and-delete deliveries that could not be decoded.
+    undecodable: u32,
     /// A failure held back while buffered messages were returned (as `Intake::pending_error`).
     pending: Option<Error>,
 }
@@ -947,6 +959,18 @@ impl FakeReceiver {
         let got = self
             .broker
             .with(|s| s.deliver(&self.address, self.mode, self.session.as_deref()));
+        if got.is_some()
+            && self.mode == ReceiveMode::ReceiveAndDelete
+            && self.broker.with(|s| {
+                let hit = s.undecodable > 0;
+                s.undecodable = s.undecodable.saturating_sub(1);
+                hit
+            })
+        {
+            // Removed on delivery, but unreadable: counted, never returned.
+            self.undecodable += 1;
+            return true;
+        }
         match got {
             Some(m) => {
                 self.tokens.extend(m.lock_token);
@@ -1301,7 +1325,7 @@ impl LockReceiver for FakeReceiver {
         });
         Closed {
             removed: self.buffer.drain(..).collect(),
-            undecodable: 0,
+            undecodable: self.undecodable,
             uncertain: if complete || self.mode == ReceiveMode::PeekLock {
                 0
             } else {

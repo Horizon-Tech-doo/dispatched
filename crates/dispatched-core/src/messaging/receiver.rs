@@ -133,8 +133,8 @@ pub(crate) struct Closed {
     /// a failed or cancelled call left buffered, and late deliveries the close swept up.
     /// Always empty for peek-lock (what it held is released).
     pub(crate) removed: Vec<ReceivedMessage>,
-    /// Receive-and-delete deliveries the close swept up but could not decode: removed, and
-    /// lost.
+    /// Receive-and-delete deliveries that could not be decoded, during a `receive` or in the
+    /// close sweep: removed, and lost (their sequence numbers are unknown).
     pub(crate) undecodable: u32,
     /// Up to this many more messages may have been removed: credit was still out and the
     /// close did not complete (the drain or the detach failed or timed out). 0 once the
@@ -371,6 +371,9 @@ struct Intake {
     /// A failure after some messages were taken; those are returned first and
     /// the failure is reported by the next call (whatever kind it is).
     pending_error: Option<Error>,
+    /// Receive-and-delete deliveries that could not be decoded: removed, and only counted
+    /// (`close` reports them).
+    undecodable: u32,
 }
 
 impl Intake {
@@ -397,6 +400,14 @@ impl Intake {
 
     /// Credit was granted: until the receive ends, all of it counts as shortfall.
     fn granted(&mut self, plan: &CreditPlan) {
+        self.shortfall = plan.outstanding;
+    }
+
+    /// A receive-and-delete delivery came off the link but could not be decoded: it used its
+    /// credit and was removed, so it is counted for `close` to report.
+    fn undecodable(&mut self, plan: &mut CreditPlan) {
+        plan.delivered(1);
+        self.undecodable = self.undecodable.saturating_add(1);
         self.shortfall = plan.outstanding;
     }
 
@@ -584,6 +595,12 @@ impl AmqpReceiver {
             }
             match tokio::time::timeout_at(deadline, self.receiver.recv::<Body<Value>>()).await {
                 Err(_) => break,
+                Ok(Err(fe2o3_amqp::link::RecvError::MessageDecode(_)))
+                    if self.mode == ReceiveMode::ReceiveAndDelete =>
+                {
+                    deadline = Instant::now() + wait;
+                    self.intake.undecodable(&mut plan);
+                }
                 Ok(Err(e)) => {
                     return self
                         .stop(&plan, Error::Protocol(format!("receive: {e}")), max)
@@ -615,6 +632,12 @@ impl AmqpReceiver {
                 .await
             {
                 Err(_) => {}
+                Ok(Err(fe2o3_amqp::link::RecvError::MessageDecode(_)))
+                    if self.mode == ReceiveMode::ReceiveAndDelete =>
+                {
+                    last = Instant::now();
+                    self.intake.undecodable(&mut plan);
+                }
                 Ok(Err(e)) => {
                     return self
                         .stop(&plan, Error::Protocol(format!("receive: {e}")), max)
@@ -891,15 +914,24 @@ impl AmqpReceiver {
     /// links. Deliveries the broker sent after the last `receive` are swept
     /// first: peek-lock ones are released, receive-and-delete ones returned.
     ///
-    /// The close settles what the last `receive` left uncertain. The drain asks
-    /// the broker to spend or drop its credit; the sweep reads until the link is
-    /// quiet (the grace time when the last `receive` did not wait it out); once
-    /// the detach completes, nothing more can be delivered. So after a completed
-    /// close every message removed is in [`Closed::removed`] (or counted as
-    /// undecodable), and only a close that did not complete leaves
-    /// [`Closed::uncertain`] credit.
+    /// The close settles what the last `receive` left uncertain. Setting the
+    /// credit to 0 stops the broker sending; the sweep reads until the link is
+    /// quiet (the grace time when the last `receive` did not wait it out), then
+    /// the link detaches. After a completed close every message removed is in
+    /// [`Closed::removed`] (or counted as undecodable), and only a close that did
+    /// not complete leaves [`Closed::uncertain`] credit.
+    ///
+    /// Residual risk: fe2o3 drops any transfer that arrives between the end of
+    /// the sweep and the detach reply. A broker that delivers more than about
+    /// the sweep's idle time after the credit was withdrawn (or after its drain,
+    /// for a receive that waited out the grace) could still remove a message
+    /// that nobody sees. The emulator stays quiet (probe (d)); the cloud check is
+    /// on the live-verification checklist.
     pub(crate) async fn close(mut self) -> Closed {
-        let mut closed = Closed::default();
+        let mut closed = Closed {
+            undecodable: self.intake.undecodable,
+            ..Closed::default()
+        };
         let delete = self.mode == ReceiveMode::ReceiveAndDelete;
         let outstanding = self.intake.shortfall;
         let idle = if self.intake.quiet {
@@ -908,7 +940,9 @@ impl AmqpReceiver {
             DRAIN_GRACE
         };
         let mut swept = 0u32;
-        let mut complete = bounded("drain", CLOSE_TIMEOUT, self.receiver.drain())
+        // Credit 0 (a plain flow, which every AMQP sender must respect), not a drain: stopping
+        // the link must not depend on the broker supporting drain.
+        let mut complete = bounded("stop the link", CLOSE_TIMEOUT, self.receiver.set_credit(0))
             .await
             .is_ok();
         if complete {

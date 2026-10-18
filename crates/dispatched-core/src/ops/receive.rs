@@ -621,6 +621,41 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_removed_message_that_cannot_be_decoded_is_reported() {
+        // Receive-and-delete: the broker removed it on delivery, so even unreadable it must
+        // be reported as removed, and the receive goes on.
+        let b = FakeBroker::default();
+        for _ in 0..3 {
+            b.add("q", FakeMsg::active("x"));
+        }
+        b.undecodable_next(1);
+        let out = receive::run(
+            &mut b.clone(),
+            &recv("q", 5, ReceiveAction::Delete),
+            &NoProgress,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(b.all("q").is_empty());
+        assert_eq!(out.messages.len(), 2);
+        assert_eq!(out.report.notes, [undecodable_note(1)]);
+        // The only message: still a report saying so, not a bare error.
+        b.add("q", FakeMsg::active("y"));
+        b.undecodable_next(1);
+        let out = receive::run(
+            &mut b.clone(),
+            &recv("q", 5, ReceiveAction::Delete),
+            &NoProgress,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("a removal is reported, not an error");
+        assert!(out.messages.is_empty());
+        assert_eq!(out.report.notes, [undecodable_note(1)]);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_close_that_does_not_complete_keeps_the_note() {
         let b = FakeBroker::default();
         b.add("q", FakeMsg::active("x"));
