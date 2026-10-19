@@ -20,7 +20,7 @@ const message: MessageDetail = {
 
 async function composer(seed: { entity?: string | null; clone?: MessageDetail | null } = {}) {
   const utils = renderShell("operate-ok", { last_profile: "p-logistics" }, <OpenSheet sheet={{ kind: "operation", op: "send", entity: seed.entity ?? "label-print", clone: seed.clone ?? null }} />);
-  const sheet = await screen.findByRole("dialog", { name: "Send messages" });
+  const sheet = await screen.findByRole("dialog", { name: seed.clone ? "Send a copy" : "Send messages" });
   return { sheet, ...utils };
 }
 
@@ -38,6 +38,7 @@ describe("ComposerSheet", () => {
   it("sends a text body with its properties and the typed ids", async () => {
     const { sheet, mock } = await composer();
     await typeInto(within(sheet).getByRole("textbox", { name: "Body" }), "hello");
+    await userEvent.click(within(sheet).getByRole("button", { name: /^Properties/ }));
     await typeInto(within(sheet).getByRole("textbox", { name: "Subject" }), "greeting");
     await typeInto(within(sheet).getByRole("textbox", { name: "Time to live" }), "5m");
     await userEvent.click(within(sheet).getByRole("button", { name: "Send 1 message" }));
@@ -50,6 +51,7 @@ describe("ComposerSheet", () => {
 
   it("an invalid time to live blocks sending", async () => {
     const { sheet } = await composer();
+    await userEvent.click(within(sheet).getByRole("button", { name: /^Properties/ }));
     const ttl = within(sheet).getByRole("textbox", { name: "Time to live" });
     await typeInto(ttl, "soon");
     expect(ttl).toHaveAttribute("aria-invalid", "true");

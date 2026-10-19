@@ -3,7 +3,7 @@ import { ArrowRightToLine, CalendarX, CheckCheck, ChevronDown, Download, Inbox, 
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { TAIL_MAX, normalizeFilter, usePeekStream, type EntityCounts, type FilterSpec, type MessageSummary, type PeekView } from "@/engine";
 import {
-  Button, DataGrid, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, EmptyState, Panel, PanelGroup, Problem, ResizeHandle, cn, formatNumber, rowHeight,
+  Button, DataGrid, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger, EmptyState, Hint, Panel, PanelGroup, Problem, ResizeHandle, cn, formatNumber, rowHeight,
 } from "@/ui";
 import { yearOf } from "../time";
 import { useShell } from "../context";
@@ -202,28 +202,63 @@ export function MessagesView({
   const pick = (op: "delete" | "move" | "resubmit") => openSheet({ kind: "operation", op, entity: tab.id, view, sequences: selectedSequences(), filter: vs.filter, total });
   const settle = (how: "complete" | "abandon" | "dead-letter") =>
     openSheet({ kind: "operation", op: "settle-deferred", entity: tab.id, subQueue: "active", sequences: selectedSequences(), session: vs.filter.session_id ?? null, how });
-  const opButton = (compact: boolean, label: string, icon: ReactNode, run: () => void, pressed?: boolean) => (
-    <CompactHint key={label} compact={compact} label={label}>
-      <Button variant="quiet" disabled={!profileId} aria-label={compact ? label : undefined} aria-pressed={pressed} onClick={run} className={cn("shrink-0", pressed && "bg-selection")}>
+  // The selection's size goes in the labels ("Delete 3"), so the scope is seen before a sheet opens.
+  const picked = sel.ids.size;
+  const counted = (verb: string) => (picked > 0 ? `${verb} ${formatNumber(picked)}` : verb);
+  const opButton = (
+    compact: boolean,
+    id: string,
+    label: string,
+    icon: ReactNode,
+    run: () => void,
+    o: { pressed?: boolean; disabled?: boolean; hint?: string; shortcut?: string } = {},
+  ) => {
+    const button = (
+      <Button
+        variant="quiet"
+        disabled={!profileId || o.disabled}
+        aria-label={compact ? label : undefined}
+        aria-pressed={o.pressed}
+        onClick={run}
+        className={cn("shrink-0", o.pressed && "bg-selection")}
+      >
         {icon}
         <CompactLabel compact={compact}>{label}</CompactLabel>
       </Button>
-    </CompactHint>
-  );
+    );
+    return o.hint ? (
+      <Hint key={id} label={o.hint} shortcut={o.shortcut}>
+        {/* A disabled button gets no pointer events: the span carries the tooltip. */}
+        <span className="inline-flex">{button}</span>
+      </Hint>
+    ) : (
+      <CompactHint key={id} compact={compact} label={label}>
+        {button}
+      </CompactHint>
+    );
+  };
   const operations = (compact: boolean) => {
-    const send = opButton(compact, "Send", <SendHorizontal aria-hidden="true" className="text-icon" />, () => openSheet({ kind: "operation", op: "send", entity: tab.id }));
-    const receive = opButton(compact, "Receive", <Inbox aria-hidden="true" className="text-icon" />, () =>
+    const send = opButton(compact, "send", "Send", <SendHorizontal aria-hidden="true" className="text-icon" />, () => openSheet({ kind: "operation", op: "send", entity: tab.id }));
+    const receive = opButton(compact, "receive", "Receive", <Inbox aria-hidden="true" className="text-icon" />, () =>
       openSheet({ kind: "operation", op: "receive", entity: tab.id, subQueue, session: vs.filter.session_id ?? null }),
     );
-    const resubmit = opButton(compact, "Resubmit", <Repeat2 aria-hidden="true" className="text-icon" />, () => pick("resubmit"));
-    const move = opButton(compact, "Move", <ArrowRightToLine aria-hidden="true" className="text-icon" />, () => pick("move"));
-    const del = opButton(compact, "Delete", <Trash2 aria-hidden="true" className="text-icon" />, () => pick("delete"));
+    const resubmit = opButton(compact, "resubmit", counted("Resubmit"), <Repeat2 aria-hidden="true" className="text-icon" />, () => pick("resubmit"));
+    const move = opButton(compact, "move", counted("Move"), <ArrowRightToLine aria-hidden="true" className="text-icon" />, () => pick("move"));
+    const del = opButton(compact, "delete", counted("Delete"), <Trash2 aria-hidden="true" className="text-icon" />, () => pick("delete"), {
+      hint: picked > 0 ? `Delete the ${formatNumber(picked)} selected` : "Delete the messages matching the view",
+      shortcut: picked > 0 ? "delete" : undefined,
+    });
     if (view === "scheduled")
       return (
         <>
           {send}
-          {opButton(compact, "Cancel scheduled", <CalendarX aria-hidden="true" className="text-icon" />, () =>
-            openSheet({ kind: "operation", op: "cancel-scheduled", entity: tab.id, sequences: selectedSequences() }),
+          {opButton(
+            compact,
+            "unschedule",
+            counted("Unschedule"),
+            <CalendarX aria-hidden="true" className="text-icon" />,
+            () => openSheet({ kind: "operation", op: "cancel-scheduled", entity: tab.id, sequences: selectedSequences() }),
+            { disabled: picked === 0, hint: picked === 0 ? "Select scheduled messages first." : "Unschedule the selected messages" },
           )}
         </>
       );
@@ -235,15 +270,16 @@ export function MessagesView({
               <DropdownMenuTrigger asChild>
                 <Button variant="quiet" disabled={!profileId} aria-label={compact ? "Settle" : undefined}>
                   <CheckCheck aria-hidden="true" className="text-icon" />
-                  <CompactLabel compact={compact}>Settle</CompactLabel>
+                  <CompactLabel compact={compact}>{counted("Settle")}</CompactLabel>
                   <ChevronDown aria-hidden="true" className="!size-3 text-icon" />
                 </Button>
               </DropdownMenuTrigger>
             </CompactHint>
             <DropdownMenuContent align="end">
-              <DropdownMenuItem onSelect={() => settle("complete")}>Complete…</DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => settle("abandon")}>Abandon…</DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => settle("dead-letter")}>Dead-letter…</DropdownMenuItem>
+              {picked === 0 && <DropdownMenuLabel>Select deferred messages to settle them.</DropdownMenuLabel>}
+              <DropdownMenuItem disabled={picked === 0} onSelect={() => settle("complete")}>Complete…</DropdownMenuItem>
+              <DropdownMenuItem disabled={picked === 0} onSelect={() => settle("abandon")}>Abandon…</DropdownMenuItem>
+              <DropdownMenuItem disabled={picked === 0} onSelect={() => settle("dead-letter")}>Dead-letter…</DropdownMenuItem>
               <DropdownMenuItem onSelect={() => pick("delete")}>Delete…</DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -258,10 +294,11 @@ export function MessagesView({
         {resubmit}
         {move}
         {del}
-        {dlqView && opButton(compact, "Summary", <ListTree aria-hidden="true" className="text-icon" />, () => setSummaryOpen(!summaryOpen), summaryOpen)}
+        {dlqView && opButton(compact, "reasons", "Reasons", <ListTree aria-hidden="true" className="text-icon" />, () => setSummaryOpen(!summaryOpen), { pressed: summaryOpen })}
       </>
     );
   };
+
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -309,7 +346,17 @@ export function MessagesView({
         </div>
       )}
       {dlqView && summaryOpen && (
-        <DlqSummary profileId={profileId} entity={tab.id} subQueue={subQueue} onPick={(reason) => applyFilter({ ...vs.filter, property: reasonFilter(reason) })} />
+        <DlqSummary
+          profileId={profileId}
+          entity={tab.id}
+          subQueue={subQueue}
+          combined={!!vs.filter.property?.trim()}
+          onPick={(reason) => {
+            // A property filter already applied stays: the reason joins it.
+            const before = vs.filter.property?.trim();
+            applyFilter({ ...vs.filter, property: before && !before.includes(reasonFilter(reason)) ? `${before} AND ${reasonFilter(reason)}` : reasonFilter(reason) });
+          }}
+        />
       )}
       <div
         ref={gridBox}

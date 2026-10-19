@@ -51,7 +51,10 @@ export interface PaletteContext {
 
 /** Every operation on one entity, as palette commands. Delete, Move and Resubmit act on the view's selected rows, or on
  *  every message matching its filter. A topic only receives messages. */
-function operateCommands(tab: { id: string; kind: EntityKind }, c: PaletteContext): Omit<PaletteCommand, "group">[] {
+export function operateCommands(
+  tab: { id: string; kind: EntityKind },
+  c: Pick<PaletteContext, "openSheet" | "selection"> & { sessions?: boolean | null },
+): Omit<PaletteCommand, "group">[] {
   const name = displayName(tab.id);
   const send = { id: "op:send", label: `Send messages to ${displayName(sendTarget(tab.id))}…`, keywords: ["compose", "new message"], run: () => c.openSheet({ kind: "operation", op: "send", entity: tab.id }) };
   const importing = { id: "op:import", label: `Import messages into ${displayName(sendTarget(tab.id))}…`, keywords: ["file", "restore"], run: () => c.openSheet({ kind: "operation", op: "import", entity: tab.id }) };
@@ -68,10 +71,19 @@ function operateCommands(tab: { id: string; kind: EntityKind }, c: PaletteContex
     { id: "op:move", label: `Move messages from ${name}…`, detail: selected.trim() || undefined, run: picked("move") },
     { id: "op:resubmit", label: `Resubmit messages from ${name}…`, detail: selected.trim() || undefined, keywords: ["dead letter", "retry", "replay"], run: picked("resubmit") },
     { id: "op:purge", label: `Purge ${name}…`, keywords: ["empty", "clear", "remove all"], run: () => c.openSheet({ kind: "operation", op: "purge", entities: [tab.id] }) },
-    { id: "op:cancel-scheduled", label: `Cancel scheduled messages in ${name}…`, run: () => c.openSheet({ kind: "operation", op: "cancel-scheduled", entity: tab.id, sequences: view === "scheduled" ? (s?.sequences ?? []) : [] }) },
-    { id: "op:session-state", label: `Session state of ${name}…`, keywords: ["session"], run: () => c.openSheet({ kind: "operation", op: "session-state", entity: tab.id, session: s?.filter.session_id ?? "" }) },
+    { id: "op:cancel-scheduled", label: `Unschedule messages in ${name}…`, run: () => c.openSheet({ kind: "operation", op: "cancel-scheduled", entity: tab.id, sequences: view === "scheduled" ? (s?.sequences ?? []) : [] }) },
+    ...(c.sessions === false ? [] : [{ id: "op:session-state", label: `Session state of ${name}…`, keywords: ["session"], run: () => c.openSheet({ kind: "operation", op: "session-state", entity: tab.id, session: s?.filter.session_id ?? "" }) }]),
     importing,
   ];
+}
+
+/** Whether an entity uses sessions, from what is loaded; null when not known. */
+export function requiresSession(c: Pick<PaletteContext, "listing" | "subs">, id: string): boolean | null {
+  const q = c.listing?.queues.find((x) => x.name === id);
+  if (q) return q.requires_session;
+  const [topic, sub] = id.split("/subscriptions/");
+  const s = sub !== undefined ? c.subs[topic]?.find((x) => x.name === sub) : undefined;
+  return s ? s.requires_session : null;
 }
 
 export function buildCommands(c: PaletteContext): PaletteCommand[] {
@@ -118,7 +130,7 @@ export function buildCommands(c: PaletteContext): PaletteCommand[] {
   if (tab && c.activeProfileId !== null) {
     if (c.host) out.push({ id: "entity:url", group: "This entity", label: `Copy URL of ${displayName(tab.id)}`, keywords: ["address", "sb://"], run: () => c.copy(entityUrl(c.host, tab.id, tab.kind), `Copied the URL for ${displayName(tab.id)}`) });
     if (!c.entra) out.push({ id: "entity:string", group: "This entity", label: `Copy connection string of ${displayName(tab.id)}`, keywords: ["key", "secret"], run: () => c.copyConnectionString(tab.id) });
-    for (const o of operateCommands(tab, c)) out.push({ ...o, group: "This entity" });
+    for (const o of operateCommands(tab, { ...c, sessions: requiresSession(c, tab.id) })) out.push({ ...o, group: "This entity" });
   }
   if (c.activeProfileId !== null)
     out.push({ id: "app:activity", group: "App", label: "Show activity", keywords: ["log", "audit", "history", "cli"], run: () => (c.showActivity ?? c.toggleDrawer)() });

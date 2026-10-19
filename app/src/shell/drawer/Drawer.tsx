@@ -6,7 +6,9 @@ import { useShell } from "../context";
 import { jobStore, useJobs, type Job } from "./activity";
 import { ActivityLog } from "./ActivityLog";
 import { plural } from "./plural";
-import { endedText, failedTitle, finishedState, neutralEnd, outcomeText, runningText } from "../operate/words";
+import { endedText, endKind, failedTitle, finishedState, neutralEnd, outcomeText, runningText } from "../operate/words";
+import { adviceFor, rightFor } from "../operate/advice";
+import { useAuthKind } from "../access";
 
 /** Where a job stands, in numbers: "5 of 37", or, with no total, "5 written" and how many were looked at. */
 function counts(j: Job): string {
@@ -154,11 +156,12 @@ function ExportRow({ j }: { j: Job }) {
  *  View report once it has one. Laid out like an export row. */
 function OperateRow({ j }: { j: Job }) {
   const { openSheet } = useShell();
+  const auth = useAuthKind();
   const [cancelling, setCancelling] = useState(false);
   const running = !j.finished;
   const failed = j.error != null && !neutralEnd(j.error.kind);
   const ended = j.finished ? endedText(j) : null;
-  const outcome = j.finished && !j.error ? outcomeText(j) : null;
+  const outcome = j.finished && !endKind(j) ? outcomeText(j) : null;
   const pct = running && j.total ? Math.min(100, (j.done / j.total) * 100) : 0;
   const cancel = () => {
     setCancelling(true);
@@ -181,6 +184,7 @@ function OperateRow({ j }: { j: Job }) {
               <CircleAlert aria-hidden="true" className="size-3 shrink-0 text-accent" />
               {failedTitle(j.kind)}
             </span>
+            <span className="text-11 text-muted">{adviceFor(j.error.kind, j.error.message, rightFor(j.kind), auth)}</span>
             <span className="min-w-0 break-words font-mono text-11 text-fg" data-selectable>
               {j.error.message}
             </span>
@@ -198,6 +202,11 @@ function OperateRow({ j }: { j: Job }) {
       )}
       <span className="flex items-center justify-between gap-3 @[560px]:justify-end">
         <span className="min-w-[96px] whitespace-nowrap text-left text-11 tabular-nums text-muted @[560px]:text-right">{running ? runningText(j) : finishedState(j)}</span>
+        {running && j.confirm && (
+          <Button size="sm" className="h-[18px]" onClick={() => openSheet({ kind: "job", jobId: j.id })} aria-label={`Confirm…: ${j.title}`}>
+            Confirm…
+          </Button>
+        )}
         {running && (
           <Button size="sm" className="h-[18px]" disabled={cancelling} onClick={cancel} aria-label={`${cancelling ? "Cancelling" : "Cancel"} ${j.title}`}>
             {cancelling ? "Cancelling" : "Cancel"}

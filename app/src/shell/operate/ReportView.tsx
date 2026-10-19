@@ -3,7 +3,7 @@ import { createColumnHelper } from "@tanstack/react-table";
 import { CircleAlert } from "lucide-react";
 import { useMemo, useState } from "react";
 import { commands, type ItemOutcome, type ItemView } from "@/engine";
-import { Button, DataGrid, FieldMessage, Segmented, formatNumber, rowHeight } from "@/ui";
+import { Button, DataGrid, FieldMessage, Problem, Segmented, formatNumber, rowHeight } from "@/ui";
 import { useShell } from "../context";
 import type { Job } from "../drawer/activity";
 
@@ -30,6 +30,7 @@ export function ReportView({ job }: { job: Job }) {
     queryFn: () => commands.jobReport(job.id, 0, PAGE, filter !== "all"),
     enabled: r !== null,
     staleTime: Infinity,
+    retry: false,
   });
   const rows = useMemo<Row[]>(
     () => (page.data?.items ?? []).filter((i) => filter !== "failed" || i.outcome === "failed").map((i, key) => ({ ...i, key })),
@@ -92,6 +93,14 @@ export function ReportView({ job }: { job: Job }) {
               { value: "problems", label: `Not done ${formatNumber(r.incomplete)}` },
             ]}
           />
+          {page.isError ? (
+            <Problem
+              title="Couldn't load the report"
+              body="The job's summary above stands. Load the items again; if it keeps failing, the detail below says why."
+              detail={page.error instanceof Error ? page.error.message : String((page.error as { message?: string } | null)?.message ?? page.error)}
+              action={<Button onClick={() => void page.refetch()}>Try again</Button>}
+            />
+          ) : (
           <div className="h-[280px] min-h-0 border border-line">
             <DataGrid
               label="Items"
@@ -107,6 +116,7 @@ export function ReportView({ job }: { job: Job }) {
               empty={<p className="m-0 px-3 py-2 text-12 text-muted">{filter === "failed" ? "Nothing failed." : "Everything was done."}</p>}
             />
           </div>
+          )}
           {total > PAGE && <p className="m-0 text-11 text-muted">Showing the first {formatNumber(PAGE)} of {formatNumber(total)}. Save the report for all of them.</p>}
         </>
       )}

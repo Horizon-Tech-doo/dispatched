@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { commands, type OpenedFiles } from "@/engine";
-import { Button, Field, FieldMessage, Input } from "@/ui";
+import { Button, FieldMessage } from "@/ui";
+import { EntityPicker } from "./EntityPicker";
 import { useShell } from "../context";
 import { Check, Group, sendTarget } from "./controls";
 import { OperationSheet } from "./OperationSheet";
@@ -32,6 +33,7 @@ export function ImportSheet({ entity }: { entity: string | null }) {
       description="Messages from an export file are sent as new messages."
       op={op}
       action="Import messages"
+      right="Send"
       canSubmit={valid}
       onSubmit={() =>
         valid &&
@@ -41,9 +43,9 @@ export function ImportSheet({ entity }: { entity: string | null }) {
       }
       onClose={closeSheet}
     >
-      <Field label="Entity" hint="A queue or a topic." error={target.trim() ? undefined : "Choose where to send the messages."}>
-        {(ids) => <Input {...ids} mono value={target} onChange={(e) => setTarget(e.target.value)} />}
-      </Field>
+      <Group label="Import into">
+        <EntityPicker label="Import into" value={target || null} onChange={setTarget} />
+      </Group>
       <Group label="File">
         {file ? (
           file.names.map((n) => (

@@ -1,7 +1,7 @@
 import { useShell } from "../context";
 import { ExportSheet } from "../messages/ExportSheet";
 import { OperationHost, operationKey } from "../operate/OperationHost";
-import { ReportSheet } from "../operate/ReportSheet";
+import { JobSheet, ReportSheet } from "../operate/ReportSheet";
 import { ExplorerOptionsSheet } from "./ExplorerOptionsSheet";
 import { ProfileSheet } from "./ProfileSheet";
 import { ProfilesSheet } from "./ProfilesSheet";
@@ -30,6 +30,8 @@ export function SheetHost() {
       return <OperationHost key={operationKey(sheet)} seed={sheet} />;
     case "report":
       return <ReportSheet key={sheet.jobId} jobId={sheet.jobId} />;
+    case "job":
+      return <JobSheet key={sheet.jobId} jobId={sheet.jobId} />;
     default:
       return null;
   }

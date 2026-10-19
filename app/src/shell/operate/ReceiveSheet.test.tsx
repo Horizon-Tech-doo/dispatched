@@ -46,7 +46,7 @@ describe("ReceiveSheet", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Open receive" }));
     const sheet = await screen.findByRole("dialog", { name: "Receive messages" });
     await userEvent.click(within(sheet).getByRole("radio", { name: "Dead-letter" }));
-    await userEvent.click(within(sheet).getByRole("button", { name: "Receive up to 10 messages" }));
+    await userEvent.click(within(sheet).getByRole("button", { name: "Receive and dead-letter up to 10 messages" }));
     await waitFor(() => expect(lastCall(mock, "op_receive")).toBeDefined());
     expect(lastCall<{ form: ReceiveForm }>(mock, "op_receive")!.form.action).toEqual({ type: "settle", how: { type: "dead-letter" } });
   });

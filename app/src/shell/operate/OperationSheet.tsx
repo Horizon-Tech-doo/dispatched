@@ -1,21 +1,13 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Button, Problem, Sheet, formatNumber } from "@/ui";
 import { useShell } from "../context";
 import type { Job } from "../drawer/activity";
 import { ConfirmPanel, answerFor, canConfirm } from "./ConfirmPanel";
 import { ReportView } from "./ReportView";
 import type { Operation } from "./useOperation";
+import { useAuthKind, type Right } from "../access";
+import { adviceFor, rightFor } from "./advice";
 import { confirmLabel, endedText, failedTitle, itemsSoFar, neutralEnd, runningText } from "./words";
-
-/** What to do about a refused start, by the kind of refusal. The engine's own words go on the detail line. */
-const startAdvice = (kind: string): string =>
-  kind === "invalid"
-    ? "Check the fields, then try again."
-    : kind === "not_connected"
-      ? "The connection has closed. Connect again, then try again."
-      : kind === "activity_unavailable"
-        ? "Nothing that changes messages can run without the activity log."
-        : "Try again.";
 
 /** How far a running job is: the job's own progress bar and numbers. */
 function Running({ job }: { job: Job | null }) {
@@ -47,13 +39,18 @@ function Running({ job }: { job: Job | null }) {
 /** How a finished job went: a neutral line when it was not confirmed, cancelled or stopped, the error form when it
  *  failed, and the report whenever there is one. */
 function Done({ job }: { job: Job }) {
+  const auth = useAuthKind();
   const ended = endedText(job);
   const failed = job.error && !neutralEnd(job.error.kind);
   return (
     <div className="flex flex-col gap-3">
       {ended && <p className="m-0 text-12 text-muted">{ended}</p>}
       {failed && job.error && (
-        <Problem title={failedTitle(job.kind)} body={job.report ? "The report lists what was done before it stopped." : "Nothing was changed."} detail={job.error.message} />
+        <Problem
+          title={failedTitle(job.kind)}
+          body={`${job.report ? "The report lists what was done before it stopped." : "Nothing was changed."} ${adviceFor(job.error.kind, job.error.message, rightFor(job.kind), auth)}`}
+          detail={job.error.message}
+        />
       )}
       <ReportView job={job} />
     </div>
@@ -70,6 +67,8 @@ export function OperationSheet({
   description,
   op,
   action,
+  failureTitle,
+  right = "Listen",
   canSubmit = true,
   onSubmit,
   onClose,
@@ -80,48 +79,74 @@ export function OperationSheet({
   op: Operation;
   /** The form's primary button, naming what it does: "Delete 3 messages". */
   action: string;
+  /** The heading of a refused start; by default "Couldn't" and the title, "Couldn't delete messages". */
+  failureTitle?: string;
+  /** The right the operation needs, for advice when the engine does not name it. */
+  right?: Right;
   canSubmit?: boolean;
   onSubmit: () => void;
   onClose: () => void;
   /** The form. */
-  children: ReactNode;
+  children?: ReactNode;
 }) {
   const { dispatch } = useShell();
+  const auth = useAuthKind();
   const [typed, setTyped] = useState<{ id: string; text: string }>({ id: "", text: "" });
   const [cancelling, setCancelling] = useState<string | null>(null);
   const ask = op.stage === "confirming" ? op.job?.confirm ?? null : null;
   const text = ask && typed.id === ask.id ? typed.text : "";
   const busy = op.stage === "confirming" || op.stage === "running";
+  const failedJob = op.stage === "done" && !!op.job?.error && !neutralEnd(op.job.error.kind);
   const close = () => {
     op.leave();
     onClose();
   };
 
+  // Each stage brings its own footer (keyed, so no button carries focus from one stage into the next) and focus goes to a
+  // safe place: never the confirm button. On production the typed-name field takes it.
+  const settle = useRef<HTMLButtonElement>(null);
+  const stageKey = ask ? `confirm-${ask.id}` : op.stage;
+  useEffect(() => {
+    if (op.stage === "form" || ask?.production) return;
+    settle.current?.focus();
+  }, [stageKey, op.stage, ask?.production]);
+
   const footer =
     op.stage === "form" ? (
-      <>
+      <FooterGroup key="form">
         <Button onClick={onClose}>Cancel</Button>
         <Button variant="primary" disabled={!canSubmit || op.starting} aria-busy={op.starting} onClick={onSubmit}>
           {action}
         </Button>
-      </>
+      </FooterGroup>
     ) : ask ? (
-      <>
-        <Button onClick={close}>Cancel</Button>
+      <FooterGroup key={`confirm-${ask.id}`}>
+        <Button ref={settle} onClick={close}>
+          Cancel
+        </Button>
         <Button variant="primary" disabled={!canConfirm(ask, text)} onClick={() => void op.answer(answerFor(ask, text))}>
           {confirmLabel(ask.verb, ask.target, ask.step)}
         </Button>
-      </>
+      </FooterGroup>
     ) : op.stage === "running" ? (
-      <>
-        <Button
-          onClick={() => {
-            dispatch({ type: "layout", patch: { drawerOpen: true, drawerTab: "jobs" } });
-            onClose();
-          }}
-        >
-          Show in Jobs
-        </Button>
+      <FooterGroup key="running">
+        {op.answered ? (
+          <Button
+            ref={settle}
+            onClick={() => {
+              op.detach();
+              dispatch({ type: "layout", patch: { drawerOpen: true, drawerTab: "jobs" } });
+              onClose();
+            }}
+          >
+            Show in Jobs
+          </Button>
+        ) : (
+          // Nothing has been confirmed yet: closing now cancels the job, and the button says so.
+          <Button ref={settle} onClick={close}>
+            Cancel and close
+          </Button>
+        )}
         <Button
           variant="primary"
           disabled={cancelling === op.jobId}
@@ -132,11 +157,14 @@ export function OperationSheet({
         >
           {cancelling === op.jobId ? "Cancelling" : "Cancel job"}
         </Button>
-      </>
+      </FooterGroup>
     ) : (
-      <Button variant="primary" onClick={onClose}>
-        Close
-      </Button>
+      <FooterGroup key="done">
+        {failedJob && <Button onClick={op.reset}>Edit and try again</Button>}
+        <Button ref={settle} variant="primary" onClick={onClose}>
+          Close
+        </Button>
+      </FooterGroup>
     );
 
   return (
@@ -151,16 +179,34 @@ export function OperationSheet({
     >
       {op.stage === "form" ? (
         <div className="flex flex-col gap-4">
+          {/* First, so a refusal is seen without scrolling a long form. */}
+          {op.failure && (
+            <Problem
+              role="alert"
+              title={failureTitle ?? `Couldn't ${title[0].toLowerCase()}${title.slice(1)}`}
+              body={adviceFor(op.failure.kind, op.failure.message, right, auth)}
+              detail={op.failure.message}
+            />
+          )}
           {children}
-          {op.failure && <Problem role="alert" title="Couldn't start" body={startAdvice(op.failure.kind)} detail={op.failure.message} />}
         </div>
-      ) : ask ? (
-        <ConfirmPanel key={ask.id} request={ask} typed={text} onTyped={(t) => setTyped({ id: ask.id, text: t })} />
-      ) : op.stage === "running" ? (
-        <Running job={op.job} />
       ) : (
-        op.job && <Done job={op.job} />
+        // The stage is announced: the confirmation, the progress, the outcome.
+        <div aria-live="polite">
+          {ask ? (
+            <ConfirmPanel key={ask.id} request={ask} typed={text} onTyped={(t) => setTyped({ id: ask.id, text: t })} />
+          ) : op.stage === "running" ? (
+            <Running job={op.job} />
+          ) : (
+            op.job && <Done job={op.job} />
+          )}
+        </div>
       )}
     </Sheet>
   );
+}
+
+/** One stage's footer buttons. */
+function FooterGroup({ children }: { children: ReactNode }) {
+  return <>{children}</>;
 }

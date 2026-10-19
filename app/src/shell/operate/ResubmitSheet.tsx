@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { commands, type EditsForm, type FilterSpec, type PeekView } from "@/engine";
-import { Field, Input, Textarea } from "@/ui";
+import { Field, Input, Segmented, Textarea } from "@/ui";
 import { useShell } from "../context";
-import { Check, Group, sendTarget } from "./controls";
+import { Check, Disclosure, Group, sendTarget } from "./controls";
 import { EntityPicker } from "./EntityPicker";
 import { OperationSheet } from "./OperationSheet";
 import { PropertyEditor, propertyErrors, propertyForms, type PropRow } from "./PropertyEditor";
@@ -38,7 +38,8 @@ export function ResubmitSheet(p: { entity: string; view: PeekView; sequences: nu
   const [keepDlq, setKeepDlq] = useState(false);
   const [drop, setDrop] = useState(false);
   const propErrors = propertyErrors(set);
-  const valid = !sel.limitError && propErrors.size === 0 && (!elsewhere || target !== null) && !!conn.profileId;
+  const editsSet = Object.values(edits).filter((v) => v && v.trim() !== "").length + (replaceBody ? 1 : 0) + set.length + (remove.trim() ? 1 : 0);
+  const valid = !sel.limitError && propErrors.size === 0 && (!elsewhere || !!target?.trim()) && !!conn.profileId;
 
   const submit = () => {
     if (!valid) return;
@@ -52,7 +53,7 @@ export function ResubmitSheet(p: { entity: string; view: PeekView; sequences: nu
     void op.start(() =>
       commands.opResubmit(conn.profileId!, {
         source: { entity: p.entity, view: p.view, selection: sel.selection },
-        ...(elsewhere && target ? { target } : {}),
+        ...(elsewhere && target?.trim() ? { target: target.trim() } : {}),
         edits: e, new_message_id: newId, remove_original: removeOriginal, keep_dead_letter_properties: keepDlq, drop_uncopyable_properties: drop,
       }),
     );
@@ -61,7 +62,7 @@ export function ResubmitSheet(p: { entity: string; view: PeekView; sequences: nu
   return (
     <OperationSheet
       title="Resubmit messages"
-      description="Copies are sent as new messages; the originals stay unless you remove them."
+      description={removeOriginal ? "Copies are sent as new messages and the originals are removed." : "Copies are sent as new messages; the originals stay."}
       op={op}
       action={verbLabel("Resubmit", sel.count)}
       canSubmit={valid}
@@ -70,24 +71,32 @@ export function ResubmitSheet(p: { entity: string; view: PeekView; sequences: nu
     >
       <SelectionSummary entity={p.entity} view={p.view} sequences={p.sequences} filter={p.filter} limit={sel.limit} setLimit={sel.setLimit} limitError={sel.limitError} />
       <Group label="Send to">
-        <Check label={`Back to ${back}`} checked={!elsewhere} onChange={(v) => setElsewhere(!v)} />
+        <Segmented
+          label="Send to"
+          value={elsewhere ? "elsewhere" : "back"}
+          onChange={(v) => setElsewhere(v === "elsewhere")}
+          options={[
+            { value: "back", label: `Back to ${back}` },
+            { value: "elsewhere", label: "Another entity" },
+          ]}
+        />
         {elsewhere && <EntityPicker label="Resubmit to" value={target} onChange={setTarget} />}
       </Group>
-      <Group label="Edits">
+      <Disclosure label="Edits" set={editsSet}>
         <p className="m-0 text-11 text-muted">Empty fields are left as they are.</p>
         {EDITS.map(({ key, label }) => (
           <Field key={key} label={label} inline={112}>
-            {(ids) => <Input {...ids} mono placeholder="unchanged" value={edits[key] ?? ""} onChange={(ev) => setEdits({ ...edits, [key]: ev.target.value })} />}
+            {(ids) => <Input {...ids} mono value={edits[key] ?? ""} onChange={(ev) => setEdits({ ...edits, [key]: ev.target.value })} />}
           </Field>
         ))}
         <Check label="Replace the body" checked={replaceBody} onChange={setReplaceBody} />
         {replaceBody && <Textarea mono aria-label="New body" rows={5} value={body} onChange={(e) => setBody(e.target.value)} />}
-        <span className="text-12 text-muted">Set properties</span>
+        <h4 className="m-0 text-12 font-semibold text-muted">Set properties</h4>
         <PropertyEditor rows={set} onChange={setSet} />
         <Field label="Remove properties" hint="Names, separated by commas.">
           {(ids) => <Input {...ids} mono value={remove} onChange={(e) => setRemove(e.target.value)} />}
         </Field>
-      </Group>
+      </Disclosure>
       <Group label="Options">
         <Check label="New message IDs" hint="Otherwise each copy keeps its message ID; duplicate detection may drop it." checked={newId} onChange={setNewId} />
         <Check label="Remove the originals" hint="Each original is removed once its copy is sent." checked={removeOriginal} onChange={setRemoveOriginal} />

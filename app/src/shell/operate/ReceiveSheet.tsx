@@ -8,6 +8,7 @@ import { useOperation } from "./useOperation";
 
 type Mode = "lock" | "delete";
 type How = Settlement["type"];
+const HOW_VERB: Record<How, string> = { complete: "complete", abandon: "abandon", defer: "defer", "dead-letter": "dead-letter" };
 const SUB_LABEL: Record<SubQueue, string> = { active: "active messages", "dead-letter": "dead-letter queue", "transfer-dead-letter": "transfer dead-letter queue" };
 const AFTER: Record<How, string> = {
   complete: "Each message is removed once received.",
@@ -16,15 +17,16 @@ const AFTER: Record<How, string> = {
   "dead-letter": "Each message moves to the dead-letter queue.",
 };
 
-/** Receive messages and settle each one, or receive and delete them. Receive and delete is never the starting choice:
- *  the sheet opens on peek-lock every time. */
+/** Receive messages and settle each one, or receive and delete them. Receive and delete is never the starting choice
+ *  (the sheet opens on peek-lock every time), and no settlement is chosen until the person picks one. */
 export function ReceiveSheet({ entity, subQueue, session }: { entity: string; subQueue: SubQueue; session?: string | null }) {
   const { conn, closeSheet } = useShell();
   const op = useOperation();
   const [max, setMax] = useState("10");
   const [wait, setWait] = useState("5");
   const [mode, setMode] = useState<Mode>("lock");
-  const [how, setHow] = useState<How>("complete");
+  // No settlement is chosen for the person: each one changes the messages (Complete removes them).
+  const [how, setHow] = useState<How | null>(null);
   const [reason, setReason] = useState("");
   const [description, setDescription] = useState("");
   const [sessionId, setSessionId] = useState(session ?? "");
@@ -33,12 +35,13 @@ export function ReceiveSheet({ entity, subQueue, session }: { entity: string; su
   const w = /^\d+$/.test(wait.trim()) ? Number(wait.trim()) : NaN;
   const waitError = w >= 0 && w <= 600 ? null : "Wait between 0 and 600 seconds.";
   const shown = maxError ? 1 : n;
-  const action = `${mode === "delete" ? "Receive and delete" : "Receive"} up to ${formatNumber(shown)} ${shown === 1 ? "message" : "messages"}`;
-  const valid = !maxError && !waitError && !!conn.profileId;
+  const verb = mode === "delete" ? "Receive and delete" : how ? `Receive and ${HOW_VERB[how]}` : "Receive";
+  const action = `${verb} up to ${formatNumber(shown)} ${shown === 1 ? "message" : "messages"}`;
+  const valid = !maxError && !waitError && !!conn.profileId && (mode === "delete" || how !== null);
   const submit = () => {
-    if (!valid) return;
+    if (!valid || (mode === "lock" && !how)) return;
     const settlement: Settlement =
-      how === "dead-letter" ? { type: "dead-letter", ...(reason.trim() ? { reason: reason.trim() } : {}), ...(description.trim() ? { description: description.trim() } : {}) } : { type: how };
+      how === "dead-letter" ? { type: "dead-letter", ...(reason.trim() ? { reason: reason.trim() } : {}), ...(description.trim() ? { description: description.trim() } : {}) } : { type: how! };
     void op.start(() =>
       commands.opReceive(conn.profileId!, {
         entity, sub_queue: subQueue, ...(sessionId.trim() ? { session: sessionId.trim() } : {}), max: n, wait_seconds: w,
@@ -85,7 +88,7 @@ export function ReceiveSheet({ entity, subQueue, session }: { entity: string; su
         <Group label="Then">
           <Segmented
             label="Settlement"
-            value={how}
+            value={(how ?? "") as How}
             onChange={setHow}
             options={[
               { value: "complete", label: "Complete" },
@@ -94,7 +97,7 @@ export function ReceiveSheet({ entity, subQueue, session }: { entity: string; su
               { value: "dead-letter", label: "Dead-letter" },
             ]}
           />
-          <p className="m-0 text-12 text-muted">{AFTER[how]}</p>
+          <p className="m-0 text-12 text-muted">{how ? AFTER[how] : "Choose what happens to each message."}</p>
           {how === "dead-letter" && (
             <>
               <Field label="Reason" inline={96}>

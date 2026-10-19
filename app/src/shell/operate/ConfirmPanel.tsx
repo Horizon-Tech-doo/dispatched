@@ -5,7 +5,7 @@ import { Field, Input, ProdBadge } from "@/ui";
  *  sheet's footer) is enabled only when `typed` equals `request.target`. */
 export function ConfirmPanel({ request, typed, onTyped }: { request: ConfirmRequest; typed: string; onTyped: (text: string) => void }) {
   return (
-    <section aria-label="Confirmation" className="flex flex-col gap-3">
+    <div role="group" aria-label="Confirmation" className="flex flex-col gap-3">
       {request.step > 1 && <p className="m-0 text-12 font-semibold text-muted">Confirmation {request.step}</p>}
       {request.production && (
         <p className="m-0 flex items-center gap-1.5 text-12 text-muted">
@@ -22,7 +22,7 @@ export function ConfirmPanel({ request, typed, onTyped }: { request: ConfirmRequ
           {(ids) => <Input {...ids} mono autoFocus value={typed} onChange={(e) => onTyped(e.target.value)} />}
         </Field>
       )}
-    </section>
+    </div>
   );
 }
 

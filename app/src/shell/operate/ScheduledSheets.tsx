@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { commands, type Settlement, type SubQueue } from "@/engine";
-import { FieldMessage, Field, Input, Segmented, formatNumber } from "@/ui";
+import { Field, Input, Segmented, formatNumber } from "@/ui";
 import { useShell } from "../context";
 import { Group } from "./controls";
 import { OperationSheet } from "./OperationSheet";
@@ -8,16 +8,17 @@ import { useOperation } from "./useOperation";
 
 const plural = (n: number, one: string) => `${formatNumber(n)} ${n === 1 ? one : `${one}s`}`;
 
-/** Cancel the selected scheduled messages: they are never enqueued. */
+/** Unschedule the selected scheduled messages: they are never enqueued. Called Unschedule so it never reads like the
+ *  sheet's own Cancel. */
 export function CancelScheduledSheet({ entity, sequences }: { entity: string; sequences: number[] }) {
   const { conn, closeSheet } = useShell();
   const op = useOperation();
   return (
     <OperationSheet
-      title="Cancel scheduled messages"
-      description="Cancelled messages are never enqueued."
+      title="Unschedule messages"
+      description="Unscheduled messages are never enqueued."
       op={op}
-      action={sequences.length ? `Cancel ${plural(sequences.length, "scheduled message")}` : "Cancel scheduled messages"}
+      action={sequences.length ? `Unschedule ${plural(sequences.length, "message")}` : "Unschedule messages"}
       canSubmit={sequences.length > 0 && !!conn.profileId}
       onSubmit={() => void op.start(() => commands.opCancelScheduled(conn.profileId!, entity, sequences.map(String)))}
       onClose={closeSheet}
@@ -27,7 +28,7 @@ export function CancelScheduledSheet({ entity, sequences }: { entity: string; se
           {plural(sequences.length, "selected message")} scheduled in <span className="text-fg">{entity}</span>.
         </p>
       ) : (
-        <FieldMessage error="Select the scheduled messages to cancel first." />
+        <p className="m-0 text-12 text-muted">Select the scheduled messages to unschedule first.</p>
       )}
     </OperationSheet>
   );
@@ -61,7 +62,7 @@ export function SettleDeferredSheet({ entity, subQueue, sequences, session, how:
           {session ? ` (session ${session})` : ""}.
         </p>
       ) : (
-        <FieldMessage error="Select the deferred messages to settle first." />
+        <p className="m-0 text-12 text-muted">Select the deferred messages to settle first.</p>
       )}
       <Group label="Settle as">
         <Segmented

@@ -30,7 +30,7 @@ describe("PurgeSheet", () => {
     // Never one click: counting comes first.
     expect(within(sheet).queryByRole("button", { name: /^Purge/ })).toBeNull();
     await userEvent.click(within(sheet).getByRole("button", { name: "Count messages" }));
-    const plans = await within(sheet).findAllByRole("region", { name: /^Plan for / });
+    const plans = await within(sheet).findAllByRole("group", { name: /^Plan for / });
     expect(plans.map((p) => p.getAttribute("aria-label"))).toEqual(["Plan for label-print", "Plan for customs-docs"]);
     // The active line and the total.
     expect(within(plans[0]).getAllByText("6 messages")).toHaveLength(2);
@@ -71,7 +71,7 @@ describe("PurgeSheet", () => {
     const sheet = await screen.findByRole("dialog", { name: "Purge messages" });
     await userEvent.click(within(sheet).getByRole("radio", { name: "All" }));
     await userEvent.click(within(sheet).getByRole("button", { name: "Count messages" }));
-    const plan = await within(sheet).findByRole("region", { name: "Plan for label-print" });
+    const plan = await within(sheet).findByRole("group", { name: "Plan for label-print" });
     expect(within(plan).getByText("an unknown number of deferred messages")).toBeInTheDocument();
     expect(within(plan).getByText("at least 1,284 messages")).toBeInTheDocument();
     expect(within(sheet).getByRole("button", { name: "Purge label-print" })).toBeEnabled();
@@ -81,9 +81,9 @@ describe("PurgeSheet", () => {
     renderShell("operate-ok", { last_profile: "p-logistics" }, purge(["label-print"]));
     const sheet = await screen.findByRole("dialog", { name: "Purge messages" });
     await userEvent.click(within(sheet).getByRole("button", { name: "Count messages" }));
-    await within(sheet).findByRole("region", { name: "Plan for label-print" });
+    await within(sheet).findByRole("group", { name: "Plan for label-print" });
     await userEvent.click(within(sheet).getByRole("radio", { name: "Dead-letter" }));
-    expect(within(sheet).queryByRole("region", { name: "Plan for label-print" })).toBeNull();
+    expect(within(sheet).queryByRole("group", { name: "Plan for label-print" })).toBeNull();
     expect(within(sheet).getByRole("button", { name: "Count messages" })).toBeInTheDocument();
   });
 });

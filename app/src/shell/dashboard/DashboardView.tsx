@@ -2,7 +2,7 @@ import type { ColumnDef } from "@tanstack/react-table";
 import { Check, ClipboardCopy } from "lucide-react";
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useDashboard, type DashboardRow } from "@/engine";
-import { Button, CountBadge, DataGrid, EmptyState, EntityGlyph, Hint, Input, Problem, Segmented, cn, formatClock, formatNumber, rowHeight, type GridSort } from "@/ui";
+import { Button, Checkbox, CountBadge, DataGrid, EmptyState, EntityGlyph, Hint, Input, Problem, Segmented, cn, formatClock, formatNumber, rowHeight, type GridSort } from "@/ui";
 import { accessAdvice, rightsOf, useAuthKind } from "../access";
 import { useShell } from "../context";
 import { DASHBOARD_REFRESH, type DashboardRefresh } from "../state";
@@ -42,10 +42,11 @@ const Picks = createContext<{ ids: ReadonlySet<string>; toggle(id: string): void
 function PickBox({ row }: { row: DashboardRow }) {
   const p = useContext(Picks);
   return (
-    <input
-      type="checkbox"
+    // Not a tab stop: the grid is one, with its own keyboard selection (arrows, Shift, ⌘A) that these boxes show.
+    <Checkbox
+      tabIndex={-1}
       aria-label={`Select ${pathOf(row).replace(/^\//, "")}`}
-      className="size-3.5 align-middle accent-[var(--c-fg)]"
+      className="align-middle"
       checked={p.ids.has(row.id)}
       onMouseDown={(e) => e.stopPropagation()}
       onClick={(e) => e.stopPropagation()}
@@ -220,6 +221,7 @@ export function DashboardView() {
           {!limited && (
             <Button
               variant="quiet"
+              className="min-w-[148px] tabular-nums"
               disabled={sel.ids.size === 0}
               onClick={() => openSheet({ kind: "operation", op: "purge", entities: rows.filter((r) => sel.ids.has(r.id)).map((r) => r.id) })}
             >

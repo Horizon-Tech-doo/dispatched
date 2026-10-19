@@ -20,8 +20,8 @@ export function MoveSheet(p: { entity: string; view: PeekView; sequences: number
       description="Each message is sent to the target, then removed from here."
       op={op}
       action={verbLabel("Move", sel.count)}
-      canSubmit={!sel.limitError && target !== null && !!conn.profileId}
-      onSubmit={() => target && void op.start(() => commands.opMove(conn.profileId!, { entity: p.entity, view: p.view, selection: sel.selection }, target, drop))}
+      canSubmit={!sel.limitError && !!target?.trim() && !!conn.profileId}
+      onSubmit={() => target?.trim() && void op.start(() => commands.opMove(conn.profileId!, { entity: p.entity, view: p.view, selection: sel.selection }, target.trim(), drop))}
       onClose={closeSheet}
     >
       <SelectionSummary entity={p.entity} view={p.view} sequences={p.sequences} filter={p.filter} limit={sel.limit} setLimit={sel.setLimit} limitError={sel.limitError} />

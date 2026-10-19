@@ -3,7 +3,8 @@ import { commands, type IdsForm, type MessageDetail, type OpenedFiles, type Outg
 import { Button, Field, FieldMessage, Input, Segmented, Textarea, formatNumber } from "@/ui";
 import { useShell } from "../context";
 import { decodeBody } from "../messages/exportJson";
-import { Check, Group, sendTarget } from "./controls";
+import { Check, Disclosure, Group, sendTarget } from "./controls";
+import { EntityPicker } from "./EntityPicker";
 import { OperationSheet } from "./OperationSheet";
 import { PropertyEditor, newRowKey, propertyErrors, propertyForms, type PropRow } from "./PropertyEditor";
 import { checkTtl, copyOf, incrementId } from "./props";
@@ -13,7 +14,12 @@ type BodyKind = "text" | "files" | "template";
 type IdMode = "fixed" | "increment" | "random" | "keep";
 type SystemKey = Exclude<keyof OutgoingForm, "properties" | "message_id" | "time_to_live">;
 
-const CONTENT_TYPES = ["application/json", "application/xml", "text/plain", "application/octet-stream"];
+const CONTENT_TYPES = [
+  { value: "application/json", label: "JSON" },
+  { value: "application/xml", label: "XML" },
+  { value: "text/plain", label: "Text" },
+  { value: "application/octet-stream", label: "Binary" },
+];
 /** The system properties a message can be sent with (§4.7), in form order. */
 const SYSTEM: { key: SystemKey; label: string }[] = [
   { key: "session_id", label: "Session ID" },
@@ -54,6 +60,8 @@ interface Draft {
   batch: boolean;
   /** Why the cloned body could not be copied, if it could not. */
   bodyNote: string | null;
+  /** The content type is typed, not one of the presets. */
+  contentOther: boolean;
 }
 
 /** The form, empty or seeded from a message (Clone & resend: every property a sender can set, typed properties kept,
@@ -61,7 +69,7 @@ interface Draft {
 function draftOf(entity: string | null, d: MessageDetail | null | undefined): Draft {
   const empty: Draft = {
     target: entity ? sendTarget(entity) : "", bodyKind: "text", text: "", files: null, template: null, idMode: "random", fixedId: "", base: "",
-    system: {}, contentType: "", ttl: "", props: [], count: "1", schedule: "", batch: false, bodyNote: null,
+    system: {}, contentType: "", ttl: "", props: [], count: "1", schedule: "", batch: false, bodyNote: null, contentOther: false,
   };
   if (!d) return empty;
   const { text } = decodeBody(d.body, d.body_truncated);
@@ -89,6 +97,7 @@ function draftOf(entity: string | null, d: MessageDetail | null | undefined): Dr
     fixedId: d.message_id ?? "",
     system,
     contentType: d.content_type ?? "",
+    contentOther: !!d.content_type && !CONTENT_TYPES.some((t) => t.value === d.content_type),
     ttl: d.time_to_live_ms != null ? ttlText(d.time_to_live_ms) : "",
     props,
   };
@@ -112,7 +121,11 @@ export function ComposerSheet({ entity, clone }: { entity: string | null; clone?
   const pickMissing = f.bodyKind === "files" && !f.files ? "Choose at least one file." : template && !f.template ? "Choose a template file." : null;
   const idError =
     f.idMode === "fixed" && !f.fixedId.trim() ? "Type the message ID, or choose Random." : f.idMode === "increment" && !f.base.trim() ? "Type the first message ID." : null;
-  const valid = f.target.trim() !== "" && !countError && !ttlError && !scheduleError && propErrors.size === 0 && !pickMissing && !idError;
+  // A clone whose body could not be copied must not go out empty by accident.
+  const bodyMissing = f.bodyKind === "text" && f.bodyNote !== null && f.text === "";
+  const contentChoice = f.contentOther ? "other" : f.contentType === "" ? "none" : f.contentType;
+  const propsSet = [f.contentType, f.ttl, ...SYSTEM.map(({ key }) => f.system[key] ?? "")].filter((v) => v.trim() !== "").length;
+  const valid = !bodyMissing && f.target.trim() !== "" && !countError && !ttlError && !scheduleError && propErrors.size === 0 && !pickMissing && !idError;
   const n = Number.isSafeInteger(count) && count >= 1 ? count : 1;
   const action = `${f.schedule ? "Schedule" : "Send"} ${formatNumber(n)} ${n === 1 ? "message" : "messages"}`;
 
@@ -149,17 +162,19 @@ export function ComposerSheet({ entity, clone }: { entity: string | null; clone?
 
   return (
     <OperationSheet
-      title="Send messages"
-      description={clone ? `A copy of message ${clone.sequence_number}, sent as a new message.` : undefined}
+      title={clone ? "Send a copy" : "Send messages"}
+      failureTitle="Couldn't send the messages"
+      right="Send"
+      description={clone ? `Of message ${clone.sequence_number}, sent as a new message.` : undefined}
       op={op}
       action={action}
       canSubmit={valid && !!conn.profileId}
       onSubmit={submit}
       onClose={closeSheet}
     >
-      <Field label="Entity" hint="A queue or a topic." error={f.target.trim() ? undefined : "Choose where to send the messages."}>
-        {(ids) => <Input {...ids} mono value={f.target} onChange={(e) => set({ target: e.target.value })} />}
-      </Field>
+      <Group label="Send to">
+        <EntityPicker label="Send to" value={f.target || null} onChange={(target) => set({ target })} />
+      </Group>
 
       <Group label="Body">
         <Segmented
@@ -174,8 +189,8 @@ export function ComposerSheet({ entity, clone }: { entity: string | null; clone?
         />
         {f.bodyKind === "text" && (
           <>
+            {f.bodyNote && <p className="m-0 text-12 text-fg">{f.bodyNote} Type a body to send a copy.</p>}
             <Textarea mono aria-label="Body" rows={6} value={f.text} onChange={(e) => set({ text: e.target.value })} />
-            {f.bodyNote && <p className="m-0 text-11 text-muted">{f.bodyNote}</p>}
           </>
         )}
         {f.bodyKind !== "text" && (
@@ -225,19 +240,19 @@ export function ComposerSheet({ entity, clone }: { entity: string | null; clone?
       </Group>
 
       {!template && (
-        <Group label="Properties">
-          <Field label="Content type" inline={128}>
-            {(ids) => (
-              <>
-                <Input {...ids} mono list="composer-content-types" value={f.contentType} onChange={(e) => set({ contentType: e.target.value })} />
-                <datalist id="composer-content-types">
-                  {CONTENT_TYPES.map((t) => (
-                    <option key={t} value={t} />
-                  ))}
-                </datalist>
-              </>
-            )}
-          </Field>
+        <Disclosure label="Properties" set={propsSet}>
+          <span className="text-12 text-muted">Content type</span>
+          <Segmented
+            label="Content type"
+            value={contentChoice}
+            onChange={(v) => set({ contentType: v === "other" ? (CONTENT_TYPES.some((t) => t.value === f.contentType) ? "" : f.contentType) : v === "none" ? "" : v, contentOther: v === "other" })}
+            options={[{ value: "none", label: "None" }, ...CONTENT_TYPES.map((t) => ({ value: t.value, label: t.label })), { value: "other", label: "Other" }]}
+          />
+          {contentChoice === "other" && (
+            <Field label="Other content type" hideLabel>
+              {(ids) => <Input {...ids} mono placeholder="application/vnd.example+json" value={f.contentType} onChange={(e) => set({ contentType: e.target.value })} />}
+            </Field>
+          )}
           {SYSTEM.map(({ key, label }) => (
             <Field key={key} label={label} inline={128}>
               {(ids) => <Input {...ids} mono value={f.system[key] ?? ""} onChange={(e) => set({ system: { ...f.system, [key]: e.target.value } })} />}
@@ -246,7 +261,7 @@ export function ComposerSheet({ entity, clone }: { entity: string | null; clone?
           <Field label="Time to live" inline={128} error={ttlError ?? undefined}>
             {(ids) => <Input {...ids} mono placeholder="5m, 2h, 7d" value={f.ttl} onChange={(e) => set({ ttl: e.target.value })} />}
           </Field>
-        </Group>
+        </Disclosure>
       )}
 
       {!template && (

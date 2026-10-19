@@ -1,5 +1,5 @@
 import { CircleAlert, SlidersHorizontal } from "lucide-react";
-import { useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQueries } from "@tanstack/react-query";
 import { commands, useEntities, useProfiles, useSubscriptionsFor, type EntityKindName } from "@/engine";
 import {
@@ -17,6 +17,7 @@ import { marksTier, type MarksTier } from "./marksLayout";
 import { accessAdvice, useAuthKind } from "../access";
 import { describeListError } from "./listError";
 import { buildNodes, type NsNode, type SubsState } from "./model";
+import { operateCommands, requiresSession } from "../palette/commands";
 import type { EntityCounts } from "@/engine";
 
 const errorKind = (e: Error) => (e as { kind?: string }).kind ?? "";
@@ -274,6 +275,7 @@ export function NamespaceTree() {
   const copy = (text: string, said: string) => void copyText(text, said);
   const menuNode = menuId ? rowById.get(menuId) : undefined;
   const menuEntity = menuNode?.entity;
+  const menuSessions = menuEntity && listing ? requiresSession({ listing, subs: Object.fromEntries(Object.entries(subs).map(([t, v]) => [t, v.data])) }, menuEntity.id) : null;
   const menuDlqUrl = menuEntity && fullHost ? deadLetterUrl(fullHost, menuEntity.id, menuEntity.kind) : null;
 
   const summary = listing && !listing.limited ? `${formatNumber(listing.queues.length)} queues, ${formatNumber(listing.topics.length)} topics` : "";
@@ -384,19 +386,22 @@ export function NamespaceTree() {
                 Copy connection string
               </ContextMenuItem>
               <ContextMenuSeparator />
-              <ContextMenuItem disabled={!menuEntity} onSelect={() => menuEntity && openSheet({ kind: "operation", op: "send", entity: menuEntity.id })}>Send messages…</ContextMenuItem>
-              <ContextMenuItem disabled={!menuEntity} onSelect={() => menuEntity && openSheet({ kind: "operation", op: "import", entity: menuEntity.id })}>Import messages…</ContextMenuItem>
-              {menuEntity?.kind !== "topic" && (
-                <>
-                  <ContextMenuItem disabled={!menuEntity} onSelect={() => menuEntity && openSheet({ kind: "operation", op: "receive", entity: menuEntity.id, subQueue: "active", session: null })}>Receive messages…</ContextMenuItem>
-                  <ContextMenuItem disabled={!menuEntity} onSelect={() => menuEntity && openSheet({ kind: "operation", op: "delete", entity: menuEntity.id, view: "active", sequences: [], filter: {}, total: menuNode?.counts?.active ?? null })}>Delete messages…</ContextMenuItem>
-                  <ContextMenuItem disabled={!menuEntity} onSelect={() => menuEntity && openSheet({ kind: "operation", op: "move", entity: menuEntity.id, view: "active", sequences: [], filter: {}, total: menuNode?.counts?.active ?? null })}>Move messages…</ContextMenuItem>
-                  <ContextMenuItem disabled={!menuEntity} onSelect={() => menuEntity && openSheet({ kind: "operation", op: "resubmit", entity: menuEntity.id, view: "dead-letter", sequences: [], filter: {}, total: menuNode?.counts?.dead_letter ?? null })}>Resubmit dead letters…</ContextMenuItem>
-                  <ContextMenuItem disabled={!menuEntity} onSelect={() => menuEntity && openSheet({ kind: "operation", op: "session-state", entity: menuEntity.id, session: "" })}>Session state…</ContextMenuItem>
-                  <ContextMenuItem disabled={!menuEntity} onSelect={() => menuEntity && openSheet({ kind: "operation", op: "purge", entities: [menuEntity.id] })}>Purge…</ContextMenuItem>
-                </>
-              )}
-              <ContextMenuSeparator />
+              {menuEntity &&
+                // The palette's own operation commands, in three groups: put messages, work on them, remove them.
+                [["op:send", "op:import"], ["op:receive", "op:resubmit", "op:move", "op:cancel-scheduled", "op:session-state"], ["op:delete", "op:purge"]].map((ids, i) => {
+                  const cmds = operateCommands(menuEntity, { openSheet, selection: null, sessions: menuSessions }).filter((c) => ids.includes(c.id));
+                  if (!cmds.length) return null;
+                  return (
+                    <Fragment key={i}>
+                      {cmds.map((c) => (
+                        <ContextMenuItem key={c.id} onSelect={c.run}>
+                          {c.label}
+                        </ContextMenuItem>
+                      ))}
+                      <ContextMenuSeparator />
+                    </Fragment>
+                  );
+                })}
               <ContextMenuItem onSelect={() => void entities.refetch()}>Refresh</ContextMenuItem>
             </ContextMenuContent>
           </ContextMenu>

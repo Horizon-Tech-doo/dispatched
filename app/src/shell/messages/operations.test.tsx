@@ -48,17 +48,17 @@ describe("message operations in the views", () => {
     expect(lastCall<{ form: SelectForm }>(mock, "op_delete")!.form.selection).toEqual({ type: "matching", filter: {}, limit: 112 });
   });
 
-  it("scheduled view shows Cancel scheduled, not Receive", async () => {
+  it("scheduled view shows Unschedule, not Receive", async () => {
     renderShell("operate-ok", seedTab("invoice-generate", "queue", "scheduled"));
     await loaded(/Scheduled messages/);
-    expect(within(toolbar()).getByRole("button", { name: "Cancel scheduled" })).toBeInTheDocument();
+    expect(within(toolbar()).getByRole("button", { name: "Unschedule" })).toBeInTheDocument();
     expect(within(toolbar()).queryByRole("button", { name: "Receive" })).toBeNull();
   });
 
   it("active and dead-letter views offer Receive, Resubmit, Move and Delete; deferred offers Settle", async () => {
     renderShell("operate-ok", seedTab("invoice-generate", "queue", "dead-letter"));
     await loaded(/Dead-letter queue/);
-    for (const name of ["Receive", "Resubmit", "Move", "Delete", "Summary"]) expect(within(toolbar()).getByRole("button", { name })).toBeInTheDocument();
+    for (const name of ["Receive", "Resubmit", "Move", "Delete", "Reasons"]) expect(within(toolbar()).getByRole("button", { name })).toBeInTheDocument();
     // jsdom panels swallow pointer-downs; Radix tabs activate on focus.
     act(() => screen.getByRole("tab", { name: /Deferred/ }).focus());
     await loaded(/Deferred messages/);

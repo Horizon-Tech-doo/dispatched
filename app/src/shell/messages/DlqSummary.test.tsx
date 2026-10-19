@@ -13,7 +13,7 @@ describe("DlqSummary", () => {
     renderShell("default", seedTab("invoice-generate", "dead-letter"));
     await screen.findByRole("grid", { name: /Dead-letter queue/ });
     const bar = screen.getByRole("toolbar", { name: "Peek options" });
-    const toggle = within(bar).getByRole("button", { name: "Summary" });
+    const toggle = within(bar).getByRole("button", { name: "Reasons" });
     await userEvent.click(toggle);
     expect(toggle).toHaveAttribute("aria-pressed", "true");
     const summary = await screen.findByRole("region", { name: "Dead-letter reasons" });

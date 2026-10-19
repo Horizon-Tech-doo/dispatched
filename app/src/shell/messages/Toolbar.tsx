@@ -8,9 +8,10 @@ import {
 import { COLUMN_LABEL, propColumn, type ColumnId } from "./columns";
 import { filterSummary } from "./filterText";
 
-/** Below this toolbar width the labels of Filter, Columns, Export and Peek again give way to icons (each keeps its
+/** Below this toolbar width (wide enough for the operation buttons, so the bar does not wrap) the labels of Filter,
+ *  Columns, the operations, Export and Peek again give way to icons (each keeps its
  *  name and gets a tooltip). A width of 0 (not laid out) counts as wide. */
-export const COMPACT_BELOW = 760;
+export const COMPACT_BELOW = 1180;
 
 function useCompact(ref: { current: HTMLElement | null }): boolean {
   const [compact, setCompact] = useState(false);

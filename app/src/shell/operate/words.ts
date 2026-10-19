@@ -4,7 +4,7 @@ import type { Job } from "../drawer/activity";
 
 /** What a job did to each message, in the past tense: "deleted", "moved". */
 export const PAST: Record<JobKind, string> = {
-  export: "written", send: "sent", import: "imported", "cancel-scheduled": "cancelled", receive: "received", "settle-deferred": "settled",
+  export: "written", send: "sent", import: "imported", "cancel-scheduled": "unscheduled", receive: "received", "settle-deferred": "settled",
   delete: "deleted", move: "moved", resubmit: "resubmitted", purge: "removed", "session-state": "changed",
 };
 
@@ -27,7 +27,7 @@ export function confirmLabel(verb: string, target: string, step: number): string
     case "purge":
       return `Purge ${target}`;
     case "cancel-scheduled":
-      return `Cancel scheduled in ${target}`;
+      return `Unschedule in ${target}`;
     case "receive-and-delete":
       return `Receive and delete from ${target}`;
     case "complete":
@@ -68,7 +68,7 @@ export function outcomeText(j: Job): { text: string; failed: boolean } | null {
 
 /** The state column of a finished operate job. */
 export function finishedState(j: Job): string {
-  const kind = j.error?.kind;
+  const kind = endKind(j);
   if (kind === "cancelled") return "Cancelled";
   if (kind === "stopped") return "Stopped";
   if (kind === "denied") return "Not confirmed";
@@ -80,7 +80,7 @@ export function finishedState(j: Job): string {
 
 /** A neutral sentence for a job that ended without failing: not confirmed, cancelled, or stopped by a closing connection. */
 export function endedText(j: Job): string | null {
-  const kind = j.error?.kind;
+  const kind = endKind(j);
   const n = j.report?.succeeded ?? 0;
   const sofar = `${formatNumber(n)} ${PAST[j.kind]}`;
   if (kind === "denied") return "Not confirmed. Nothing was changed.";
@@ -89,13 +89,17 @@ export function endedText(j: Job): string | null {
   return null;
 }
 
+/** How a job ended when it did not just finish: its error kind, or `cancelled` for a report that says it was
+ *  cancelled even without an error. */
+export const endKind = (j: Job): string | undefined => j.error?.kind ?? (j.report?.cancelled || j.report?.outcome === "cancelled" ? "cancelled" : undefined);
+
 /** The error kinds that are not a failure: the user's choice, or a closing connection. */
 export const neutralEnd = (kind: string | undefined) => kind === "cancelled" || kind === "stopped" || kind === "denied";
 
 /** The heading of a failed operate job: "Delete failed". */
 export function failedTitle(kind: JobKind): string {
   const name: Record<JobKind, string> = {
-    export: "Export", send: "Send", import: "Import", "cancel-scheduled": "Cancel scheduled", receive: "Receive", "settle-deferred": "Settle",
+    export: "Export", send: "Send", import: "Import", "cancel-scheduled": "Unschedule", receive: "Receive", "settle-deferred": "Settle",
     delete: "Delete", move: "Move", resubmit: "Resubmit", purge: "Purge", "session-state": "Session state change",
   };
   return `${name[kind]} failed`;

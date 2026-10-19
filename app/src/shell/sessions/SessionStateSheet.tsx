@@ -6,6 +6,8 @@ import { useShell } from "../context";
 import { Check, Group } from "../operate/controls";
 import { OperationSheet } from "../operate/OperationSheet";
 import { useOperation } from "../operate/useOperation";
+import { adviceFor } from "../operate/advice";
+import { useAuthKind } from "../access";
 
 /** State above this needs "Allow large state" (Premium namespaces allow more). */
 export const STATE_LIMIT = 256 * 1024;
@@ -27,6 +29,7 @@ const fromBase64 = (b64: string): Uint8Array | null => {
  *  current state can be copied, since a replaced or cleared state can't be brought back. */
 export function SessionStateSheet({ entity, session: first }: { entity: string; session: string }) {
   const { conn, closeSheet, copyText } = useShell();
+  const auth = useAuthKind();
   const op = useOperation();
   const qc = useQueryClient();
   const [session, setSession] = useState(first);
@@ -50,7 +53,9 @@ export function SessionStateSheet({ entity, session: first }: { entity: string; 
   const tooLarge = change === "replace" && bytes !== null && bytes.length > STATE_LIMIT && !large;
   const s = current.data;
   const shownBytes = useMemo(() => (s ? fromBase64(s.base64) : null), [s]);
-  const valid = !!conn.profileId && asked !== "" && !valueError && !tooLarge && (change === "clear" || bytes !== null);
+  // An empty value would clear the state under a button that says Replace.
+  const empty = change === "replace" && value === "";
+  const valid = !!conn.profileId && asked !== "" && !valueError && !tooLarge && !empty && (change === "clear" || bytes !== null);
 
   const copyCurrent = async () => {
     if (!s) return;
@@ -73,7 +78,9 @@ export function SessionStateSheet({ entity, session: first }: { entity: string; 
   return (
     <OperationSheet
       title="Session state"
-      description={`Session ${asked || "…"} of ${entity}.`}
+      description={asked ? `Session ${asked} of ${entity}.` : "Choose a session to read its state."}
+      failureTitle="Couldn't change the session state"
+      right="Manage"
       op={op}
       action={change === "clear" ? "Clear state" : "Replace state"}
       canSubmit={valid}
@@ -86,7 +93,7 @@ export function SessionStateSheet({ entity, session: first }: { entity: string; 
             <div className="flex gap-1.5">
               <Input {...ids} mono value={session} onChange={(e) => setSession(e.target.value)} onKeyDown={(e) => e.key === "Enter" && setAsked(session.trim())} />
               <Button onClick={() => setAsked(session.trim())} disabled={!session.trim()}>
-                Read
+                Read state
               </Button>
             </div>
           )}
@@ -97,12 +104,15 @@ export function SessionStateSheet({ entity, session: first }: { entity: string; 
           {current.isPending ? (
             <SkeletonRows rows={3} />
           ) : current.isError ? (
-            <Problem title="Couldn't read the state" body="Try again." detail={current.error.message} action={<Button onClick={() => void current.refetch()}>Try again</Button>} />
+            <Problem
+              title="Couldn't read the state"
+              body={adviceFor((current.error as { kind?: string }).kind ?? "unknown", current.error.message, "Listen", auth)}
+              detail={current.error.message} action={<Button onClick={() => void current.refetch()}>Try again</Button>} />
           ) : !s ? (
             <p className="m-0 text-12 text-muted">This session has no state.</p>
           ) : (
             <>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                 {s.text !== null && (
                   <Segmented
                     label="Show state as"
@@ -115,11 +125,11 @@ export function SessionStateSheet({ entity, session: first }: { entity: string; 
                   />
                 )}
                 <span className="text-11 tabular-nums text-muted">{formatBytes(s.len)}</span>
-                <Button size="sm" className="ml-auto" onClick={() => void copyCurrent()}>
-                  Copy current state
+                <Button size="sm" className="ml-auto" aria-label="Copy current state" onClick={() => void copyCurrent()}>
+                  Copy
                 </Button>
-                <Button size="sm" onClick={() => void saveCurrent()}>
-                  Save current state…
+                <Button size="sm" aria-label="Save current state…" onClick={() => void saveCurrent()}>
+                  Save…
                 </Button>
               </div>
               <div className="h-40 overflow-hidden rounded-ctl border border-line">
@@ -157,6 +167,7 @@ export function SessionStateSheet({ entity, session: first }: { entity: string; 
                 { value: "base64", label: "Base64" },
               ]}
             />
+            {empty && <p className="m-0 text-12 text-muted">To remove the state, choose Clear.</p>}
             <Textarea mono aria-label="New state" aria-invalid={valueError ? true : undefined} rows={5} value={value} onChange={(e) => setValue(e.target.value)} />
             {valueError && <FieldMessage error={valueError} />}
             {bytes && <p className="m-0 text-11 tabular-nums text-muted">{formatBytes(bytes.length)}{format === "text" ? " as UTF-8" : ""}</p>}

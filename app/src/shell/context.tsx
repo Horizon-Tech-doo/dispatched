@@ -24,6 +24,8 @@ export type SheetState =
   | ({ kind: "operation" } & OperationSeed)
   /** A finished job's report. */
   | { kind: "report"; jobId: string }
+  /** A running job whose sheet is gone, to answer the confirmation it waits for. */
+  | { kind: "job"; jobId: string }
   | null;
 
 /** A short line in the status bar about what the user just did (a copy). `details` offers the activity log, where a failed

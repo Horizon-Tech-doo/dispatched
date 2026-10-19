@@ -1,7 +1,9 @@
 import { Button, EmptyState, Sheet } from "@/ui";
 import { useShell } from "../context";
 import { useJobs } from "../drawer/activity";
+import { OperationSheet } from "./OperationSheet";
 import { ReportView } from "./ReportView";
+import { useOperation } from "./useOperation";
 import { endedText } from "./words";
 
 /** A job's report, opened from the Jobs tab. */
@@ -21,4 +23,12 @@ export function ReportSheet({ jobId }: { jobId: string }) {
       )}
     </Sheet>
   );
+}
+
+/** A running job opened from the Jobs tab: its waiting confirmation, its progress and then its report, in the same frame
+ *  its own sheet uses. */
+export function JobSheet({ jobId }: { jobId: string }) {
+  const { closeSheet } = useShell();
+  const op = useOperation(jobId);
+  return <OperationSheet title={op.job?.title ?? "Job"} op={op} action="" canSubmit={false} onSubmit={() => {}} onClose={closeSheet} />;
 }
