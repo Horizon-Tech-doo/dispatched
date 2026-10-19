@@ -173,7 +173,7 @@ where
     let kind = kind.into();
     let _serial = state.connect_lock.lock().await;
     let (id, cancel) = state.jobs.start();
-    let op = match operator_for(state, profile_id, &id, ev.clone()).await {
+    let op = match operator_for(state, profile_id, &id, ev.clone(), cancel.clone()).await {
         Ok(op) => op,
         Err(e) => {
             state.jobs.finish(&id, None);
@@ -227,9 +227,14 @@ fn finish(
         Ok(Done::Report(report, messages)) => {
             jobs.finish(id, None);
             let line = report.summary_line();
+            // A cancelled run ends with a report, not an error: say how it ended all the same.
+            let error = (report.cancelled && cancel.is_cancelled()).then(|| ActivityError {
+                kind: stop_kind(jobs, id).into(),
+                message: stop_message(jobs, id).into(),
+            });
             let stored = Arc::new(StoredReport { report, messages });
             jobs.set_report(id, stored.clone());
-            finished(None, Some(&stored.report), Some(line));
+            finished(error, Some(&stored.report), Some(line));
         }
         Ok(Done::Plain(line)) => {
             jobs.finish(id, None);
@@ -238,11 +243,7 @@ fn finish(
         Err(e) => {
             let mut err = CommandError::from(e);
             if cancel.is_cancelled() {
-                err = if jobs.stopped_by_close(id) {
-                    CommandError::new("stopped", "Stopped: the connection closed.")
-                } else {
-                    CommandError::new("cancelled", "Cancelled.")
-                };
+                err = CommandError::new(stop_kind(jobs, id), stop_message(jobs, id));
             }
             jobs.finish(id, None);
             let partial = match kind {
@@ -269,6 +270,23 @@ fn finish(
                 summary,
             );
         }
+    }
+}
+
+/// How a job that was asked to stop ended: by the user, or because its connection closed.
+fn stop_kind(jobs: &Jobs, id: &str) -> &'static str {
+    if jobs.stopped_by_close(id) {
+        "stopped"
+    } else {
+        "cancelled"
+    }
+}
+
+fn stop_message(jobs: &Jobs, id: &str) -> &'static str {
+    if jobs.stopped_by_close(id) {
+        "Stopped: the connection closed."
+    } else {
+        "Cancelled."
     }
 }
 
@@ -576,7 +594,14 @@ pub async fn purge_plan(
     if entities.is_empty() {
         return Err(CommandError::new("invalid", "Choose what to purge."));
     }
-    let op = operator_for(state, profile_id, "purge-plan", ev).await?;
+    let op = operator_for(
+        state,
+        profile_id,
+        "purge-plan",
+        ev,
+        CancellationToken::new(),
+    )
+    .await?;
     let mut plans = Vec::with_capacity(entities.len());
     for e in &entities {
         plans.push(op.plan_purge(&EntityPath::parse(e)?, scope).await?);
@@ -875,6 +900,38 @@ mod tests {
                 .total,
             1
         );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_report_ends_stopped_with_its_report() {
+        let (s, ev, profile) = connected().await;
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let g = gate.clone();
+        start_op(
+            &s,
+            ev.clone(),
+            &profile,
+            JobKind::Delete,
+            "orders".into(),
+            "Delete".into(),
+            move |_op, _b, c| async move {
+                g.notified().await;
+                assert!(c.is_cancelled());
+                // Real operations end a cancelled run with a report, not an error.
+                let mut r = sample_report(vec![item(1)]);
+                r.cancelled = true;
+                Ok(Done::Report(r, vec![]))
+            },
+        )
+        .await
+        .unwrap();
+        s.jobs.close_running();
+        gate.notify_one();
+        let JobEvent::Finished { error, report, .. } = finished(&ev).await else {
+            unreachable!()
+        };
+        assert_eq!(error.unwrap().kind, "stopped");
+        assert_eq!(report.unwrap().succeeded, 1);
     }
 
     #[tokio::test]

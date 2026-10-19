@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use dispatched_core::activity::{ActivityEntry, ActivityLog, Audit};
 use dispatched_core::ops::Operator;
 use dispatched_core::safety::{Actor, Gate, ProfileRef};
-use horizon_azure_kit::safety::{ConfirmRequest, Decision, Origin, Policy};
+use horizon_azure_kit::safety::{CancellationToken, ConfirmRequest, Decision, Origin, Policy};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -130,19 +130,28 @@ impl Confirms {
 }
 
 /// Asks the webview, through a `confirm` event, and waits for its answer.
+/// Asks nothing once its job is cancelled, and withdraws a question when the job is cancelled
+/// while it waits.
 pub struct GuiPolicy {
     job_id: String,
     confirms: Arc<Confirms>,
     events: Arc<dyn Events>,
+    cancel: CancellationToken,
     step: AtomicU32,
 }
 
 impl GuiPolicy {
-    pub fn new(job_id: &str, confirms: Arc<Confirms>, events: Arc<dyn Events>) -> Self {
+    pub fn new(
+        job_id: &str,
+        confirms: Arc<Confirms>,
+        events: Arc<dyn Events>,
+        cancel: CancellationToken,
+    ) -> Self {
         Self {
             job_id: job_id.to_string(),
             confirms,
             events,
+            cancel,
             step: AtomicU32::new(0),
         }
     }
@@ -151,6 +160,9 @@ impl GuiPolicy {
 #[async_trait]
 impl Policy for GuiPolicy {
     async fn confirm(&self, req: &ConfirmRequest) -> Decision {
+        if self.cancel.is_cancelled() {
+            return Decision::Deny(CANCELLED.into());
+        }
         let (id, rx) = self.confirms.ask(&self.job_id, req);
         self.events.confirm(ConfirmEvent {
             id,
@@ -163,8 +175,13 @@ impl Policy for GuiPolicy {
             production: req.production,
             step: self.step.fetch_add(1, Ordering::SeqCst) + 1,
         });
-        rx.await
-            .unwrap_or_else(|_| Decision::Deny(CANCELLED.into()))
+        tokio::select! {
+            answer = rx => answer.unwrap_or_else(|_| Decision::Deny(CANCELLED.into())),
+            () = self.cancel.cancelled() => {
+                self.confirms.cancel_job(&self.job_id);
+                Decision::Deny(CANCELLED.into())
+            }
+        }
     }
 }
 
@@ -197,6 +214,7 @@ pub async fn gate_for(
     profile_id: &str,
     job_id: &str,
     events: Arc<dyn Events>,
+    cancel: CancellationToken,
 ) -> Result<(Gate, Arc<dispatched_core::Explorer>), CommandError> {
     let active = state.active_for(profile_id).await?;
     let log = state.activity.clone().ok_or_else(|| {
@@ -210,6 +228,7 @@ pub async fn gate_for(
             job_id,
             state.jobs.confirms(),
             events.clone(),
+            cancel,
         )),
         Arc::new(EmittingAudit::new(log, events)),
         Actor {
@@ -229,8 +248,9 @@ pub async fn operator_for(
     profile_id: &str,
     job_id: &str,
     events: Arc<dyn Events>,
+    cancel: CancellationToken,
 ) -> Result<Operator, CommandError> {
-    let (gate, explorer) = gate_for(state, profile_id, job_id, events).await?;
+    let (gate, explorer) = gate_for(state, profile_id, job_id, events, cancel).await?;
     Ok(Operator::new(explorer, gate))
 }
 
@@ -241,6 +261,7 @@ mod tests {
     use dispatched_core::activity::{ActivityQuery, Outcome, Phase};
     use dispatched_core::namespace::{EntityPath, SubQueue};
     use dispatched_core::safety::{Operation, Target};
+    use horizon_azure_kit::safety::CancellationToken;
     use std::time::Duration;
 
     struct Setup {
@@ -259,9 +280,18 @@ mod tests {
         }
 
         fn gate(&self, production: bool) -> Gate {
+            self.gate_with(production, CancellationToken::new())
+        }
+
+        fn gate_with(&self, production: bool, cancel: CancellationToken) -> Gate {
             let ev: Arc<dyn Events> = self.events.clone();
             Gate::new(
-                Arc::new(GuiPolicy::new("job-1", self.confirms.clone(), ev.clone())),
+                Arc::new(GuiPolicy::new(
+                    "job-1",
+                    self.confirms.clone(),
+                    ev.clone(),
+                    cancel,
+                )),
                 Arc::new(EmittingAudit::new(self.log.clone(), ev)),
                 Actor {
                     origin: Origin::Gui,
@@ -410,6 +440,41 @@ mod tests {
             "no longer waiting"
         );
         assert!(s.entries().iter().all(|e| e.outcome == Outcome::Denied));
+    }
+
+    #[tokio::test]
+    async fn a_question_asked_after_the_cancel_is_denied_at_once() {
+        let s = Setup::new();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let gate = s.gate_with(false, cancel);
+        let run = tokio::time::timeout(
+            Duration::from_secs(2),
+            gate.run(&delete_op(), |_| async { Ok(()) }),
+        )
+        .await
+        .expect("never waits");
+        assert!(run.is_err());
+        assert_eq!(s.confirms.waiting(), 0);
+        assert!(
+            s.events.confirms.lock().unwrap().is_empty(),
+            "nothing is asked"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancel_while_waiting_denies_by_the_token_alone() {
+        let s = Setup::new();
+        let cancel = CancellationToken::new();
+        let gate = s.gate_with(false, cancel.clone());
+        let run = tokio::spawn(async move { gate.run(&delete_op(), |_| async { Ok(()) }).await });
+        s.asked(1).await;
+        cancel.cancel();
+        let r = tokio::time::timeout(Duration::from_secs(2), run)
+            .await
+            .expect("ends");
+        assert!(r.unwrap().is_err());
+        assert_eq!(s.confirms.waiting(), 0, "the question is withdrawn");
     }
 
     #[tokio::test]

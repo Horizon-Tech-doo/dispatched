@@ -115,8 +115,8 @@ impl Jobs {
 
     /// Ask a running job to stop. False when there is no such running job.
     pub fn cancel(&self, id: &str) -> bool {
-        self.confirms.cancel_job(id);
-        match self
+        // The token first, so a question asked after this sees it; then the waiting ones.
+        let found = match self
             .inner
             .lock()
             .unwrap()
@@ -128,7 +128,9 @@ impl Jobs {
                 true
             }
             None => false,
-        }
+        };
+        self.confirms.cancel_job(id);
+        found
     }
 
     /// Ask every running job to stop. Returns how many.
@@ -143,7 +145,6 @@ impl Jobs {
     }
 
     fn stop_running(&self, by_close: bool) -> usize {
-        self.confirms.cancel_all();
         let mut inner = self.inner.lock().unwrap();
         let mut n = 0;
         for e in inner.values_mut() {
@@ -154,6 +155,8 @@ impl Jobs {
                 n += 1;
             }
         }
+        drop(inner);
+        self.confirms.cancel_all();
         n
     }
 
