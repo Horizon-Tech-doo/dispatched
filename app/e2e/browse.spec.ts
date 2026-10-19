@@ -261,7 +261,8 @@ test("dashboard: dead letters first, only those, copy as TSV, open an entity", a
   await only.click();
   await expect(grid.getByRole("row", { name: "customs-docs" })).toHaveCount(0);
   await expect(grid.getByRole("row", { name: /tracking-sync/ })).toBeVisible();
-  await page.getByRole("radio", { name: /^All/ }).click();
+  // The Dashboard's "All {n}", not the Activity log's "All".
+  await page.getByRole("radio", { name: /^All \d/ }).click();
   await expect(grid.getByRole("row", { name: "customs-docs" })).toBeVisible();
 
   await page.getByRole("button", { name: "Copy as TSV" }).click();
