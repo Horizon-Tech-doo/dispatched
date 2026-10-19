@@ -5,6 +5,7 @@ import { Button, EmptyState, Hint, IconButton, Tabs, TabsContent, TabsList, Tabs
 import { useShell } from "../context";
 import { jobStore, useActivity, useJobs, type Job } from "./activity";
 import { plural } from "./plural";
+import { endedText, failedTitle, finishedState, neutralEnd, outcomeText, runningText } from "../operate/words";
 
 function ActivityLog() {
   const entries = useActivity();
@@ -90,7 +91,7 @@ function nextStep(kind: string): string {
 /** One job: what it is, the file it writes, how far it got, and what can be done with it (Cancel while it runs,
  *  Show in the file manager once an export has written its file, Try again after a failure). Wide: title, bar,
  *  numbers and action in a row; narrow (the drawer's own width, by container query): stacked. */
-function JobRow({ j }: { j: Job }) {
+function ExportRow({ j }: { j: Job }) {
   const { openSheet } = useShell();
   const [cancelling, setCancelling] = useState(false);
   const [revealFailed, setRevealFailed] = useState(false);
@@ -202,6 +203,73 @@ function JobRow({ j }: { j: Job }) {
       </span>
     </li>
   );
+}
+
+/** One operate job: what it is, how far it got or how it went ("2 of 3 deleted, 1 failed"), Cancel while it runs and
+ *  View report once it has one. Laid out like an export row. */
+function OperateRow({ j }: { j: Job }) {
+  const { openSheet } = useShell();
+  const [cancelling, setCancelling] = useState(false);
+  const running = !j.finished;
+  const failed = j.error != null && !neutralEnd(j.error.kind);
+  const ended = j.finished ? endedText(j) : null;
+  const outcome = j.finished && !j.error ? outcomeText(j) : null;
+  const pct = running && j.total ? Math.min(100, (j.done / j.total) * 100) : 0;
+  const cancel = () => {
+    setCancelling(true);
+    commands.jobCancel(j.id).catch(() => setCancelling(false));
+  };
+  return (
+    <li className="grid grid-cols-1 gap-y-1.5 px-3.5 py-2 text-12 @[560px]:grid-cols-[minmax(200px,1fr)_minmax(120px,200px)_max-content] @[560px]:items-start @[560px]:gap-x-4">
+      <span className="min-w-0">
+        <span className="block truncate">{j.title}</span>
+        {outcome && (
+          <span className="flex items-center gap-1.5 text-11 text-muted">
+            {outcome.failed && <CircleAlert aria-hidden="true" className="size-3 shrink-0 text-accent" />}
+            <span>{outcome.text}</span>
+          </span>
+        )}
+        {ended && <span className="block text-11 text-muted">{ended}</span>}
+        {failed && j.error && (
+          <span className="mt-1 flex flex-col gap-0.5">
+            <span className="flex items-center gap-1.5 text-12 font-semibold text-fg">
+              <CircleAlert aria-hidden="true" className="size-3 shrink-0 text-accent" />
+              {failedTitle(j.kind)}
+            </span>
+            <span className="min-w-0 break-words font-mono text-11 text-fg" data-selectable>
+              {j.error.message}
+            </span>
+          </span>
+        )}
+      </span>
+      {running && j.total != null ? (
+        <span role="progressbar" aria-label={j.title} aria-valuemin={0} aria-valuemax={j.total} aria-valuenow={Math.min(j.done, j.total)} className="block h-[3px] bg-line @[560px]:mt-[7px]">
+          <span className="block h-[3px] bg-fg" style={{ width: `${pct}%` }} />
+        </span>
+      ) : running ? (
+        <span aria-hidden="true" className="block h-[3px] bg-line @[560px]:mt-[7px]" />
+      ) : (
+        <span aria-hidden="true" className="hidden @[560px]:block" />
+      )}
+      <span className="flex items-center justify-between gap-3 @[560px]:justify-end">
+        <span className="min-w-[96px] whitespace-nowrap text-left text-11 tabular-nums text-muted @[560px]:text-right">{running ? runningText(j) : finishedState(j)}</span>
+        {running && (
+          <Button size="sm" className="h-[18px]" disabled={cancelling} onClick={cancel} aria-label={`${cancelling ? "Cancelling" : "Cancel"} ${j.title}`}>
+            {cancelling ? "Cancelling" : "Cancel"}
+          </Button>
+        )}
+        {j.finished && j.report && (
+          <Button size="sm" className="h-[18px]" onClick={() => openSheet({ kind: "report", jobId: j.id })} aria-label={`View report: ${j.title}`}>
+            View report
+          </Button>
+        )}
+      </span>
+    </li>
+  );
+}
+
+function JobRow({ j }: { j: Job }) {
+  return j.kind === "export" ? <ExportRow j={j} /> : <OperateRow j={j} />;
 }
 
 function JobsList() {

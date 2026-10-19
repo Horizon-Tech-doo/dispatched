@@ -7,6 +7,7 @@ import { useConnectionController, type ConnectionController } from "./connection
 import { clearViewStates } from "./messages/viewStore";
 import { connectionStringScope, displayName } from "./entityId";
 import { installStore } from "./sheets/installState";
+import type { OperationSeed } from "./operate/seed";
 import { usePrefs, useProfileShell, type Prefs, type ProfileShell, type ShellAction } from "./state";
 
 export type SheetState =
@@ -18,6 +19,10 @@ export type SheetState =
   /** Export messages of one view: `selected` are the grid's selected sequence numbers (or one message's), `total` the
    *  view's listed count (null when unknown). `scope` and `format` start the sheet on those choices (a retry). */
   | { kind: "export"; entity: string; view: PeekView; filter: FilterSpec; selected: number[]; total: number | null; scope?: "all" | "selected"; format?: ExportFormat }
+  /** An operation (send, delete, move, purge, …), with what it starts from. */
+  | ({ kind: "operation" } & OperationSeed)
+  /** A finished job's report. */
+  | { kind: "report"; jobId: string }
   | null;
 
 /** A short line in the status bar about what the user just did (a copy). `details` offers the activity log, where a failed

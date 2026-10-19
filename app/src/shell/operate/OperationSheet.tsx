@@ -1,0 +1,166 @@
+import { useState, type ReactNode } from "react";
+import { Button, Problem, Sheet, formatNumber } from "@/ui";
+import { useShell } from "../context";
+import type { Job } from "../drawer/activity";
+import { ConfirmPanel, answerFor, canConfirm } from "./ConfirmPanel";
+import { ReportView } from "./ReportView";
+import type { Operation } from "./useOperation";
+import { confirmLabel, endedText, failedTitle, itemsSoFar, neutralEnd, runningText } from "./words";
+
+/** What to do about a refused start, by the kind of refusal. The engine's own words go on the detail line. */
+const startAdvice = (kind: string): string =>
+  kind === "invalid"
+    ? "Check the fields, then try again."
+    : kind === "not_connected"
+      ? "The connection has closed. Connect again, then try again."
+      : kind === "activity_unavailable"
+        ? "Nothing that changes messages can run without the activity log."
+        : "Try again.";
+
+/** How far a running job is: the job's own progress bar and numbers. */
+function Running({ job }: { job: Job | null }) {
+  if (!job) return <p className="m-0 text-12 text-muted">Starting…</p>;
+  const n = Math.max(job.done, itemsSoFar(job));
+  return (
+    <div className="flex flex-col gap-2">
+      <p className="m-0 text-12 text-fg">{job.title}</p>
+      {job.total != null ? (
+        <span role="progressbar" aria-label={job.title} aria-valuemin={0} aria-valuemax={job.total} aria-valuenow={Math.min(n, job.total)} className="block h-[3px] bg-line">
+          <span className="block h-[3px] bg-fg" style={{ width: `${job.total ? Math.min(100, (n / job.total) * 100) : 0}%` }} />
+        </span>
+      ) : (
+        <span aria-hidden="true" className="block h-[3px] bg-line" />
+      )}
+      <p className="m-0 text-11 tabular-nums text-muted">{runningText(job)}</p>
+      {job.notes.length > 0 && (
+        <ul className="m-0 flex list-none flex-col gap-0.5 p-0 text-11 text-muted">
+          {job.notes.map((t, i) => (
+            <li key={i}>{t}</li>
+          ))}
+        </ul>
+      )}
+      {job.received > 0 && <p className="m-0 text-11 tabular-nums text-muted">{formatNumber(job.received)} received</p>}
+    </div>
+  );
+}
+
+/** How a finished job went: a neutral line when it was not confirmed, cancelled or stopped, the error form when it
+ *  failed, and the report whenever there is one. */
+function Done({ job }: { job: Job }) {
+  const ended = endedText(job);
+  const failed = job.error && !neutralEnd(job.error.kind);
+  return (
+    <div className="flex flex-col gap-3">
+      {ended && <p className="m-0 text-12 text-muted">{ended}</p>}
+      {failed && job.error && (
+        <Problem title={failedTitle(job.kind)} body={job.report ? "The report lists what was done before it stopped." : "Nothing was changed."} detail={job.error.message} />
+      )}
+      <ReportView job={job} />
+    </div>
+  );
+}
+
+/**
+ * The frame every operation sheet uses: its form, then the core's confirmations (one at a time, in this sheet), then
+ * the run, then the report. One primary button per stage: the action, the confirmation, Cancel job, Close. While a
+ * confirmation waits or the job runs the sheet cannot be dismissed; Cancel (while confirming) closes it and answers no.
+ */
+export function OperationSheet({
+  title,
+  description,
+  op,
+  action,
+  canSubmit = true,
+  onSubmit,
+  onClose,
+  children,
+}: {
+  title: string;
+  description?: string;
+  op: Operation;
+  /** The form's primary button, naming what it does: "Delete 3 messages". */
+  action: string;
+  canSubmit?: boolean;
+  onSubmit: () => void;
+  onClose: () => void;
+  /** The form. */
+  children: ReactNode;
+}) {
+  const { dispatch } = useShell();
+  const [typed, setTyped] = useState<{ id: string; text: string }>({ id: "", text: "" });
+  const [cancelling, setCancelling] = useState<string | null>(null);
+  const ask = op.stage === "confirming" ? op.job?.confirm ?? null : null;
+  const text = ask && typed.id === ask.id ? typed.text : "";
+  const busy = op.stage === "confirming" || op.stage === "running";
+  const close = () => {
+    op.leave();
+    onClose();
+  };
+
+  const footer =
+    op.stage === "form" ? (
+      <>
+        <Button onClick={onClose}>Cancel</Button>
+        <Button variant="primary" disabled={!canSubmit || op.starting} aria-busy={op.starting} onClick={onSubmit}>
+          {action}
+        </Button>
+      </>
+    ) : ask ? (
+      <>
+        <Button onClick={close}>Cancel</Button>
+        <Button variant="primary" disabled={!canConfirm(ask, text)} onClick={() => void op.answer(answerFor(ask, text))}>
+          {confirmLabel(ask.verb, ask.target, ask.step)}
+        </Button>
+      </>
+    ) : op.stage === "running" ? (
+      <>
+        <Button
+          onClick={() => {
+            dispatch({ type: "layout", patch: { drawerOpen: true, drawerTab: "jobs" } });
+            onClose();
+          }}
+        >
+          Show in Jobs
+        </Button>
+        <Button
+          variant="primary"
+          disabled={cancelling === op.jobId}
+          onClick={() => {
+            setCancelling(op.jobId);
+            op.cancel();
+          }}
+        >
+          {cancelling === op.jobId ? "Cancelling" : "Cancel job"}
+        </Button>
+      </>
+    ) : (
+      <Button variant="primary" onClick={onClose}>
+        Close
+      </Button>
+    );
+
+  return (
+    <Sheet
+      open
+      onOpenChange={(o) => !o && close()}
+      title={title}
+      description={description}
+      dismissible={!busy}
+      initialFocus={op.stage === "form" ? "field" : "sheet"}
+      footer={footer}
+    >
+      {op.stage === "form" ? (
+        <div className="flex flex-col gap-4">
+          {children}
+          {op.failure && <Problem role="alert" title="Couldn't start" body={startAdvice(op.failure.kind)} detail={op.failure.message} />}
+        </div>
+      ) : ask ? (
+        <ConfirmPanel key={ask.id} request={ask} typed={text} onTyped={(t) => setTyped({ id: ask.id, text: t })} />
+      ) : op.stage === "running" ? (
+        <Running job={op.job} />
+      ) : (
+        op.job && <Done job={op.job} />
+      )}
+    </Sheet>
+  );
+}
