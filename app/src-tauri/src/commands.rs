@@ -578,6 +578,7 @@ pub async fn pick_open_paths(
     let filters: (&str, &[&str]) = match purpose.as_str() {
         "template" => ("Message template", &["json", "xml"]),
         "import" => ("Exported messages", &["json", "ndjson"]),
+        "entities" => ("ServiceBusExplorer entities", &["xml"]),
         "body" => ("Any file", &["*"]),
         _ => return Err(CommandError::new("invalid", "Unknown file purpose.")),
     };

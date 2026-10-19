@@ -296,7 +296,7 @@ fn opened_files(jobs: &Jobs, pick: &str) -> Result<Vec<PathBuf>, CommandError> {
         .ok_or_else(|| CommandError::new("invalid", "Choose the file again."))
 }
 
-fn report(r: dispatched_core::Result<JobReport>) -> dispatched_core::Result<Done> {
+pub(crate) fn report(r: dispatched_core::Result<JobReport>) -> dispatched_core::Result<Done> {
     r.map(|r| Done::Report(r, Vec::new()))
 }
 

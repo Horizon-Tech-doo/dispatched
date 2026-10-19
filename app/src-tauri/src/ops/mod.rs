@@ -11,6 +11,7 @@ pub mod discovery;
 mod emulator_m2b;
 pub mod entity;
 pub mod export;
+pub mod manage;
 pub mod manage_read;
 pub mod manage_types;
 pub mod operate;

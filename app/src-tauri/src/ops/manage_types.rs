@@ -65,8 +65,7 @@ pub struct FormIssue {
 /// serde's message without its trailing position, as a sentence.
 fn serde_message(e: &serde_json::Error) -> String {
     let m = e.to_string();
-    let m = m.split(" at line ").next().unwrap_or(&m).to_string();
-    m
+    m.split(" at line ").next().unwrap_or(&m).to_string()
 }
 
 /// Every problem with a settings form: values that do not parse, unknown fields, settings
