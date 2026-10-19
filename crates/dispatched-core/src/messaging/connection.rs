@@ -1,14 +1,22 @@
 //! One AMQP connection per namespace: connection + session + CBS client,
 //! plus cached management links per entity address.
 
+use super::lockops::{
+    CANCEL_SCHEDULED, SCHEDULE, cancel_scheduled_request, parse_schedule_response,
+    parse_status_only, schedule_request,
+};
+use super::management::map_sender_attach_error;
 use super::management::{ManagementLink, SETUP_TIMEOUT, map_put_token_error};
+use super::outgoing::OutgoingMessage;
+use super::receiver::{AmqpReceiver, ReceiverSpec, SessionChoice};
+use super::sender::{AmqpSender, Chunked, encode_for_schedule, send_target};
 use super::tokens_ledger::{LinkLru, TokenLedger, must_reattach};
 use crate::namespace::Namespace;
 use crate::{Error, Result};
-use fe2o3_amqp::Session;
 use fe2o3_amqp::connection::ConnectionHandle;
 use fe2o3_amqp::session::SessionHandle;
 use fe2o3_amqp::types::primitives::Timestamp;
+use fe2o3_amqp::{Sender, Session};
 use fe2o3_amqp_cbs::client::CbsClient;
 use fe2o3_amqp_cbs::token::CbsToken;
 use secrecy::ExposeSecret;
@@ -122,6 +130,126 @@ impl ServiceBusConnection {
                 .forget(&self.ns.amqp_audience(&format!("{evicted}/$management")));
         }
         Ok(self.management.get_mut(address).expect("inserted above"))
+    }
+
+    /// Open a receiver for `spec`: put tokens for the address and its
+    /// `$management`, then attach the data link and a private management
+    /// link on this connection's session.
+    pub(crate) async fn open_receiver(&mut self, spec: &ReceiverSpec) -> Result<AmqpReceiver> {
+        if spec.session == SessionChoice::NextAvailable {
+            return Err(Error::Invalid(
+                "a next-available session receiver is opened with try_accept_next, which can wait for a session".into(),
+            ));
+        }
+        self.authorize_receiver(&spec.address).await?;
+        AmqpReceiver::attach(&mut self.session, spec, None)
+            .await?
+            .ok_or_else(|| Error::Protocol(format!("attach receiver to {}", spec.address)))
+    }
+
+    /// Accept the next available session of `spec.address`, waiting at most
+    /// `wait`; `Ok(None)` when no session is available. `spec.session` must
+    /// be `None` or `NextAvailable` (a named session is opened with
+    /// [`open_receiver`](Self::open_receiver)).
+    pub(crate) async fn try_accept_next(
+        &mut self,
+        spec: &ReceiverSpec,
+        wait: Duration,
+    ) -> Result<Option<AmqpReceiver>> {
+        if let SessionChoice::Id(_) = spec.session {
+            return Err(Error::Invalid(
+                "try_accept_next takes the next available session; open a named session with open_receiver".into(),
+            ));
+        }
+        self.authorize_receiver(&spec.address).await?;
+        let next = ReceiverSpec {
+            session: SessionChoice::NextAvailable,
+            ..spec.clone()
+        };
+        AmqpReceiver::attach(&mut self.session, &next, Some(wait)).await
+    }
+
+    /// Open a sender to a queue or topic `address`: put a token for it, then
+    /// attach the data link. Subscription paths are refused before any I/O.
+    pub(crate) async fn open_sender(&mut self, address: &str) -> Result<AmqpSender> {
+        let target = send_target(address)?.base();
+        self.ensure_authorized(&target).await?;
+        let sender = tokio::time::timeout(
+            SETUP_TIMEOUT,
+            Sender::builder()
+                .name(format!("{target}-tx-{}", uuid::Uuid::new_v4().simple()))
+                .target(target.clone())
+                .attach(&mut self.session),
+        )
+        .await
+        .map_err(|_| Error::Timeout(format!("attach sender to {target} timed out")))?
+        .map_err(|e| map_sender_attach_error(&target, &target, e))?;
+        Ok(AmqpSender::new(sender))
+    }
+
+    /// Schedule `batch` on `address` for `at` through the entity's `$management`
+    /// link, 100 messages per request. `each(index, Ok(sequence_number))` reports
+    /// every scheduled message; a message that cannot be encoded is reported
+    /// `Err` for its index alone and the rest still go. If a request fails, its
+    /// messages and every later one are reported with that error, which is also
+    /// returned; earlier chunks stay scheduled and were already reported. A
+    /// message without a message id gets a new UUID.
+    pub(crate) async fn schedule(
+        &mut self,
+        address: &str,
+        batch: &[OutgoingMessage],
+        at: OffsetDateTime,
+        mut each: impl FnMut(usize, Result<i64>),
+    ) -> Result<()> {
+        let target = send_target(address)?.base();
+        let now = OffsetDateTime::now_utc();
+        let entries = batch
+            .iter()
+            .map(|m| encode_for_schedule(m, at, now))
+            .collect();
+        let mut chunks = Chunked::new(entries, &mut each);
+        while let Some(chunk) = chunks.next_chunk() {
+            let outcome = async {
+                let link = self.management(&target).await?;
+                let resp = link.call(SCHEDULE, schedule_request(chunk)).await?;
+                parse_schedule_response(resp)
+            }
+            .await;
+            chunks.finish(outcome, &mut each)?;
+        }
+        Ok(())
+    }
+
+    /// Cancel scheduled messages by sequence number, 100 per request.
+    /// `each(index, result)` reports every sequence number; a failed request
+    /// reports its numbers and all later ones with the error, which is returned.
+    pub(crate) async fn cancel_scheduled(
+        &mut self,
+        address: &str,
+        seqs: &[i64],
+        mut each: impl FnMut(usize, Result<()>),
+    ) -> Result<()> {
+        let target = send_target(address)?.base();
+        let mut chunks = Chunked::new(seqs.iter().map(|s| Ok(*s)).collect(), &mut each);
+        while let Some(chunk) = chunks.next_chunk() {
+            let outcome = async {
+                let link = self.management(&target).await?;
+                let resp = link
+                    .call(CANCEL_SCHEDULED, cancel_scheduled_request(chunk))
+                    .await?;
+                parse_status_only(resp, CANCEL_SCHEDULED)?;
+                Ok(vec![(); chunk.len()])
+            }
+            .await;
+            chunks.finish(outcome, &mut each)?;
+        }
+        Ok(())
+    }
+
+    async fn authorize_receiver(&mut self, address: &str) -> Result<()> {
+        self.ensure_authorized(address).await?;
+        self.ensure_authorized(&format!("{address}/$management"))
+            .await
     }
 
     /// The AMQP session (for data links).

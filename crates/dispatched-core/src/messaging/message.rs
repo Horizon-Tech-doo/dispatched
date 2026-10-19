@@ -10,6 +10,7 @@ use fe2o3_amqp::types::primitives::{SimpleValue, Timestamp, Value};
 use serde::{Serialize, Serializer};
 use serde_amqp::descriptor::Descriptor;
 use std::collections::BTreeMap;
+use std::time::Duration;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -75,8 +76,9 @@ pub struct PeekedMessage {
     pub locked_until: Option<OffsetDateTime>,
     /// Delivery attempts so far.
     pub delivery_count: u32,
-    /// Time-to-live in ms, if set on the message.
-    pub time_to_live_ms: Option<u32>,
+    /// Time to live, from the header or from expiry minus creation time; serialized as milliseconds.
+    #[serde(rename = "time_to_live_ms", with = "ttl_ms")]
+    pub time_to_live: Option<Duration>,
     /// `DeadLetterReason` application property.
     pub dead_letter_reason: Option<String>,
     /// `DeadLetterErrorDescription` application property.
@@ -87,6 +89,25 @@ pub struct PeekedMessage {
     pub application_properties: BTreeMap<String, PropValue>,
     /// Body.
     pub body: MessageBody,
+}
+
+/// Serde for an optional time to live as whole milliseconds (`time_to_live_ms`).
+pub mod ttl_ms {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::time::Duration;
+
+    /// Serialize as `u64` milliseconds (saturating) or null.
+    pub fn serialize<S: Serializer>(v: &Option<Duration>, s: S) -> Result<S::Ok, S::Error> {
+        match v {
+            Some(d) => s.serialize_some(&u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
+            None => s.serialize_none(),
+        }
+    }
+
+    /// Deserialize `u64` milliseconds or null. Use with `#[serde(default)]` so a missing field is None.
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
+        Ok(Option::<u64>::deserialize(d)?.map(Duration::from_millis))
+    }
 }
 
 /// Message body in display form.
@@ -103,6 +124,13 @@ pub enum MessageBody {
     Sequence(serde_json::Value),
     /// No body.
     Empty,
+}
+
+fn as_iso_duration<S: Serializer>(
+    d: &time::Duration,
+    s: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    s.serialize_str(&crate::messaging::props::format_iso_duration(*d))
 }
 
 fn as_base64<S: Serializer>(bytes: &[u8], s: S) -> std::result::Result<S::Ok, S::Error> {
@@ -144,19 +172,38 @@ pub enum PropValue {
     Null,
     /// bool
     Bool(bool),
-    /// any signed integer
-    Int(i64),
-    /// any unsigned integer
-    UInt(u64),
-    /// float / double
+    /// 8-bit signed integer (AMQP byte)
+    Byte(i8),
+    /// 16-bit signed integer (AMQP short)
+    Short(i16),
+    /// 32-bit signed integer (AMQP int)
+    Int(i32),
+    /// 64-bit signed integer (AMQP long)
+    Long(i64),
+    /// 8-bit unsigned integer (AMQP ubyte)
+    UByte(u8),
+    /// 16-bit unsigned integer (AMQP ushort)
+    UShort(u16),
+    /// 32-bit unsigned integer (AMQP uint)
+    UInt(u32),
+    /// 64-bit unsigned integer (AMQP ulong)
+    ULong(u64),
+    /// 32-bit float (AMQP float)
+    Float(f32),
+    /// 64-bit float (AMQP double)
     Double(f64),
-    /// string or symbol
+    /// string
     String(String),
+    /// AMQP symbol (kept apart from string, so a copy sends it as a symbol again)
+    Symbol(String),
     /// timestamp
     #[serde(with = "time::serde::rfc3339")]
     Timestamp(OffsetDateTime),
+    /// A .NET `TimeSpan` (described `com.microsoft:timespan`), serialized as ISO 8601 duration text.
+    #[serde(serialize_with = "as_iso_duration")]
+    TimeSpan(time::Duration),
     /// uuid
-    Uuid(String),
+    Uuid(uuid::Uuid),
     /// binary
     Binary(#[serde(serialize_with = "as_base64")] Vec<u8>),
     /// anything else, rendered
@@ -175,7 +222,7 @@ impl PropValue {
 
 /// Convert an AMQP timestamp without panicking; `None` when the (sender-controlled)
 /// value falls outside years 0..=9999, which RFC 3339 can represent.
-fn timestamp_to_datetime(ts: &Timestamp) -> Option<OffsetDateTime> {
+pub(crate) fn timestamp_to_datetime(ts: &Timestamp) -> Option<OffsetDateTime> {
     let nanos = i128::from(ts.milliseconds()) * 1_000_000;
     let dt = OffsetDateTime::from_unix_timestamp_nanos(nanos).ok()?;
     (0..=9999).contains(&dt.year()).then_some(dt)
@@ -235,31 +282,41 @@ fn amqp_to_json(v: &Value) -> serde_json::Value {
     }
 }
 
-fn simple_to_prop(v: &SimpleValue) -> PropValue {
+pub(crate) fn simple_to_prop(v: &SimpleValue) -> PropValue {
     match v {
         SimpleValue::Null => PropValue::Null,
         SimpleValue::Bool(b) => PropValue::Bool(*b),
-        SimpleValue::Byte(n) => PropValue::Int(i64::from(*n)),
-        SimpleValue::Short(n) => PropValue::Int(i64::from(*n)),
-        SimpleValue::Int(n) => PropValue::Int(i64::from(*n)),
-        SimpleValue::Long(n) => PropValue::Int(*n),
-        SimpleValue::Ubyte(n) => PropValue::UInt(u64::from(*n)),
-        SimpleValue::Ushort(n) => PropValue::UInt(u64::from(*n)),
-        SimpleValue::Uint(n) => PropValue::UInt(u64::from(*n)),
-        SimpleValue::Ulong(n) => PropValue::UInt(*n),
-        SimpleValue::Float(f) => PropValue::Double(f64::from(f.into_inner())),
+        SimpleValue::Byte(n) => PropValue::Byte(*n),
+        SimpleValue::Short(n) => PropValue::Short(*n),
+        SimpleValue::Int(n) => PropValue::Int(*n),
+        SimpleValue::Long(n) => PropValue::Long(*n),
+        SimpleValue::Ubyte(n) => PropValue::UByte(*n),
+        SimpleValue::Ushort(n) => PropValue::UShort(*n),
+        SimpleValue::Uint(n) => PropValue::UInt(*n),
+        SimpleValue::Ulong(n) => PropValue::ULong(*n),
+        SimpleValue::Float(f) => PropValue::Float(f.into_inner()),
         SimpleValue::Double(f) => PropValue::Double(f.into_inner()),
         SimpleValue::String(s) => PropValue::String(s.clone()),
-        SimpleValue::Symbol(s) => PropValue::String(s.0.clone()),
+        SimpleValue::Symbol(s) => PropValue::Symbol(s.0.clone()),
         SimpleValue::Timestamp(t) => match timestamp_to_datetime(t) {
             Some(dt) => PropValue::Timestamp(dt),
-            None => PropValue::Int(t.milliseconds()),
+            // Outside what a time can hold: never sent again as another type.
+            None => PropValue::Other(format!("timestamp {} ms", t.milliseconds())),
         },
-        SimpleValue::Uuid(u) => PropValue::Uuid(uuid::Uuid::from(u.clone()).to_string()),
+        SimpleValue::Uuid(u) => PropValue::Uuid(uuid::Uuid::from(u.clone())),
         SimpleValue::Binary(b) => PropValue::Binary(b.to_vec()),
+        SimpleValue::Described(d) => match (&d.descriptor, &d.value) {
+            (Descriptor::Name(name), Value::Long(ticks)) if name.0 == TIMESPAN_DESCRIPTOR => {
+                PropValue::TimeSpan(crate::messaging::props::duration_from_ticks(*ticks))
+            }
+            _ => PropValue::Other(format!("{v:?}")),
+        },
         other => PropValue::Other(format!("{other:?}")),
     }
 }
+
+/// Descriptor the .NET SDK writes around a `TimeSpan` property (value: `Long` ticks of 100 ns).
+pub(crate) const TIMESPAN_DESCRIPTOR: &str = "com.microsoft:timespan";
 
 fn message_id_string(id: &MessageId) -> String {
     match id {
@@ -305,6 +362,16 @@ fn annotation_string(m: &Message<Body<Value>>, key: &str) -> Option<String> {
     }
 }
 
+/// `dead_letter_reason` and `dead_letter_description` from the `DeadLetterReason` and
+/// `DeadLetterErrorDescription` application properties (string values only). The one
+/// derivation, shared by decoding and the test broker.
+pub(crate) fn dead_letter_fields(
+    props: &BTreeMap<String, PropValue>,
+) -> (Option<String>, Option<String>) {
+    let text = |key: &str| props.get(key).and_then(|v| v.as_str()).map(str::to_string);
+    (text("DeadLetterReason"), text("DeadLetterErrorDescription"))
+}
+
 /// Convert an AMQP message into the display model.
 pub fn decode_message(m: Message<Body<Value>>) -> PeekedMessage {
     let sequence_number = match annotation(&m, "x-opt-sequence-number") {
@@ -324,14 +391,7 @@ pub fn decode_message(m: Message<Body<Value>>) -> PeekedMessage {
             application_properties.insert(k.clone(), simple_to_prop(v));
         }
     }
-    let dead_letter_reason = application_properties
-        .get("DeadLetterReason")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-    let dead_letter_description = application_properties
-        .get("DeadLetterErrorDescription")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
+    let (dead_letter_reason, dead_letter_description) = dead_letter_fields(&application_properties);
     let body = match &m.body {
         Body::Data(batch) => {
             let bytes: Vec<u8> = batch.iter().flat_map(|d| d.0.iter().copied()).collect();
@@ -357,6 +417,24 @@ pub fn decode_message(m: Message<Body<Value>>) -> PeekedMessage {
         )),
         Body::Empty => MessageBody::Empty,
     };
+    // The header ttl is a u32 of milliseconds (the SDKs clamp longer values to u32::MAX), so a
+    // longer real TTL survives only as absolute-expiry-time minus creation-time: take the larger.
+    let from_header = header
+        .and_then(|h| h.ttl)
+        .map(|ms| Duration::from_millis(u64::from(ms)));
+    let from_expiry = props.and_then(|p| {
+        let created = timestamp_to_datetime(p.creation_time.as_ref()?)?;
+        let expires = timestamp_to_datetime(p.absolute_expiry_time.as_ref()?)?;
+        (expires - created)
+            .try_into()
+            .ok()
+            .filter(|d: &Duration| !d.is_zero())
+    });
+    let time_to_live = match (from_header, from_expiry) {
+        (Some(h), Some(e)) if h.as_millis() == u128::from(u32::MAX) => Some(e.max(h)),
+        (Some(h), _) => Some(h),
+        (None, e) => e,
+    };
     PeekedMessage {
         sequence_number,
         state,
@@ -380,15 +458,14 @@ pub fn decode_message(m: Message<Body<Value>>) -> PeekedMessage {
             .and_then(timestamp_to_datetime)
             .or_else(|| {
                 // No absolute-expiry-time: enqueued time plus time to live, when both are known.
-                let ttl = header.and_then(|h| h.ttl)?;
-                annotation_time(&m, "x-opt-enqueued-time")?
-                    .checked_add(time::Duration::milliseconds(i64::from(ttl)))
+                let ttl = time::Duration::try_from(time_to_live?).ok()?;
+                annotation_time(&m, "x-opt-enqueued-time")?.checked_add(ttl)
             }),
         enqueued_time: annotation_time(&m, "x-opt-enqueued-time"),
         scheduled_enqueue_time: annotation_time(&m, "x-opt-scheduled-enqueue-time"),
         locked_until: annotation_time(&m, "x-opt-locked-until"),
         delivery_count: header.map(|h| h.delivery_count).unwrap_or(0),
-        time_to_live_ms: header.and_then(|h| h.ttl),
+        time_to_live,
         dead_letter_reason,
         dead_letter_description,
         dead_letter_source: annotation_string(&m, "x-opt-deadletter-source"),
@@ -423,7 +500,7 @@ pub(crate) fn test_message(seq: i64) -> PeekedMessage {
         scheduled_enqueue_time: None,
         locked_until: None,
         delivery_count: 0,
-        time_to_live_ms: None,
+        time_to_live: None,
         dead_letter_reason: None,
         dead_letter_description: None,
         dead_letter_source: None,
@@ -435,6 +512,59 @@ pub(crate) fn test_message(seq: i64) -> PeekedMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_amqp_property_type_is_widened() {
+        use fe2o3_amqp::types::primitives::{Dec32, Dec64, Dec128, Symbol, Timestamp};
+        let at = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        for (v, p) in [
+            (SimpleValue::Bool(true), PropValue::Bool(true)),
+            (SimpleValue::Ubyte(1), PropValue::UByte(1)),
+            (SimpleValue::Ushort(2), PropValue::UShort(2)),
+            (SimpleValue::Uint(3), PropValue::UInt(3)),
+            (SimpleValue::Ulong(4), PropValue::ULong(4)),
+            (SimpleValue::Byte(-5), PropValue::Byte(-5)),
+            (SimpleValue::Short(-6), PropValue::Short(-6)),
+            (SimpleValue::Int(-7), PropValue::Int(-7)),
+            (SimpleValue::Long(-8), PropValue::Long(-8)),
+            (SimpleValue::Float(1.5.into()), PropValue::Float(1.5)),
+            (SimpleValue::Double(2.5.into()), PropValue::Double(2.5)),
+            (
+                SimpleValue::Timestamp(Timestamp::from(1_700_000_000_000)),
+                PropValue::Timestamp(at),
+            ),
+            (
+                SimpleValue::String("s".into()),
+                PropValue::String("s".into()),
+            ),
+            (
+                SimpleValue::Symbol(Symbol::from("y")),
+                PropValue::Symbol("y".into()),
+            ),
+            (
+                SimpleValue::Binary(vec![1].into()),
+                PropValue::Binary(vec![1]),
+            ),
+            (SimpleValue::Null, PropValue::Null),
+        ] {
+            assert_eq!(simple_to_prop(&v), p, "{v:?}");
+        }
+        // What has no faithful representation is `other` (never copied silently), not a
+        // wider type.
+        for v in [
+            SimpleValue::Char('c'),
+            SimpleValue::Decimal32(Dec32::from([0; 4])),
+            SimpleValue::Decimal64(Dec64::from([0; 8])),
+            SimpleValue::Decimal128(Dec128::from([0; 16])),
+            SimpleValue::Timestamp(Timestamp::from(i64::MAX)),
+        ] {
+            assert!(
+                matches!(simple_to_prop(&v), PropValue::Other(_)),
+                "{v:?} -> {:?}",
+                simple_to_prop(&v)
+            );
+        }
+    }
     use fe2o3_amqp::types::messaging::message::__private::Serializable;
     use fe2o3_amqp::types::messaging::{
         AmqpSequence, AmqpValue, ApplicationProperties, Batch, Data, Header, MessageAnnotations,
@@ -709,12 +839,14 @@ mod tests {
         assert_eq!(m.enqueued_time, None);
         assert_eq!(m.scheduled_enqueue_time, None);
         assert_eq!(m.locked_until, None);
-        assert_eq!(m.application_properties["max"], PropValue::Int(i64::MAX));
-        assert_eq!(m.application_properties["min"], PropValue::Int(i64::MIN));
-        assert_eq!(
-            m.application_properties["far"],
-            PropValue::Int(300_000_000_000_000)
-        );
+        // Not a time anyone can hold: `other` (never copied as another type), with the raw value.
+        for k in ["max", "min", "far"] {
+            assert!(
+                matches!(&m.application_properties[k], PropValue::Other(t) if t.starts_with("timestamp ")),
+                "{k}: {:?}",
+                m.application_properties[k]
+            );
+        }
         assert!(matches!(
             m.application_properties["ok"],
             PropValue::Timestamp(_)
@@ -824,7 +956,7 @@ mod tests {
         assert_eq!(m.content_type.as_deref(), Some("text/plain"));
         assert_eq!(m.to.as_deref(), Some("to-addr"));
         assert_eq!(m.reply_to.as_deref(), Some("reply-addr"));
-        assert_eq!(m.time_to_live_ms, Some(60_000));
+        assert_eq!(m.time_to_live, Some(Duration::from_secs(60)));
         assert_eq!(m.delivery_count, 4);
         let at = |ms: i64| OffsetDateTime::from_unix_timestamp(ms / 1000).unwrap();
         assert_eq!(m.enqueued_time, Some(at(enq)));
@@ -841,10 +973,7 @@ mod tests {
             m.application_properties["when"],
             PropValue::Timestamp(at(enq))
         );
-        assert_eq!(
-            m.application_properties["id"],
-            PropValue::Uuid(uuid.to_string())
-        );
+        assert_eq!(m.application_properties["id"], PropValue::Uuid(uuid));
         assert_eq!(
             m.application_properties["blob"],
             PropValue::Binary(vec![1, 2, 3])
@@ -865,5 +994,115 @@ mod tests {
 
         let m = decode(MessageId::Uuid(uuid.into()));
         assert_eq!(m.message_id.as_deref(), Some(uuid.to_string().as_str()));
+    }
+
+    fn amqp_with(f: impl FnOnce(&mut Message<Body<Value>>)) -> Message<Body<Value>> {
+        let mut m = Message::<Body<Value>> {
+            header: None,
+            delivery_annotations: None,
+            message_annotations: None,
+            properties: None,
+            application_properties: None,
+            body: Body::Empty,
+            footer: None,
+        };
+        f(&mut m);
+        m
+    }
+
+    #[test]
+    fn ttl_comes_from_the_header_or_from_expiry_minus_creation() {
+        let created = Timestamp::from_milliseconds(1_000);
+        let m = amqp_with(|m| {
+            m.header = Some(Header {
+                ttl: Some(60_000),
+                ..Default::default()
+            });
+        });
+        assert_eq!(
+            decode_message(m).time_to_live,
+            Some(Duration::from_secs(60))
+        );
+        // 100 days does not fit the u32 header: it survives through absolute-expiry-time.
+        let hundred_days_ms = 100 * 86_400_000i64;
+        let m = amqp_with(|m| {
+            m.properties = Some(Properties {
+                creation_time: Some(created.clone()),
+                absolute_expiry_time: Some(Timestamp::from_milliseconds(1_000 + hundred_days_ms)),
+                ..Default::default()
+            });
+        });
+        assert_eq!(
+            decode_message(m).time_to_live,
+            Some(Duration::from_millis(hundred_days_ms as u64))
+        );
+        assert_eq!(decode_message(amqp_with(|_| {})).time_to_live, None);
+        // The SDKs clamp the header to u32::MAX and keep the true TTL in the expiry.
+        let m = amqp_with(|m| {
+            m.header = Some(Header {
+                ttl: Some(u32::MAX),
+                ..Default::default()
+            });
+            m.properties = Some(Properties {
+                creation_time: Some(created.clone()),
+                absolute_expiry_time: Some(Timestamp::from_milliseconds(1_000 + hundred_days_ms)),
+                ..Default::default()
+            });
+        });
+        assert_eq!(
+            decode_message(m).time_to_live,
+            Some(Duration::from_millis(hundred_days_ms as u64))
+        );
+        // Expiry before creation is not a time to live.
+        let m = amqp_with(|m| {
+            m.properties = Some(Properties {
+                creation_time: Some(Timestamp::from_milliseconds(5_000)),
+                absolute_expiry_time: Some(Timestamp::from_milliseconds(1_000)),
+                ..Default::default()
+            });
+        });
+        assert_eq!(decode_message(m).time_to_live, None);
+    }
+
+    #[test]
+    fn ttl_serializes_as_milliseconds_under_the_old_name() {
+        let mut m = test_message(1);
+        m.time_to_live = Some(Duration::from_millis(100 * 86_400_000));
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["time_to_live_ms"], 8_640_000_000u64);
+        assert!(serde_json::to_value(test_message(2)).unwrap()["time_to_live_ms"].is_null());
+    }
+
+    #[test]
+    fn timespan_properties_decode_from_dotnet_ticks() {
+        use serde_amqp::described::Described;
+        use serde_amqp::primitives::Symbol;
+        let described = SimpleValue::Described(Box::new(Described {
+            descriptor: Descriptor::Name(Symbol::from("com.microsoft:timespan")),
+            value: Value::Long(36_000_000_000),
+        }));
+        let other = SimpleValue::Described(Box::new(Described {
+            descriptor: Descriptor::Name(Symbol::from("com.example:thing")),
+            value: Value::Long(1),
+        }));
+        let m = amqp_with(|m| {
+            m.application_properties = Some(ApplicationProperties(OrderedMap::from_iter([
+                ("wait".to_string(), described),
+                ("odd".to_string(), other),
+            ])))
+        });
+        let d = decode_message(m);
+        assert_eq!(
+            d.application_properties["wait"],
+            PropValue::TimeSpan(time::Duration::hours(1))
+        );
+        assert!(matches!(
+            d.application_properties["odd"],
+            PropValue::Other(_)
+        ));
+        assert_eq!(
+            serde_json::to_value(&d.application_properties["wait"]).unwrap(),
+            serde_json::json!({"type": "timespan", "value": "PT1H"})
+        );
     }
 }

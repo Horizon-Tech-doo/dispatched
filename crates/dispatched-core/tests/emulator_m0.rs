@@ -1,7 +1,7 @@
 //! M0 gate: list → peek → peek DLQ with reason, against the Service Bus Emulator.
 //! Run: `testing/emulator/emulator.sh up && DISPATCHED_EMULATOR=1 cargo test -p dispatched-core --features test-support --test emulator_m0 -- --nocapture`
 
-use dispatched_core::messaging::{ServiceBusConnection, testing};
+use dispatched_core::messaging::testing::{self, ServiceBusConnection};
 use dispatched_core::{
     ConnectionString, EntityPath, Explorer, Namespace, PeekOptions, PeekView, PeekedMessage,
 };

@@ -24,13 +24,16 @@ pub fn error_kind(e: &Error) -> &'static str {
         Error::Invalid(_) => "invalid",
         Error::Network(_) => "network",
         Error::Protocol(_) => "protocol",
+        Error::LockLost(_) => "lock_lost",
+        Error::Conflict(_) => "conflict",
+        Error::Denied(_) => "denied",
         Error::Io(_) => "io",
     }
 }
 
 /// Every kind `error_kind` can return. The desktop app and the CLI branch on
 /// these exact strings, so they are a stable contract.
-pub const ERROR_KINDS: [&str; 12] = [
+pub const ERROR_KINDS: [&str; 15] = [
     "auth",
     "not_signed_in",
     "forbidden",
@@ -42,6 +45,9 @@ pub const ERROR_KINDS: [&str; 12] = [
     "invalid",
     "network",
     "protocol",
+    "lock_lost",
+    "conflict",
+    "denied",
     "io",
 ];
 
@@ -244,7 +250,7 @@ mod tests {
 
     #[test]
     fn every_error_variant_maps_to_its_pinned_kind() {
-        let table: [(Error, &str); 12] = [
+        let table: [(Error, &str); 15] = [
             (Error::Auth(String::new()), "auth"),
             (Error::NotSignedIn(String::new()), "not_signed_in"),
             (
@@ -267,6 +273,9 @@ mod tests {
             (Error::Invalid(String::new()), "invalid"),
             (Error::Network(String::new()), "network"),
             (Error::Protocol(String::new()), "protocol"),
+            (Error::LockLost(String::new()), "lock_lost"),
+            (Error::Conflict(String::new()), "conflict"),
+            (Error::Denied(String::new()), "denied"),
             (Error::Io(String::new()), "io"),
         ];
         for (e, expected) in &table {

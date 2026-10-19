@@ -116,6 +116,24 @@ impl ManagementClient {
             .ok_or_else(|| Error::NotFound(format!("queue `{name}`")))
     }
 
+    /// Whether `name` is a queue or a topic, from one GET of its description. The service
+    /// answers 200 with an empty feed for a missing entity, which is `NotFound`.
+    pub async fn entity_kind(&self, name: &str) -> Result<EntityKind> {
+        let root = self.get(&segment(name), &[("enrich", "true")]).await?;
+        entries(&root)
+            .into_iter()
+            .find_map(|e| {
+                if e.path(&["content", "QueueDescription"]).is_some() {
+                    Some(EntityKind::Queue)
+                } else if e.path(&["content", "TopicDescription"]).is_some() {
+                    Some(EntityKind::Topic)
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| Error::NotFound(format!("entity `{name}`")))
+    }
+
     /// One entity's description. `path` is a queue or topic name, or `topic/subscriptions/name`.
     /// A missing entity, or one of another kind, is `NotFound`.
     pub async fn entity_details(&self, kind: EntityKind, path: &str) -> Result<EntityDetails> {
@@ -435,6 +453,37 @@ mod tests {
             .await;
         let q = client(&server).get_queue("a b?c").await.unwrap();
         assert_eq!(q.name, "a b?c");
+    }
+
+    #[tokio::test]
+    async fn entity_kind_reads_the_description_type() {
+        let mut server = mockito::Server::new_async().await;
+        for (name, body) in [
+            (
+                "orders",
+                include_str!("../../tests/fixtures/queue_entry.xml"),
+            ),
+            (
+                "events",
+                include_str!("../../tests/fixtures/topic_entry.xml"),
+            ),
+            ("ghost", include_str!("../../tests/fixtures/empty_feed.xml")),
+        ] {
+            server
+                .mock("GET", format!("/{name}").as_str())
+                .match_query(Matcher::Any)
+                .with_status(200)
+                .with_body(body)
+                .create_async()
+                .await;
+        }
+        let c = client(&server);
+        assert_eq!(c.entity_kind("orders").await.unwrap(), EntityKind::Queue);
+        assert_eq!(c.entity_kind("events").await.unwrap(), EntityKind::Topic);
+        assert!(matches!(
+            c.entity_kind("ghost").await,
+            Err(Error::NotFound(_))
+        ));
     }
 
     #[tokio::test]

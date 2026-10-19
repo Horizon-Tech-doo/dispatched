@@ -3,28 +3,30 @@
 use crate::Format;
 use crate::context::Ctx;
 use crate::output::{ellipsize, sanitize, table, thousands};
-use crate::resolve::{Selection, needs_sign_in, resolve};
+use crate::resolve::{Resolved, Selection, needs_sign_in, resolve_namespace, resolve_selected};
 use clap::Args;
 use dispatched_core::messaging::DEFAULT_SCAN_LIMIT;
 pub use dispatched_core::namespace::known_entities;
 use dispatched_core::{
-    Continuation, EntityCounts, EntityPath, Explorer, ExportFormat, ExportedMessage, FileExport,
-    MessageBody, MessageFilter, Namespace, PeekOptions, PeekPage, PeekView, PeekedMessage,
-    QueueInfo, Streamed, SubscriptionInfo, TopicInfo, continuation, stream_pages, write_messages,
+    Continuation, EntityCounts, EntityKind, EntityPath, Explorer, ExportFormat, ExportedMessage,
+    FileExport, MessageBody, MessageFilter, Namespace, PeekOptions, PeekPage, PeekView,
+    PeekedMessage, QueueInfo, Streamed, SubscriptionInfo, TopicInfo, continuation, stream_pages,
+    write_messages,
 };
 use horizon_azure_kit::safety::CancellationToken;
 use std::future::Future;
 use time::format_description::well_known::Rfc3339;
 
-/// The namespace the user selected. The sign-in (a keychain read) is only
-/// looked up when the selection uses Entra.
+/// The namespace the user selected, for read commands (no production check, so a connection
+/// string never opens the profile store). The sign-in (a keychain read) is only looked up when
+/// the selection uses Entra.
 pub(crate) fn namespace(ctx: &Ctx, sel: &Selection<'_>) -> anyhow::Result<Namespace> {
     let sign_in = if needs_sign_in(sel, ctx)? {
         ctx.current_sign_in()?
     } else {
         None
     };
-    resolve(
+    resolve_namespace(
         sel,
         ctx,
         ctx.secrets.as_ref(),
@@ -33,9 +35,17 @@ pub(crate) fn namespace(ctx: &Ctx, sel: &Selection<'_>) -> anyhow::Result<Namesp
     )
 }
 
-/// An explorer for the namespace the user selected.
+/// An explorer for the namespace the user selected, for **read commands only**: it skips the
+/// production check. Mutating commands use [`mutating_target`].
 pub(crate) fn explorer_for(ctx: &Ctx, sel: &Selection<'_>) -> anyhow::Result<Explorer> {
     Ok(Explorer::new(namespace(ctx, sel)?)?)
+}
+
+/// The resolved target of a mutating command, with its production flag (see
+/// [`crate::resolve::resolve`]). Run [`crate::safety::preflight`] on the `Resolved` before
+/// calling `Explorer::new` on its namespace or anything else that does I/O.
+pub(crate) fn mutating_target(ctx: &Ctx, sel: &Selection<'_>) -> anyhow::Result<Resolved> {
+    resolve_selected(ctx, sel)
 }
 
 /// The entities pinned on the profile the selection resolves to. Empty when
@@ -346,14 +356,74 @@ fn subscriptions_section(topic_count: usize, subs: &[&SubscriptionInfo]) -> Stri
     }
 }
 
-/// Known entities as tables, every count `?`.
-pub fn fallback_tables(known: &[EntityPath]) -> String {
+/// How many known entities the limited listing resolves the kind of.
+const KIND_LOOKUPS: usize = 20;
+
+/// The kind shown for a known entity: `queue`, `topic`, `subscription` or `unknown`.
+fn kind_text(kind: Option<EntityKind>) -> &'static str {
+    match kind {
+        Some(EntityKind::Queue) => "queue",
+        Some(EntityKind::Topic) => "topic",
+        Some(EntityKind::Subscription) => "subscription",
+        None => "unknown",
+    }
+}
+
+/// A short, secret-free name for why a kind lookup failed.
+fn lookup_failure(e: &dispatched_core::Error) -> &'static str {
+    use dispatched_core::Error;
+    match e {
+        Error::NotFound(_) => "not found",
+        Error::Forbidden { .. } => "access denied",
+        Error::Auth(_) | Error::NotSignedIn(_) => "not signed in",
+        Error::Timeout(_) => "timed out",
+        _ => "lookup failed",
+    }
+}
+
+/// The kind of each known entity, for the limited (no-Manage) listing: at most
+/// [`KIND_LOOKUPS`] entities, one after the other. A kind that cannot be told (or a lookup that
+/// fails, e.g. a pinned entity that no longer exists) is `None`, shown as `unknown`: the
+/// listing is a best-effort overview and must not fail on one entity. The notes say which
+/// lookups failed (the error kind only) and when the lookups stopped at the limit.
+async fn resolve_known_kinds(
+    explorer: &Explorer,
+    known: Vec<EntityPath>,
+) -> (Vec<(EntityPath, Option<EntityKind>)>, Vec<String>) {
+    let mut out = Vec::with_capacity(known.len());
+    let mut notes = Vec::new();
+    let total = known.len();
+    for (i, entity) in known.into_iter().enumerate() {
+        let kind = if i < KIND_LOOKUPS {
+            match explorer.resolve_kind(&entity).await {
+                Ok(k) => k,
+                Err(e) => {
+                    notes.push(format!("{}: {}", entity.base(), lookup_failure(&e)));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        out.push((entity, kind));
+    }
+    if total > KIND_LOOKUPS {
+        notes.push(format!(
+            "kinds resolved for the first {KIND_LOOKUPS} of {total} entities; the rest show unknown"
+        ));
+    }
+    (out, notes)
+}
+
+/// Known entities as tables, every count `?`, with the kind where it is known.
+pub fn fallback_tables(known: &[(EntityPath, Option<EntityKind>)]) -> String {
     let queues: Vec<Vec<String>> = known
         .iter()
-        .filter(|e| e.subscription.is_none())
-        .map(|e| {
+        .filter(|(e, k)| e.subscription.is_none() && *k != Some(EntityKind::Topic))
+        .map(|(e, k)| {
             vec![
                 e.entity.clone(),
+                kind_text(*k).into(),
                 "?".into(),
                 "?".into(),
                 "?".into(),
@@ -362,12 +432,18 @@ pub fn fallback_tables(known: &[EntityPath]) -> String {
             ]
         })
         .collect();
+    let topics: Vec<Vec<String>> = known
+        .iter()
+        .filter(|(e, k)| e.subscription.is_none() && *k == Some(EntityKind::Topic))
+        .map(|(e, k)| vec![e.entity.clone(), kind_text(*k).into()])
+        .collect();
     let subs: Vec<Vec<String>> = known
         .iter()
-        .filter_map(|e| {
+        .filter_map(|(e, k)| {
             e.subscription.as_ref().map(|s| {
                 vec![
                     format!("{}/subscriptions/{s}", e.entity),
+                    kind_text(*k).into(),
                     "?".into(),
                     "?".into(),
                     String::new(),
@@ -378,31 +454,56 @@ pub fn fallback_tables(known: &[EntityPath]) -> String {
     let mut parts = Vec::new();
     if !queues.is_empty() {
         parts.push(table(
-            &["QUEUE", "ACTIVE", "DLQ", "SCHEDULED", "SESSIONS", "STATUS"],
+            &[
+                "QUEUE",
+                "KIND",
+                "ACTIVE",
+                "DLQ",
+                "SCHEDULED",
+                "SESSIONS",
+                "STATUS",
+            ],
             &queues,
         ));
     }
+    if !topics.is_empty() {
+        parts.push(table(&["TOPIC", "KIND"], &topics));
+    }
     if !subs.is_empty() {
-        parts.push(table(&["SUBSCRIPTION", "ACTIVE", "DLQ", "STATUS"], &subs));
+        parts.push(table(
+            &["SUBSCRIPTION", "KIND", "ACTIVE", "DLQ", "STATUS"],
+            &subs,
+        ));
     }
     parts.join("\n\n")
 }
 
-pub fn fallback_json(known: &[EntityPath]) -> serde_json::Value {
+pub fn fallback_json(known: &[(EntityPath, Option<EntityKind>)]) -> serde_json::Value {
     let queues: Vec<_> = known
         .iter()
-        .filter(|e| e.subscription.is_none())
-        .map(|e| serde_json::json!({ "name": e.entity, "counts": null }))
+        .filter(|(e, k)| e.subscription.is_none() && *k != Some(EntityKind::Topic))
+        .map(
+            |(e, k)| serde_json::json!({ "name": e.entity, "kind": kind_text(*k), "counts": null }),
+        )
+        .collect();
+    let topics: Vec<_> = known
+        .iter()
+        .filter(|(e, k)| e.subscription.is_none() && *k == Some(EntityKind::Topic))
+        .map(|(e, k)| serde_json::json!({ "name": e.entity, "kind": kind_text(*k) }))
         .collect();
     let subs: Vec<_> = known
         .iter()
-        .filter_map(|e| {
-            e.subscription
-                .as_ref()
-                .map(|s| serde_json::json!({ "topic": e.entity, "name": s, "counts": null }))
+        .filter_map(|(e, k)| {
+            e.subscription.as_ref().map(|s| {
+                serde_json::json!({
+                    "topic": e.entity, "name": s, "kind": kind_text(*k), "counts": null
+                })
+            })
         })
         .collect();
-    serde_json::json!({ "queues": queues, "subscriptions": subs, "note": FALLBACK_NOTE })
+    serde_json::json!({
+        "queues": queues, "topics": topics, "subscriptions": subs, "note": FALLBACK_NOTE
+    })
 }
 
 pub async fn ls(
@@ -464,11 +565,15 @@ async fn list(
             if known.is_empty() {
                 return Err(forbidden_without_known(e));
             }
+            let (kinds, notes) = resolve_known_kinds(explorer, known).await;
             eprintln!("{FALLBACK_NOTE}");
+            for n in notes {
+                eprintln!("{}", sanitize(&n));
+            }
             if let Format::Json = format {
-                println!("{}", serde_json::to_string_pretty(&fallback_json(&known))?);
+                println!("{}", serde_json::to_string_pretty(&fallback_json(&kinds))?);
             } else {
-                println!("{}", fallback_tables(&known));
+                println!("{}", fallback_tables(&kinds));
             }
             return Ok(());
         }
@@ -723,22 +828,6 @@ pub fn check_complete(end: Continuation, written: usize) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A token that Ctrl-C cancels. A second Ctrl-C, while a page is still loading, ends the
-/// process at once.
-fn cancel_on_ctrl_c() -> CancellationToken {
-    let token = CancellationToken::new();
-    let t = token.clone();
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            t.cancel();
-            if tokio::signal::ctrl_c().await.is_ok() {
-                std::process::exit(130);
-            }
-        }
-    });
-    token
-}
-
 /// Core refuses to replace a file that appeared while the export ran; say how to allow it.
 fn finish_error(e: dispatched_core::Error, force: bool, out: &str) -> anyhow::Error {
     match e {
@@ -803,7 +892,7 @@ pub async fn export(
     check_output(out, force)?;
     let q = Query::open(ctx, sel, args)?;
     let qr = &q;
-    let cancel = cancel_on_ctrl_c();
+    let cancel = crate::jobs::cancel_on_ctrl_c();
     let result = export_stream(top, q.from_seq, out, format, force, &cancel, |from, max| {
         let opts = qr.options(max, from);
         async move { qr.explorer.peek(&qr.entity, qr.view, &opts).await }
@@ -852,7 +941,7 @@ mod tests {
             scheduled_enqueue_time: None,
             locked_until: None,
             delivery_count: 1,
-            time_to_live_ms: None,
+            time_to_live: None,
             dead_letter_reason: None,
             dead_letter_description: None,
             dead_letter_source: None,
@@ -1366,6 +1455,7 @@ mod tests {
     #[test]
     fn fallback_lists_known_entities_with_unknown_counts() {
         let k = known_entities(Some("orders"), &["events/subscriptions/all".to_string()]);
+        let k: Vec<_> = k.into_iter().map(|e| (e, None)).collect();
         let t = fallback_tables(&k);
         assert!(t.contains("QUEUE") && t.contains("orders"), "{t}");
         assert!(t.contains("SUBSCRIPTION") && t.contains("events/subscriptions/all"));
@@ -1379,6 +1469,36 @@ mod tests {
             j["note"],
             "listing needs Manage,EntityRead; showing known entities"
         );
+    }
+
+    #[test]
+    fn limited_listing_names_resolved_kinds() {
+        let t = fallback_tables(&[
+            (EntityPath::queue("orders"), Some(EntityKind::Queue)),
+            (EntityPath::queue("events"), Some(EntityKind::Topic)),
+            (EntityPath::queue("x"), None),
+        ]);
+        let row = |name: &str| t.lines().find(|l| l.starts_with(name)).unwrap().to_string();
+        assert!(row("orders").contains("queue") && row("orders").matches('?').count() == 3);
+        assert_eq!(
+            row("events").split_whitespace().collect::<Vec<_>>(),
+            ["events", "topic"]
+        );
+        assert!(row("x").contains("unknown"), "{t}");
+        let topic_header = t.lines().position(|l| l.starts_with("TOPIC")).unwrap();
+        let events = t.lines().position(|l| l.starts_with("events")).unwrap();
+        assert!(events > topic_header, "{t}");
+        let j = fallback_json(&[
+            (EntityPath::queue("orders"), Some(EntityKind::Queue)),
+            (EntityPath::queue("events"), Some(EntityKind::Topic)),
+            (EntityPath::queue("x"), None),
+        ]);
+        assert_eq!(j["queues"][0]["name"], "orders");
+        assert_eq!(j["queues"][0]["kind"], "queue");
+        assert_eq!(j["topics"][0]["name"], "events");
+        assert_eq!(j["topics"][0]["kind"], "topic");
+        assert_eq!(j["queues"][1]["name"], "x");
+        assert_eq!(j["queues"][1]["kind"], "unknown");
     }
 
     #[test]

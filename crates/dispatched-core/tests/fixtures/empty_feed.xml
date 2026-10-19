@@ -1,0 +1,6 @@
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title type="text">Publicly Listed Services</title>
+  <id>https://myns.servicebus.windows.net/ghost?api-version=2024-05</id>
+  <updated>2026-10-15T09:41:00Z</updated>
+  <link rel="self" href="https://myns.servicebus.windows.net/ghost?api-version=2024-05"/>
+</feed>

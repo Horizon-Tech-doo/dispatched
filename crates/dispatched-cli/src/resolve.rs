@@ -1,11 +1,11 @@
-//! Turn CLI flags (or saved profiles) into a `Namespace`.
+//! Turn CLI flags (or saved profiles) into a `Namespace` and the profile it runs under.
 
 use crate::context::StoreSource;
 use anyhow::{Context, bail};
 use dispatched_core::profiles;
 pub use dispatched_core::profiles::namespace_host;
 use dispatched_core::tokens::EntraSource;
-use dispatched_core::{ConnectionString, Namespace};
+use dispatched_core::{ConnectionString, Namespace, ProfileRef};
 use horizon_azure_kit::auth::{EntraSession, SignIn};
 use horizon_azure_kit::secrets::CredentialStore;
 use std::sync::Arc;
@@ -93,30 +93,56 @@ pub fn needs_sign_in(sel: &Selection<'_>, store: &dyn StoreSource) -> anyhow::Re
     ))
 }
 
+/// The selected namespace and the profile operations on it are recorded under.
+pub struct Resolved {
+    /// Where to connect.
+    pub namespace: Namespace,
+    /// The profile name (or the host, for a connection string or `--namespace`) and whether
+    /// it is production.
+    pub profile: ProfileRef,
+}
+
+/// Shows the host and profile only: never the credentials.
+impl std::fmt::Debug for Resolved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Resolved")
+            .field("host", &self.namespace.host())
+            .field("profile", &self.profile)
+            .finish()
+    }
+}
+
+/// What a selection points at, before the production check.
+enum Chosen {
+    /// A connection string or `--namespace`: no profile, named by its host.
+    Host(Namespace, String),
+    /// A saved profile.
+    Profile(Namespace, profiles::Profile),
+}
+
 /// Resolution order: `--connection-string`, `--namespace` (with the current
 /// sign-in), `--profile`, then the default profile. The profile store is only
 /// opened for the last two.
-pub fn resolve(
+fn choose(
     sel: &Selection<'_>,
     store: &dyn StoreSource,
     secrets: &dyn CredentialStore,
     session: &Arc<EntraSession>,
     sign_in: Option<&SignIn>,
-) -> anyhow::Result<Namespace> {
+) -> anyhow::Result<Chosen> {
     if let Some(cs) = sel.connection_string {
-        return Ok(profiles::with_env_proxy(
-            Namespace::from_connection_string(&ConnectionString::parse(cs)?)?,
-        )?);
+        let cs = ConnectionString::parse(cs)?;
+        let ns = profiles::with_env_proxy(Namespace::from_connection_string(&cs)?)?;
+        return Ok(Chosen::Host(ns, cs.host.clone()));
     }
     if let Some(ns) = sel.namespace {
         let sign_in = sign_in.cloned().context(
             "not signed in: run `dispatched login`, or pass --connection-string or --profile",
         )?;
+        let host = namespace_host(ns)?;
         let tokens = Arc::new(EntraSource::new(session.clone(), sign_in, None));
-        return Ok(profiles::with_env_proxy(Namespace::new(
-            namespace_host(ns)?,
-            tokens,
-        ))?);
+        let ns = profiles::with_env_proxy(Namespace::new(host.clone(), tokens))?;
+        return Ok(Chosen::Host(ns, host));
     }
     let store = store.store()?;
     let profile = match sel.profile {
@@ -131,9 +157,116 @@ pub fn resolve(
             ),
         },
     };
-    Ok(profiles::namespace_for(
-        &profile, secrets, session, sign_in,
-    )?)
+    let ns = profiles::namespace_for(&profile, secrets, session, sign_in)?;
+    Ok(Chosen::Profile(ns, profile))
+}
+
+/// The namespace only, for read commands: a connection string or bare namespace never opens
+/// the profile store (reads do not need the production check).
+pub fn resolve_namespace(
+    sel: &Selection<'_>,
+    store: &dyn StoreSource,
+    secrets: &dyn CredentialStore,
+    session: &Arc<EntraSession>,
+    sign_in: Option<&SignIn>,
+) -> anyhow::Result<Namespace> {
+    Ok(match choose(sel, store, secrets, session, sign_in)? {
+        Chosen::Host(ns, _) | Chosen::Profile(ns, _) => ns,
+    })
+}
+
+/// The namespace and its profile, for mutating commands. Production follows the namespace,
+/// not the selection path: a connection string, `--namespace` or profile whose host is the
+/// host of a saved production profile (ASCII case-insensitive) is production too. This opens
+/// the profile store for every selection; if it cannot be read, nothing runs.
+pub fn resolve(
+    sel: &Selection<'_>,
+    store: &dyn StoreSource,
+    secrets: &dyn CredentialStore,
+    session: &Arc<EntraSession>,
+    sign_in: Option<&SignIn>,
+) -> anyhow::Result<Resolved> {
+    let (namespace, name, marked) = match choose(sel, store, secrets, session, sign_in)? {
+        Chosen::Host(ns, host) => (ns, host, false),
+        Chosen::Profile(ns, p) => (ns, p.name, p.production),
+    };
+    let production = marked || host_is_production(store, namespace.host())?;
+    Ok(Resolved {
+        namespace,
+        profile: ProfileRef { name, production },
+    })
+}
+
+/// Whether any saved production profile points at `host`.
+fn host_is_production(store: &dyn StoreSource, host: &str) -> anyhow::Result<bool> {
+    let check = || -> anyhow::Result<bool> {
+        Ok(store
+            .store()?
+            .list()?
+            .iter()
+            .any(|p| p.production && p.host.eq_ignore_ascii_case(host)))
+    };
+    check().with_context(|| {
+        format!("cannot check whether {host} is saved as a production profile; nothing was changed")
+    })
+}
+
+/// [`resolve`] for the selection, reading the sign-in (the keychain) only when it uses Entra.
+pub fn resolve_selected(
+    ctx: &crate::context::Ctx,
+    sel: &Selection<'_>,
+) -> anyhow::Result<Resolved> {
+    let sign_in = if needs_sign_in(sel, ctx)? {
+        ctx.current_sign_in()?
+    } else {
+        None
+    };
+    resolve(
+        sel,
+        ctx,
+        ctx.secrets.as_ref(),
+        &ctx.session,
+        sign_in.as_ref(),
+    )
+}
+
+#[cfg(test)]
+/// Test selections, one per selection path.
+pub(crate) enum TestSelection {
+    ConnectionString(String),
+    Namespace(String),
+    Profile(String),
+}
+
+#[cfg(test)]
+/// [`resolve`] over the context's store, signed in as the account test profiles use.
+pub(crate) fn resolve_for_test(
+    ctx: &crate::context::Ctx,
+    sel: TestSelection,
+) -> anyhow::Result<Resolved> {
+    let (cs, ns, p) = match &sel {
+        TestSelection::ConnectionString(s) => (Some(s.as_str()), None, None),
+        TestSelection::Namespace(s) => (None, Some(s.as_str()), None),
+        TestSelection::Profile(s) => (None, None, Some(s.as_str())),
+    };
+    let sign_in = SignIn {
+        id: "o".into(),
+        user_principal: "a@x.io".into(),
+        tenant_id: "t".into(),
+        display_name: None,
+        cloud: horizon_azure_kit::AzureCloud::Public,
+    };
+    resolve(
+        &Selection {
+            connection_string: cs,
+            namespace: ns,
+            profile: p,
+        },
+        ctx,
+        ctx.secrets.as_ref(),
+        &ctx.session,
+        Some(&sign_in),
+    )
 }
 
 #[cfg(test)]
@@ -287,6 +420,7 @@ mod tests {
         assert!(
             resolve(&sel, &store, &secrets, &test_session(), None)
                 .unwrap()
+                .namespace
                 .is_emulator()
         );
     }
@@ -305,6 +439,7 @@ mod tests {
         assert!(
             resolve(&sel, &store, &secrets, &test_session(), None)
                 .unwrap()
+                .namespace
                 .is_emulator()
         );
         let none = Selection {
@@ -325,6 +460,7 @@ mod tests {
         assert!(
             resolve(&none, &store, &secrets, &test_session(), None)
                 .unwrap()
+                .namespace
                 .is_emulator()
         );
     }
@@ -389,5 +525,85 @@ mod tests {
                 .to_string()
                 .contains("dispatched login")
         );
+    }
+
+    mod production {
+        use super::super::{TestSelection as Selection, resolve_for_test};
+        use super::EMU;
+        use crate::context::Ctx;
+        use dispatched_core::ProfileRef;
+
+        #[test]
+        fn a_connection_string_to_a_host_saved_as_production_is_production() {
+            let ctx = Ctx::for_test_with_profiles(&[
+                ("prod-weu", "prod.servicebus.windows.net", true),
+                ("dev", "dev.servicebus.windows.net", false),
+            ]);
+            let cs = |host: &str| {
+                format!("Endpoint=sb://{host}/;SharedAccessKeyName=k;SharedAccessKey=x")
+            };
+            let r = resolve_for_test(
+                &ctx,
+                Selection::ConnectionString(cs("PROD.servicebus.windows.net")),
+            )
+            .unwrap();
+            assert_eq!(
+                r.profile,
+                ProfileRef {
+                    // The connection string parser lowercases the host (hosts are
+                    // case-insensitive), so the name is the canonical host.
+                    name: "prod.servicebus.windows.net".into(),
+                    production: true
+                },
+                "matched on the host, ignoring case"
+            );
+            let r = resolve_for_test(
+                &ctx,
+                Selection::Namespace("prod.servicebus.windows.net".into()),
+            )
+            .unwrap();
+            assert!(r.profile.production, "--namespace too");
+            assert!(
+                !resolve_for_test(
+                    &ctx,
+                    Selection::ConnectionString(cs("dev.servicebus.windows.net"))
+                )
+                .unwrap()
+                .profile
+                .production
+            );
+            assert!(
+                !resolve_for_test(&ctx, Selection::ConnectionString(EMU.into()))
+                    .unwrap()
+                    .profile
+                    .production,
+                "the emulator host is saved nowhere"
+            );
+            let r = resolve_for_test(&ctx, Selection::Profile("prod-weu".into())).unwrap();
+            assert_eq!(
+                r.profile,
+                ProfileRef {
+                    name: "prod-weu".into(),
+                    production: true
+                }
+            );
+        }
+
+        #[test]
+        fn a_profile_on_a_production_host_is_production_even_if_not_marked() {
+            // Saved hosts are lowercased, so this tests the "not marked" rule, not case.
+            let ctx = Ctx::for_test_with_profiles(&[
+                ("prod-weu", "prod.servicebus.windows.net", true),
+                ("prod-alias", "prod.servicebus.windows.net", false),
+            ]);
+            let r = resolve_for_test(&ctx, Selection::Profile("prod-alias".into())).unwrap();
+            assert_eq!(
+                r.profile,
+                ProfileRef {
+                    name: "prod-alias".into(),
+                    production: true
+                }
+            );
+        }
     }
 }

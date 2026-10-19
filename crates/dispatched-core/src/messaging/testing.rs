@@ -1,7 +1,11 @@
-//! Seeding helpers for integration tests. NOT a product API: real send,
-//! receive and settle (with policy confirmation) arrive in M2.
+//! Seeding, draining and probing helpers for the emulator gates (feature `test-support`).
+//! NOT a product API: they send, receive and settle without the safety gate. Products go
+//! through `ops::Operator`, whose every mutation is confirmed and audited.
 
-use super::connection::ServiceBusConnection;
+/// The raw connection, for the emulator gates only (it can mutate without the gate).
+pub use super::connection::ServiceBusConnection;
+use super::message::{PeekedMessage, PropValue};
+use super::receiver::{AmqpReceiver, LockToken, ReceivedMessage, ReceiverSpec, Settlement};
 use crate::{Error, Result};
 use fe2o3_amqp::link::receiver::CreditMode;
 use fe2o3_amqp::types::definitions::{
@@ -400,4 +404,239 @@ pub async fn drain(
         empty_passes = if pass == 0 { empty_passes + 1 } else { 0 };
     }
     Ok(drained)
+}
+
+/// What the M2a link-semantics probe observed (see [`probe_m2a_link_semantics`]).
+#[derive(Debug, Clone)]
+pub struct LinkProbe {
+    /// (a) Delivery count after a peek-lock receive and a link `released` (expected 0).
+    pub released_delivery_count: u32,
+    /// (b) Delivery count after a further receive and `settle(Abandon)` (expected 1).
+    pub abandoned_delivery_count: u32,
+    /// (c) Whether `update-disposition` completed a link-received message.
+    pub management_complete_removed: bool,
+    /// (c) The refusal, when `update-disposition` failed.
+    pub management_complete_error: Option<String>,
+    /// (d) Messages a receive-and-delete `receive(3, 2 s)` returned with 2 available.
+    pub drain_returned: usize,
+    /// (d) `drain_shortfall()` after that receive.
+    pub drain_credit_left: u32,
+    /// (d) Tagged messages still in the queue after closing and waiting 2 s.
+    pub left_after_drain: usize,
+    /// (d) A message sent after the drained `receive` returned, while the link
+    /// stayed open for `DRAIN_GRACE` plus 1 s, is still in the queue after
+    /// close: the drained link stayed quiet (expected true).
+    pub late_arrival_kept: bool,
+    /// (d) Receive-and-delete messages `close` returned as removed but not returned by a
+    /// receive (expected 0).
+    pub removed_unreturned: usize,
+    /// (d) Credit `close` left uncertain: 0 when its drain, sweep and detach completed, which
+    /// settles the receive's unconfirmed drain (expected 0).
+    pub close_uncertain: u32,
+}
+
+fn probe_tagged(m: &PeekedMessage, tag: &str) -> bool {
+    matches!(m.application_properties.get("probe"), Some(PropValue::String(s)) if s == tag)
+}
+
+/// Every message in `address` (all states), paged by sequence number.
+async fn peek_everything(
+    conn: &mut ServiceBusConnection,
+    address: &str,
+) -> Result<Vec<PeekedMessage>> {
+    let mut all = Vec::new();
+    let mut from = 0;
+    loop {
+        let page = super::peek::peek(conn, address, from, super::peek::MAX_PER_REQUEST).await?;
+        let Some(last) = page.last() else {
+            return Ok(all);
+        };
+        from = last.sequence_number + 1;
+        all.extend(page);
+    }
+}
+
+async fn peek_sequence(
+    conn: &mut ServiceBusConnection,
+    address: &str,
+    seq: i64,
+) -> Result<Option<PeekedMessage>> {
+    Ok(super::peek::peek(conn, address, seq, 1)
+        .await?
+        .into_iter()
+        .find(|m| m.sequence_number == seq))
+}
+
+/// Receive (peek-lock) until the message tagged `tag` arrives; others met on
+/// the way are released afterwards so the broker cannot hand them straight back.
+async fn receive_probe_message(rx: &mut AmqpReceiver, tag: &str) -> Result<ReceivedMessage> {
+    let mut others = Vec::new();
+    let mut found = None;
+    for _ in 0..50 {
+        let Some(m) = rx.receive(1, Duration::from_secs(10)).await?.pop() else {
+            break;
+        };
+        if probe_tagged(&m.message, tag) {
+            found = Some(m);
+            break;
+        }
+        others.extend(m.lock_token);
+    }
+    for token in others {
+        let _ = rx.release(token).await;
+    }
+    found.ok_or_else(|| Error::Timeout(format!("the probe message {tag} did not arrive")))
+}
+
+fn token_of(m: &ReceivedMessage) -> Result<LockToken> {
+    m.lock_token
+        .ok_or_else(|| Error::Protocol("a peek-lock delivery came without a lock token".into()))
+}
+
+/// Check the link semantics the M2a operations rest on, on `address` (the
+/// emulator's `m1a-browse`): (a) `released` leaves the delivery count alone,
+/// (b) abandon raises it, (c) `update-disposition` completes a link-received
+/// message, (d) a receive-and-delete drain returns what was available, and
+/// a message sent after it while the link stays open is not removed. Empties
+/// the queue first and last.
+pub async fn probe_m2a_link_semantics(
+    conn: &mut ServiceBusConnection,
+    address: &str,
+) -> Result<LinkProbe> {
+    drain(conn, address, Duration::from_secs(1)).await?;
+    let run = uuid::Uuid::new_v4().simple().to_string();
+    let tag_a = format!("{run}-a");
+    let tag_d = format!("{run}-d");
+    let settle_pause = Duration::from_secs(1);
+
+    send_text(conn, address, "m2a probe a", &[("probe", &tag_a)]).await?;
+    let mut rx = conn
+        .open_receiver(&ReceiverSpec::peek_lock(address))
+        .await?;
+
+    // (a) release over the link.
+    let m = receive_probe_message(&mut rx, &tag_a).await?;
+    let seq = m.message.sequence_number;
+    rx.release(token_of(&m)?).await?;
+    tokio::time::sleep(settle_pause).await;
+    let released_delivery_count = peek_sequence(conn, address, seq)
+        .await?
+        .ok_or_else(|| Error::Protocol(format!("(a) message {seq} vanished after release")))?
+        .delivery_count;
+
+    // (b) abandon through update-disposition (control case).
+    let m = receive_probe_message(&mut rx, &tag_a).await?;
+    rx.settle(token_of(&m)?, &Settlement::Abandon).await?;
+    tokio::time::sleep(settle_pause).await;
+    let abandoned_delivery_count = peek_sequence(conn, address, seq)
+        .await?
+        .ok_or_else(|| Error::Protocol(format!("(b) message {seq} vanished after abandon")))?
+        .delivery_count;
+
+    // (c) complete a link-received message through update-disposition.
+    let m = receive_probe_message(&mut rx, &tag_a).await?;
+    let token = token_of(&m)?;
+    let management_complete_error = rx
+        .settle(token, &Settlement::Complete)
+        .await
+        .err()
+        .map(|e| e.to_string());
+    tokio::time::sleep(settle_pause).await;
+    let management_complete_removed =
+        management_complete_error.is_none() && peek_sequence(conn, address, seq).await?.is_none();
+    if management_complete_error.is_some() {
+        // Clean up over the link; the probe reports the refusal above.
+        let _ = rx.settle_on_link(token, &Settlement::Complete).await;
+    }
+    let _ = rx.close().await;
+
+    // (d) receive-and-delete with more credit than messages.
+    send_text(conn, address, "m2a probe d1", &[("probe", &tag_d)]).await?;
+    send_text(conn, address, "m2a probe d2", &[("probe", &tag_d)]).await?;
+    let mut rd = conn
+        .open_receiver(&ReceiverSpec::receive_and_delete(address))
+        .await?;
+    let got = rd.receive(3, Duration::from_secs(2)).await?;
+    let drain_returned = got.len();
+    let drain_credit_left = rd.drain_shortfall();
+    // A late arrival while the drained link is still open: a link that kept
+    // credit would remove it.
+    let tag_late = format!("{run}-late");
+    send_text(conn, address, "m2a probe late", &[("probe", &tag_late)]).await?;
+    tokio::time::sleep(super::receiver::DRAIN_GRACE + Duration::from_secs(1)).await;
+    let closed = rd.close().await;
+    let removed_unreturned = closed.removed.len();
+    let close_uncertain = closed.uncertain;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let after = peek_everything(conn, address).await?;
+    let left_after_drain = after.iter().filter(|m| probe_tagged(m, &tag_d)).count();
+    let late_arrival_kept = after.iter().any(|m| probe_tagged(m, &tag_late));
+    // Leave the queue empty for the next gate.
+    drain(conn, address, Duration::from_secs(1)).await?;
+
+    Ok(LinkProbe {
+        released_delivery_count,
+        abandoned_delivery_count,
+        management_complete_removed,
+        management_complete_error,
+        drain_returned,
+        drain_credit_left,
+        left_after_drain,
+        late_arrival_kept,
+        removed_unreturned,
+        close_uncertain,
+    })
+}
+
+/// Receive one message of `address` (peek-lock), renew its lock through the management link
+/// (`renew-lock`), check that the new expiry is later than the one the delivery came with,
+/// then abandon it. A wrong lock-token byte order makes the broker refuse the renewal, so this
+/// passing proves the token mapping. Returns the old and the new expiry.
+pub async fn renew_lock_once(
+    conn: &mut ServiceBusConnection,
+    address: &str,
+) -> Result<(OffsetDateTime, OffsetDateTime)> {
+    let mut rx = conn
+        .open_receiver(&ReceiverSpec::peek_lock(address))
+        .await?;
+    let outcome = async {
+        let m = rx
+            .receive(1, Duration::from_secs(10))
+            .await?
+            .pop()
+            .ok_or_else(|| Error::Timeout(format!("no message arrived in {address} to renew")))?;
+        // Without a token there is nothing to abandon; `close` releases what the link holds.
+        let token = token_of(&m)?;
+        let checked = async {
+            let before = m.message.locked_until.ok_or_else(|| {
+                Error::Protocol("a peek-lock delivery came without a locked-until time".into())
+            })?;
+            // Let the clock move on, so a renewed lock ends measurably later.
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let after = match rx.renew_lock(&[token]).await?.as_slice() {
+                [after] => *after,
+                other => {
+                    return Err(Error::Protocol(format!(
+                        "renew-lock answered {} expiries for 1 lock",
+                        other.len()
+                    )));
+                }
+            };
+            if after <= before {
+                return Err(Error::Protocol(format!(
+                    "the renewed lock ends at {after}, not after {before}"
+                )));
+            }
+            Ok((before, after))
+        }
+        .await;
+        // Abandon on every path once the token is known, so no stale lock outlives the call.
+        let abandoned = rx.settle(token, &Settlement::Abandon).await;
+        let (before, after) = checked?;
+        abandoned?;
+        Ok((before, after))
+    }
+    .await;
+    let _ = rx.close().await;
+    outcome
 }

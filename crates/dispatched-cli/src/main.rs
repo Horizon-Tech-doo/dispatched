@@ -2,13 +2,17 @@
 
 mod commands;
 mod context;
+mod jobs;
 mod output;
 mod resolve;
+mod safety;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use commands::activity::ActivityCmd;
 use commands::browse::ViewArgs;
 use commands::profile::ProfileCmd;
 use context::Ctx;
+use jobs::JobExit;
 use resolve::Selection;
 use std::process::ExitCode;
 
@@ -35,8 +39,8 @@ struct Cli {
     /// DISPATCHED_PROFILE, then the default profile.
     #[arg(long, global = true, conflicts_with_all = ["connection_string", "namespace"])]
     profile: Option<String>,
-    /// Output format: table (default) or json; `export` also takes ndjson
-    /// (its default is json).
+    /// Output format: table (default) or json; `export` and `activity export`
+    /// also take ndjson (their default is json).
     #[arg(long, value_enum, global = true)]
     format: Option<Format>,
     #[command(subcommand)]
@@ -47,7 +51,7 @@ struct Cli {
 pub enum Format {
     Table,
     Json,
-    /// One JSON object per line; `export` only.
+    /// One JSON object per line; `export` and `activity export` only.
     #[value(alias = "jsonl")]
     Ndjson,
 }
@@ -128,12 +132,51 @@ enum Command {
         #[command(subcommand)]
         cmd: ProfileCmd,
     },
+    /// The log of mutating operations (what was changed, where, by which surface).
+    Activity {
+        #[command(subcommand)]
+        cmd: ActivityCmd,
+    },
+    /// Send messages to a queue or topic, or schedule them.
+    Send(Box<commands::send::SendArgs>),
+    /// Scheduled messages.
+    Scheduled {
+        #[command(subcommand)]
+        cmd: commands::send::ScheduledCmd,
+    },
+    /// Send the messages of an export file to a queue or topic.
+    Import(commands::send::ImportArgs),
+    /// Receive messages and settle them (--then) or delete them (--delete).
+    Receive(commands::receive::ReceiveArgs),
+    /// Deferred messages.
+    Deferred {
+        #[command(subcommand)]
+        cmd: commands::receive::DeferredCmd,
+    },
+    /// Delete messages by sequence number, or all that match (--all with filters).
+    Delete(commands::repair::DeleteArgs),
+    /// Move messages to another queue or topic (sent first, then removed).
+    Move(commands::repair::MoveArgs),
+    /// Send edited copies of messages to a queue or topic, optionally removing the originals.
+    Resubmit(Box<commands::repair::ResubmitArgs>),
+    /// Remove every message of one or more entities (each counted and confirmed on its own).
+    Purge(commands::repair::PurgeArgs),
+    /// The dead-letter queue: summary, resubmit, move, delete and purge.
+    Dlq {
+        #[command(subcommand)]
+        cmd: commands::repair::DlqCmd,
+    },
 }
 
 #[derive(Subcommand, Debug)]
 enum SessionCmd {
     /// List sessions with message counts.
     Ls { entity: String },
+    /// Read, set or clear the state of a session.
+    State {
+        #[command(subcommand)]
+        cmd: commands::state::StateCmd,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -144,10 +187,12 @@ enum RuleCmd {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    restore_sigpipe();
     let cli = Cli::parse();
+    set_sigpipe(mutates(&cli.command));
     match run(cli).await {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(JobExit::Ok) => ExitCode::SUCCESS,
+        // A job ran but did not finish every item (plan decision 17).
+        Ok(JobExit::Incomplete) => ExitCode::from(2),
         Err((e, hints)) => {
             eprintln!("error: {}", format_error(&e, hints));
             ExitCode::FAILURE
@@ -155,15 +200,58 @@ async fn main() -> ExitCode {
     }
 }
 
-/// Rust ignores SIGPIPE, so `println!` panics when the reader of a pipe
-/// exits early (`dispatched peek q | head`). Restore the default so the
-/// process ends quietly, like other command-line tools.
-fn restore_sigpipe() {
+/// Rust ignores SIGPIPE, so `println!` panics when the reader of a pipe exits early
+/// (`dispatched peek q | head`). For reads, restore the default so the process ends quietly,
+/// like other command-line tools. A mutating command keeps ignoring it: it has already changed
+/// the broker, so a closed stdout must not kill it before its `--report` file and activity
+/// entry are written. Its output goes through writers that turn the broken pipe into the
+/// "result could not be printed" warning and exit 2.
+fn set_sigpipe(mutating: bool) {
     #[cfg(unix)]
     // SAFETY: setting a signal disposition is process-wide and thread-safe;
     // this runs once, before anything is written.
     unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        libc::signal(
+            libc::SIGPIPE,
+            if mutating {
+                libc::SIG_IGN
+            } else {
+                libc::SIG_DFL
+            },
+        );
+    }
+    #[cfg(not(unix))]
+    let _ = mutating;
+}
+
+/// Whether the command can change the broker (its output must survive a closed pipe).
+fn mutates(command: &Command) -> bool {
+    match command {
+        Command::Send(_)
+        | Command::Scheduled { .. }
+        | Command::Import(_)
+        | Command::Receive(_)
+        | Command::Delete(_)
+        | Command::Move(_)
+        | Command::Resubmit(_)
+        | Command::Purge(_) => true,
+        Command::Deferred { cmd } => !matches!(cmd, commands::receive::DeferredCmd::Ls(_)),
+        Command::Dlq { cmd } => !matches!(cmd, commands::repair::DlqCmd::Summary(_)),
+        Command::Session {
+            cmd: SessionCmd::State { cmd },
+        } => !matches!(cmd, commands::state::StateCmd::Get(_)),
+        Command::Login { .. }
+        | Command::Logout
+        | Command::Whoami
+        | Command::Namespaces { .. }
+        | Command::Ls { .. }
+        | Command::Peek { .. }
+        | Command::Export { .. }
+        | Command::Show { .. }
+        | Command::Session { .. }
+        | Command::Rule { .. }
+        | Command::Profile { .. }
+        | Command::Activity { .. } => false,
     }
 }
 
@@ -181,8 +269,8 @@ struct Hints {
 
 /// One-line, terminal-safe error text. A not-signed-in root cause gets the
 /// login hint appended; a rejected credential on a `--namespace` selection
-/// gets the other-tenant hint; control characters from remote text are
-/// neutralised.
+/// gets the other-tenant hint; secrets are redacted and control characters
+/// from remote text are neutralised.
 fn format_error(e: &anyhow::Error, hints: Hints) -> String {
     let mut text = format!("{e:#}");
     let not_signed_in = matches!(
@@ -209,11 +297,11 @@ fn format_error(e: &anyhow::Error, hints: Hints) -> String {
         text.push_str("; ");
         text.push_str(TENANT_HINT);
     }
-    output::sanitize(&text)
+    output::sanitize(&dispatched_core::activity::redact(&text))
 }
 
 /// Run the command; on failure also report which hints apply.
-async fn run(cli: Cli) -> Result<(), (anyhow::Error, Hints)> {
+async fn run(cli: Cli) -> Result<JobExit, (anyhow::Error, Hints)> {
     let env = |k: &str| std::env::var(k).ok();
     let flags = Selection {
         connection_string: cli.connection_string.as_deref(),
@@ -229,15 +317,57 @@ async fn run(cli: Cli) -> Result<(), (anyhow::Error, Hints)> {
                 | Command::Show { .. }
                 | Command::Session { .. }
                 | Command::Rule { .. }
+                | Command::Send(_)
+                | Command::Scheduled { .. }
+                | Command::Import(_)
+                | Command::Receive(_)
+                | Command::Deferred { .. }
+                | Command::Delete(_)
+                | Command::Move(_)
+                | Command::Resubmit(_)
+                | Command::Purge(_)
+                | Command::Dlq { .. }
         ) && resolve::select(&flags, &env).namespace.is_some(),
     };
-    run_command(cli).await.map_err(|e| (e, hints))
+    // Opens nothing: the profile store, activity log and keychain are touched
+    // only by commands and selections that need them.
+    let ctx = Ctx::open();
+    run_command(&ctx, cli).await.map_err(|e| (e, hints))
 }
 
-async fn run_command(cli: Cli) -> anyhow::Result<()> {
-    // Opens nothing: the profile store and keychain are touched only by
-    // commands and selections that need them.
-    let ctx = Ctx::open();
+/// NDJSON is a file layout: only `export` and `activity export` write it.
+fn check_format(cli: &Cli) -> anyhow::Result<Format> {
+    let format = cli.format.unwrap_or(Format::Table);
+    let writes_ndjson = matches!(
+        cli.command,
+        Command::Export { .. }
+            | Command::Activity {
+                cmd: ActivityCmd::Export { .. }
+            }
+    );
+    if matches!(format, Format::Ndjson) && !writes_ndjson {
+        anyhow::bail!(
+            "--format ndjson is only supported by `export` and `activity export`; use table or json"
+        );
+    }
+    Ok(format)
+}
+
+#[cfg(test)]
+fn check_format_for_test<const N: usize>(args: [&str; N]) -> anyhow::Result<Format> {
+    check_format(&Cli::try_parse_from(args)?)
+}
+
+#[cfg(test)]
+/// Run a command line against `ctx` (in-memory store and activity log).
+pub(crate) async fn run_for_test<const N: usize>(
+    ctx: &Ctx,
+    args: [&str; N],
+) -> anyhow::Result<JobExit> {
+    run_command(ctx, Cli::try_parse_from(args)?).await
+}
+
+async fn run_command(ctx: &Ctx, cli: Cli) -> anyhow::Result<JobExit> {
     let env = |k: &str| std::env::var(k).ok();
     let flags = Selection {
         connection_string: cli.connection_string.as_deref(),
@@ -251,35 +381,35 @@ async fn run_command(cli: Cli) -> anyhow::Result<()> {
         .profile
         .clone()
         .or_else(|| env(resolve::ENV_PROFILE).filter(|v| !v.trim().is_empty()));
-    // NDJSON is a file layout: only `export` writes it.
-    let format = cli.format.unwrap_or(Format::Table);
-    if matches!(format, Format::Ndjson) && !matches!(cli.command, Command::Export { .. }) {
-        anyhow::bail!("--format ndjson is only supported by `export`; use table or json");
-    }
-    match cli.command {
+    let format = check_format(&cli)?;
+    // Commands that run jobs return their exit directly; the rest map to `Ok`.
+    let done: anyhow::Result<()> = match cli.command {
         Command::Login {
             device_code,
             tenant,
-        } => commands::auth::login(&ctx, device_code, &tenant).await,
-        Command::Logout => commands::auth::logout(&ctx).await,
-        Command::Whoami => commands::auth::whoami(&ctx, format).await,
+        } => commands::auth::login(ctx, device_code, &tenant).await,
+        Command::Logout => commands::auth::logout(ctx).await,
+        Command::Whoami => commands::auth::whoami(ctx, format).await,
         Command::Namespaces {
             tenant,
             all_tenants,
-        } => commands::auth::namespaces(&ctx, tenant, all_tenants, format).await,
-        Command::Ls { topics } => commands::browse::ls(&ctx, &sel, topics, format).await,
+        } => commands::auth::namespaces(ctx, tenant, all_tenants, format).await,
+        Command::Ls { topics } => commands::browse::ls(ctx, &sel, topics, format).await,
         Command::Peek {
             view,
             top,
             from_end,
-        } => commands::browse::peek(&ctx, &sel, &view, top, from_end, format).await,
-        Command::Show { entity } => commands::inspect::show(&ctx, &sel, &entity, format).await,
+        } => commands::browse::peek(ctx, &sel, &view, top, from_end, format).await,
+        Command::Show { entity } => commands::inspect::show(ctx, &sel, &entity, format).await,
         Command::Session {
             cmd: SessionCmd::Ls { entity },
-        } => commands::inspect::sessions(&ctx, &sel, &entity, format).await,
+        } => commands::inspect::sessions(ctx, &sel, &entity, format).await,
+        Command::Session {
+            cmd: SessionCmd::State { cmd },
+        } => return commands::state::run(ctx, &sel, &cmd, format).await,
         Command::Rule {
             cmd: RuleCmd::Ls { subscription },
-        } => commands::inspect::rules(&ctx, &sel, &subscription, format).await,
+        } => commands::inspect::rules(ctx, &sel, &subscription, format).await,
         Command::Export {
             view,
             top,
@@ -287,12 +417,36 @@ async fn run_command(cli: Cli) -> anyhow::Result<()> {
             force,
         } => {
             let fmt = commands::browse::export_format(cli.format)?;
-            commands::browse::export(&ctx, &sel, &view, top, &out, fmt, force).await
+            commands::browse::export(ctx, &sel, &view, top, &out, fmt, force).await
         }
         Command::Profile { cmd } => {
-            commands::profile::run(&ctx, cmd, format, profile_hint.as_deref()).await
+            commands::profile::run(ctx, cmd, format, profile_hint.as_deref()).await
         }
-    }
+        Command::Activity { cmd } => {
+            commands::activity::run(ctx, cmd, cli.format, cli.profile.as_deref())
+        }
+        Command::Send(args) => return commands::send::send(ctx, &sel, &args, format).await,
+        Command::Scheduled { cmd } => {
+            return commands::send::scheduled(ctx, &sel, &cmd, format).await;
+        }
+        Command::Import(args) => return commands::send::import(ctx, &sel, &args, format).await,
+        Command::Receive(args) => {
+            return commands::receive::receive(ctx, &sel, &args, format).await;
+        }
+        Command::Deferred { cmd } => {
+            return commands::receive::deferred(ctx, &sel, &cmd, format).await;
+        }
+        Command::Delete(args) => return commands::repair::delete(ctx, &sel, &args, format).await,
+        Command::Move(args) => {
+            return commands::repair::move_messages(ctx, &sel, &args, format).await;
+        }
+        Command::Resubmit(args) => {
+            return commands::repair::resubmit(ctx, &sel, &args, format).await;
+        }
+        Command::Purge(args) => return commands::repair::purge(ctx, &sel, &args, format).await,
+        Command::Dlq { cmd } => return commands::repair::dlq(ctx, &sel, &cmd, format).await,
+    };
+    done.map(|()| JobExit::Ok)
 }
 
 #[cfg(test)]
@@ -303,6 +457,42 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn mutating_commands_survive_a_closed_pipe_and_reads_do_not() {
+        let mutates_line = |args: &[&str]| {
+            let cli =
+                Cli::try_parse_from(std::iter::once("dispatched").chain(args.iter().copied()))
+                    .unwrap();
+            mutates(&cli.command)
+        };
+        for args in [
+            &["receive", "q", "--delete"][..],
+            &["send", "q", "--body", "x"],
+            &["purge", "q"],
+            &["delete", "q", "--seq", "1"],
+            &["move", "q", "--seq", "1", "--to", "r"],
+            &[
+                "deferred", "receive", "q", "--seq", "1", "--then", "complete",
+            ],
+            &["dlq", "purge", "q"],
+            &["scheduled", "cancel", "q", "--all"],
+            &["session", "state", "clear", "q", "s"],
+        ] {
+            assert!(mutates_line(args), "{args:?}");
+        }
+        for args in [
+            &["peek", "q"][..],
+            &["ls"],
+            &["deferred", "ls", "q"],
+            &["dlq", "summary", "q"],
+            &["session", "state", "get", "q", "s"],
+            &["session", "ls", "q"],
+            &["activity", "ls"],
+        ] {
+            assert!(!mutates_line(args), "{args:?}");
+        }
     }
 
     #[test]
@@ -441,6 +631,137 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ndjson_is_allowed_for_activity_export() {
+        assert!(
+            check_format_for_test([
+                "dispatched",
+                "--format",
+                "ndjson",
+                "activity",
+                "export",
+                "--out",
+                "a.ndjson"
+            ])
+            .is_ok()
+        );
+        assert!(
+            check_format_for_test(["dispatched", "--format", "ndjson", "activity", "ls"]).is_err()
+        );
+        assert!(
+            check_format_for_test(["dispatched", "--format", "ndjson", "export", "--out", "-"])
+                .is_ok()
+        );
+        assert!(check_format_for_test(["dispatched", "--format", "ndjson", "ls"]).is_err());
+        assert!(matches!(
+            check_format_for_test(["dispatched", "--format", "json", "ls"]),
+            Ok(Format::Json)
+        ));
+    }
+
+    #[test]
+    fn activity_commands_parse() {
+        assert!(
+            Cli::try_parse_from([
+                "dispatched",
+                "activity",
+                "ls",
+                "--origin",
+                "gui",
+                "--limit",
+                "5"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["dispatched", "activity", "ls", "--origin", "robot"]).is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["dispatched", "activity", "export"]).is_err(),
+            "--out is required"
+        );
+        // The global --profile filters `activity ls`.
+        let cli =
+            Cli::try_parse_from(["dispatched", "activity", "ls", "--profile", "prod-weu"]).unwrap();
+        assert_eq!(cli.profile.as_deref(), Some("prod-weu"));
+        assert!(Cli::try_parse_from(["dispatched", "activity", "ls", "--limit", "0"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn activity_ls_and_export_read_the_log() {
+        use dispatched_core::{ActivityEntry, Audit, Mutation, OpKind, Outcome, Phase};
+        use horizon_azure_kit::safety::Origin;
+        let ctx = Ctx::for_test_with_profiles(&[]);
+        let entry = |origin, profile: &str| ActivityEntry {
+            id: 0,
+            op_id: "op-1".into(),
+            at: time::OffsetDateTime::now_utc(),
+            origin,
+            profile: profile.into(),
+            entity: Some("orders".into()),
+            action: "purge".into(),
+            kind: OpKind::Mutating(Mutation::Purge),
+            phase: Phase::Finished,
+            outcome: Outcome::Succeeded,
+            count: Some(3),
+            succeeded: Some(3),
+            failed: Some(0),
+            skipped: Some(0),
+            summary: "Remove 3 messages from orders on dev".into(),
+            error: None,
+            note: None,
+        };
+        let log = ctx.activity().unwrap();
+        log.record(&entry(Origin::Cli, "dev")).unwrap();
+        log.record(&entry(Origin::Gui, "prod-weu")).unwrap();
+        assert_eq!(
+            run_for_test(&ctx, ["dispatched", "activity", "ls"])
+                .await
+                .unwrap(),
+            JobExit::Ok
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("a.ndjson");
+        let out_s = out.to_str().unwrap();
+        run_for_test(
+            &ctx,
+            [
+                "dispatched",
+                "--format",
+                "ndjson",
+                "activity",
+                "export",
+                "--out",
+                out_s,
+            ],
+        )
+        .await
+        .unwrap();
+        let text = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(text.lines().count(), 2);
+        let e = run_for_test(&ctx, ["dispatched", "activity", "export", "--out", out_s])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("--force"), "{e}");
+        run_for_test(
+            &ctx,
+            [
+                "dispatched",
+                "activity",
+                "export",
+                "--out",
+                out_s,
+                "--force",
+            ],
+        )
+        .await
+        .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(v.as_array().unwrap().len(), 2, "JSON by default");
+    }
+
     use dispatched_core::Error as CoreError;
     use horizon_azure_kit::KitError;
 
@@ -492,6 +813,15 @@ mod tests {
         // Other failures on a namespace selection get none.
         let e = anyhow::Error::from(CoreError::Network("down".into()));
         assert!(!format_error(&e, on).contains("tenant"));
+    }
+
+    #[test]
+    fn error_text_is_redacted() {
+        let e = anyhow::anyhow!(
+            "broker said Endpoint=sb://x.servicebus.windows.net/;SharedAccessKeyName=k;SharedAccessKey=topsecretvalue"
+        );
+        let text = format_error(&e, Hints::default());
+        assert!(!text.contains("topsecretvalue"), "{text}");
     }
 
     #[test]

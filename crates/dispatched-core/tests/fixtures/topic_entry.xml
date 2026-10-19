@@ -1,0 +1,34 @@
+<entry xmlns="http://www.w3.org/2005/Atom">
+  <id>https://myns.servicebus.windows.net/events?api-version=2024-05</id>
+  <title type="text">events</title>
+  <content type="application/xml">
+    <TopicDescription xmlns="http://schemas.microsoft.com/netservices/2010/10/servicebus/connect" xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+      <DefaultMessageTimeToLive>P14D</DefaultMessageTimeToLive>
+      <MaxSizeInMegabytes>1024</MaxSizeInMegabytes>
+      <RequiresDuplicateDetection>false</RequiresDuplicateDetection>
+      <DuplicateDetectionHistoryTimeWindow>PT10M</DuplicateDetectionHistoryTimeWindow>
+      <EnableBatchedOperations>true</EnableBatchedOperations>
+      <SizeInBytes>2048</SizeInBytes>
+      <FilteringMessagesBeforePublishing>false</FilteringMessagesBeforePublishing>
+      <IsAnonymousAccessible>false</IsAnonymousAccessible>
+      <AuthorizationRules><AuthorizationRule><KeyName>secret-ish</KeyName><PrimaryKey>primary-secret-value</PrimaryKey><SecondaryKey>secondary-secret-value</SecondaryKey></AuthorizationRule></AuthorizationRules>
+      <Status>Active</Status>
+      <CreatedAt>2026-09-01T08:00:00.0000000Z</CreatedAt>
+      <UpdatedAt>2026-10-01T08:00:00.0000000Z</UpdatedAt>
+      <AccessedAt>2026-10-15T09:41:00.0000000Z</AccessedAt>
+      <SupportOrdering>true</SupportOrdering>
+      <CountDetails xmlns:d2p1="http://schemas.microsoft.com/netservices/2011/06/servicebus">
+        <d2p1:ActiveMessageCount>0</d2p1:ActiveMessageCount>
+        <d2p1:DeadLetterMessageCount>0</d2p1:DeadLetterMessageCount>
+        <d2p1:ScheduledMessageCount>0</d2p1:ScheduledMessageCount>
+        <d2p1:TransferMessageCount>0</d2p1:TransferMessageCount>
+        <d2p1:TransferDeadLetterMessageCount>0</d2p1:TransferDeadLetterMessageCount>
+      </CountDetails>
+      <SubscriptionCount>2</SubscriptionCount>
+      <AutoDeleteOnIdle>P10675199DT2H48M5.4775807S</AutoDeleteOnIdle>
+      <EnablePartitioning>false</EnablePartitioning>
+      <EnableSubscriptionPartitioning>false</EnableSubscriptionPartitioning>
+      <EnableExpress>false</EnableExpress>
+    </TopicDescription>
+  </content>
+</entry>

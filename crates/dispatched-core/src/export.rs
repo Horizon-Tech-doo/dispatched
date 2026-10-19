@@ -191,6 +191,7 @@ pub struct FileExport {
     format: ExportFormat,
     overwrite: bool,
     written: u64,
+    raw: bool,
 }
 
 impl FileExport {
@@ -215,6 +216,7 @@ impl FileExport {
                 format,
                 overwrite,
                 written: 0,
+                raw: false,
             });
         }
         if !overwrite && path.exists() {
@@ -233,6 +235,7 @@ impl FileExport {
             format,
             overwrite,
             written: 0,
+            raw: false,
         })
     }
 
@@ -269,10 +272,18 @@ impl FileExport {
         Ok(())
     }
 
+    /// Append raw bytes (a caller-built document, e.g. a job report). The format's own array
+    /// framing is then skipped at `finish`; the atomic temp-file-and-rename logic is shared.
+    pub fn write_raw(&mut self, bytes: &[u8]) -> Result<()> {
+        self.raw = true;
+        let w = self.out.as_mut().expect("open until finish");
+        w.write_all(bytes).map_err(io)
+    }
+
     /// Close the document, flush, sync and put the file in place. Returns the message count.
     pub fn finish(mut self) -> Result<u64> {
         let mut w = self.out.take().expect("open until finish");
-        if self.format == ExportFormat::Json {
+        if self.format == ExportFormat::Json && !self.raw {
             w.write_all(if self.written == 0 { b"[]\n" } else { b"\n]\n" })
                 .map_err(io)?;
         }
@@ -954,6 +965,7 @@ mod tests {
             format: ExportFormat::Json,
             overwrite,
             written: 0,
+            raw: false,
         }
     }
 

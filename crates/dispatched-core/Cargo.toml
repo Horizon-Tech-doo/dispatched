@@ -44,6 +44,7 @@ uuid = { workspace = true }
 [dev-dependencies]
 mockito = { workspace = true }
 tempfile = { workspace = true }
+time = { workspace = true, features = ["macros"] }
 uuid = { workspace = true }
 serde_bytes = "0.11"
 tokio = { version = "1", features = ["full", "test-util"] }
@@ -58,4 +59,8 @@ required-features = ["test-support"]
 
 [[test]]
 name = "emulator_m1c"
+required-features = ["test-support"]
+
+[[test]]
+name = "emulator_m2a"
 required-features = ["test-support"]

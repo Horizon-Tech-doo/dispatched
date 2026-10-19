@@ -599,7 +599,7 @@ mod tests {
             scheduled_enqueue_time: None,
             locked_until: None,
             delivery_count: 0,
-            time_to_live_ms: None,
+            time_to_live: None,
             dead_letter_reason: None,
             dead_letter_description: None,
             dead_letter_source: None,
@@ -670,6 +670,7 @@ mod tests {
                 messages: found.into_iter().map(msg).collect(),
                 missing,
                 scanned: 0,
+                last_examined: None,
             })
         }
     }
@@ -842,6 +843,7 @@ mod tests {
                 messages: seqs.iter().copied().map(msg).collect(),
                 missing: vec![],
                 scanned: 0,
+                last_examined: None,
             })
         }
     }

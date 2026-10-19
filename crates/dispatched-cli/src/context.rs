@@ -1,6 +1,7 @@
-//! Process-wide CLI context: profile database, keychain, Entra session.
+//! Process-wide CLI context: profile database, activity log, keychain, Entra session.
 
 use anyhow::Context as _;
+use dispatched_core::ActivityLog;
 use dispatched_core::profiles::ProfileStore;
 use horizon_azure_kit::AzureCloud;
 use horizon_azure_kit::auth::{EntraSession, SignIn};
@@ -10,6 +11,7 @@ use std::sync::{Arc, OnceLock};
 pub use dispatched_core::paths::{KEY_PREFIX, KEYCHAIN_SERVICE};
 
 type Opener = Box<dyn Fn() -> anyhow::Result<ProfileStore> + Send + Sync>;
+type ActivityOpener = Box<dyn Fn() -> anyhow::Result<ActivityLog> + Send + Sync>;
 
 /// Anything that can hand out the profile store (opening it on first use).
 pub trait StoreSource {
@@ -25,9 +27,14 @@ impl StoreSource for ProfileStore {
 pub struct Ctx {
     store: OnceLock<ProfileStore>,
     opener: Opener,
+    activity: OnceLock<Arc<ActivityLog>>,
+    activity_opener: ActivityOpener,
     /// The OS keychain in production; an in-memory store in tests.
     pub secrets: Arc<dyn CredentialStore>,
     pub session: Arc<EntraSession>,
+    /// Whether a confirmation can be asked; `None` asks the terminal (stdin and stderr).
+    /// Test contexts set `Some(false)`, so a test never depends on how it was started.
+    interactive: Option<bool>,
 }
 
 impl StoreSource for Ctx {
@@ -65,21 +72,94 @@ impl Ctx {
         Self {
             store: OnceLock::new(),
             opener,
+            activity: OnceLock::new(),
+            activity_opener: Box::new(|| Ok(dispatched_core::paths::open_activity_log()?)),
             secrets,
             session,
+            interactive: None,
         }
     }
 
     #[cfg(test)]
     /// A context over the given store and credential store (tests use
     /// in-memory ones, so they never touch the keychain or the config dir).
+    /// The activity log is in memory too.
     pub fn from_parts(store: ProfileStore, secrets: Arc<dyn CredentialStore>) -> Self {
-        let ctx = Self::lazy(
+        let mut ctx = Self::lazy(
             Box::new(|| anyhow::bail!("the profile store was not provided")),
             secrets,
         );
+        ctx.activity_opener = Box::new(|| Ok(ActivityLog::open_in_memory()?));
+        ctx.interactive = Some(false);
         let _ = ctx.store.set(store);
         ctx
+    }
+
+    #[cfg(test)]
+    /// An in-memory context whose store holds these profiles: `(name, host, production)`.
+    pub fn for_test_with_profiles(profiles: &[(&str, &str, bool)]) -> Self {
+        let store = ProfileStore::open_in_memory().expect("in-memory store");
+        for (name, host, production) in profiles {
+            let mut p = dispatched_core::profiles::Profile::entra(name, host, "o", None);
+            p.production = *production;
+            store.insert(&p).expect("profile saved");
+        }
+        Self::from_parts(
+            store,
+            Arc::new(horizon_azure_kit::secrets::MemoryStore::new()),
+        )
+    }
+
+    #[cfg(test)]
+    /// The context, with prompts possible (`true`) or not.
+    pub fn interactive_for_test(mut self, interactive: bool) -> Self {
+        self.interactive = Some(interactive);
+        self
+    }
+
+    #[cfg(test)]
+    /// The context signed in as the account test profiles use (`o`): the sign-in is saved and
+    /// current, and a placeholder refresh token is in the in-memory credential store, so an
+    /// Entra profile resolves. Nothing ever exchanges the placeholder for a token.
+    pub fn signed_in_for_test(self) -> Self {
+        let sign_in = SignIn {
+            id: "o".into(),
+            user_principal: "a@x.io".into(),
+            tenant_id: "t".into(),
+            display_name: None,
+            cloud: AzureCloud::Public,
+        };
+        let store = self.store().expect("test store");
+        store.save_sign_in(&sign_in).expect("sign-in saved");
+        store
+            .set_current_sign_in(Some(&sign_in.id))
+            .expect("sign-in current");
+        self.secrets
+            .put(
+                &format!("{KEY_PREFIX}:entra:{}", sign_in.id),
+                &secrecy::SecretString::from("placeholder"),
+            )
+            .expect("placeholder token saved");
+        self
+    }
+
+    /// Whether a confirmation prompt can be shown: stdin and stderr are terminals.
+    pub fn interactive(&self) -> bool {
+        use std::io::IsTerminal;
+        self.interactive
+            .unwrap_or_else(|| std::io::stdin().is_terminal() && std::io::stderr().is_terminal())
+    }
+
+    /// The activity log, opened (creating `{config_dir}/activity.db`) on first use, so
+    /// read-only commands never touch it.
+    pub fn activity(&self) -> anyhow::Result<&Arc<ActivityLog>> {
+        if let Some(log) = self.activity.get() {
+            return Ok(log);
+        }
+        let opened = (self.activity_opener)().context("opening the activity log")?;
+        // A concurrent first open would keep the winner's handle.
+        let _ = self.activity.set(Arc::new(opened));
+        Ok(self.activity.get().expect("activity log was just set"))
     }
 
     /// The profile store, opened on first use.

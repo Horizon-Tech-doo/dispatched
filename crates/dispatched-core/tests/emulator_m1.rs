@@ -5,7 +5,7 @@
 //! Run: `testing/emulator/emulator.sh up && DISPATCHED_EMULATOR=1 cargo test -p dispatched-core --features test-support --test emulator_m1 -- --nocapture`
 
 use dispatched_core::filter::{BodyFilter, MessageFilter, PropertyFilter};
-use dispatched_core::messaging::{ServiceBusConnection, testing};
+use dispatched_core::messaging::testing::{self, ServiceBusConnection};
 use dispatched_core::{
     ConnectionString, EntityCounts, EntityPath, Explorer, ExportFormat, MessageState, Namespace,
     PeekOptions, PeekView, write_messages,
