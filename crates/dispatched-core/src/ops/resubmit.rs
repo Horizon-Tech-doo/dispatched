@@ -215,7 +215,10 @@ pub(crate) async fn run_as(
             &seqs,
             &spec.source.limits,
             cancel,
-            &mut on,
+            &mut super::locate::Live {
+                on: &mut on,
+                job: &mut job,
+            },
         )
         .await;
         // On every path, the error one included.

@@ -583,6 +583,35 @@ impl<'a> JobRun<'a> {
         });
     }
 
+    /// Record `item` unless an item for its sequence number was recorded already; that one is
+    /// replaced, and emitted again only if it changed.
+    pub(crate) fn settle_item(&mut self, item: ItemResult) {
+        let seen = item.sequence_number.and_then(|seq| {
+            self.items
+                .iter()
+                .position(|i| i.sequence_number == Some(seq))
+        });
+        match seen {
+            Some(at) if self.items[at] == item => {}
+            Some(at) => {
+                self.progress.event(&JobEvent::Item(item.clone()));
+                self.items[at] = item;
+            }
+            None => self.item(item),
+        }
+    }
+
+    /// Order the items as `order` lists their sequence numbers; others keep their place at the end.
+    pub(crate) fn reorder(&mut self, order: &[Option<i64>]) {
+        let rank = |i: &ItemResult| {
+            order
+                .iter()
+                .position(|s| *s == i.sequence_number)
+                .unwrap_or(usize::MAX)
+        };
+        self.items.sort_by_key(rank);
+    }
+
     /// Emit a message a receive took ([`JobEvent::Received`]).
     pub(crate) fn received(&mut self, m: &PeekedMessage) {
         self.progress
