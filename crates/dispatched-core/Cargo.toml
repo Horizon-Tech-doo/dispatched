@@ -22,6 +22,7 @@ fe2o3-amqp-cbs = { workspace = true }
 fe2o3-amqp-management = { workspace = true }
 fe2o3-amqp-types = { workspace = true }
 fe2o3-amqp-ws = { workspace = true }
+getrandom = "0.3"
 percent-encoding = { workspace = true }
 quick-xml = { workspace = true }
 regex = { workspace = true }

@@ -4,6 +4,7 @@ pub mod atom_write;
 mod details;
 pub mod model;
 mod models;
+pub mod policies;
 mod rules;
 pub(crate) mod xml;
 
@@ -17,6 +18,7 @@ pub use model::{
     parse_rule, parse_subscription, parse_topic, validate_filter,
 };
 pub use models::{EntityCounts, QueueInfo, SubscriptionInfo, TopicInfo};
+pub use policies::{KeySlot, PolicyView};
 pub use rules::{CorrelationProperty, RuleFilter, RuleInfo};
 pub use xml::Node;
 

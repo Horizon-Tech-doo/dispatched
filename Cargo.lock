@@ -1190,6 +1190,7 @@ dependencies = [
  "fe2o3-amqp-management",
  "fe2o3-amqp-types",
  "fe2o3-amqp-ws",
+ "getrandom 0.3.4",
  "horizon-azure-kit",
  "mockito",
  "percent-encoding",
