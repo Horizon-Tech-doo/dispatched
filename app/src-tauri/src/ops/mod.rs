@@ -2,6 +2,7 @@
 //! state and handle, so everything here is testable without a window.
 
 pub mod account;
+pub mod activity;
 pub mod browse;
 pub mod connection;
 pub mod dashboard;

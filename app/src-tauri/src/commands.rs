@@ -683,3 +683,70 @@ pub fn job_report_save(
 ) -> Result<String, CommandError> {
     operate::save_report(&state.jobs, &id, &pick, &format)
 }
+
+// ---- the shared activity log ----
+
+use crate::ops::activity::ActivityQueryForm;
+use dispatched_core::activity::ActivityEntry;
+
+#[tauri::command]
+pub fn activity_list(
+    state: State<'_, AppState>,
+    query: ActivityQueryForm,
+) -> Result<Vec<ActivityEntry>, CommandError> {
+    ops::activity::list(ops::activity::log(&state)?, &query)
+}
+
+#[tauri::command]
+pub fn activity_since(
+    state: State<'_, AppState>,
+    after_id: Option<i64>,
+) -> Result<Vec<ActivityEntry>, CommandError> {
+    ops::activity::since(ops::activity::log(&state)?, after_id)
+}
+
+/// The save dialog for an activity export.
+#[tauri::command]
+pub async fn pick_activity_export_path(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    format: String,
+) -> Result<Option<PickedPath>, CommandError> {
+    use tauri_plugin_dialog::DialogExt;
+    let ext = if format.eq_ignore_ascii_case("ndjson") {
+        "ndjson"
+    } else {
+        "json"
+    };
+    let name = format!("dispatched-activity.{ext}");
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .set_parent(&window)
+            .set_file_name(&name)
+            .add_filter(ext.to_uppercase(), &[ext])
+            .blocking_save_file()
+    })
+    .await
+    .map_err(|e| CommandError::new("io", format!("The save dialog failed: {e}")))?;
+    Ok(picked
+        .and_then(|p| p.into_path().ok())
+        .map(|path| ops::export::remember_pick(&state.jobs, path)))
+}
+
+#[tauri::command]
+pub fn activity_export(
+    state: State<'_, AppState>,
+    query: ActivityQueryForm,
+    pick: String,
+    format: String,
+) -> Result<u64, CommandError> {
+    ops::activity::export(
+        ops::activity::log(&state)?,
+        &state.jobs,
+        &query,
+        &pick,
+        &format,
+    )
+}

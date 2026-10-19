@@ -124,6 +124,10 @@ pub fn run() {
             commands::job_report,
             commands::pick_report_path,
             commands::job_report_save,
+            commands::activity_list,
+            commands::activity_since,
+            commands::pick_activity_export_path,
+            commands::activity_export,
             commands::job_reveal,
         ])
         .build(tauri::generate_context!())
