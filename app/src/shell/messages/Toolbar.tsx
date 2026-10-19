@@ -69,6 +69,8 @@ export function Toolbar(p: {
   onRefresh(): void;
   /** The Export control; told whether the toolbar is compact, to show an icon alone. */
   exportMenu?: (compact: boolean) => ReactNode;
+  /** The operations on this view's messages (Send, Receive, Delete, …), before Export. */
+  operations?: (compact: boolean) => ReactNode;
 }) {
   const [seq, setSeq] = useState(p.from.kind === "sequence" ? String(p.from.sequence) : "");
   // Choosing Sequence shows the field; the peek starts there once a number is entered.
@@ -227,6 +229,7 @@ export function Toolbar(p: {
             <DropdownMenuItem onSelect={p.onResetColumns}>Reset columns</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
+        {p.operations?.(compact)}
         {p.exportMenu?.(compact)}
         {/* One slot, as wide as its wider label ("Peek again", with its icon and padding), so swapping it with Stop
             never moves Columns. */}

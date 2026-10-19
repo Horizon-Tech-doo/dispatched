@@ -43,6 +43,16 @@ const firstOf = async (entity: string, view: "dead-letter" | "active", max: numb
 afterEach(() => vi.restoreAllMocks());
 
 describe("detail pane", () => {
+  it("Clone & resend hands the loaded message to the composer", async () => {
+    const m = await firstOf("customs-docs", "active", 5, () => true);
+    const onClone = vi.fn();
+    await pane("customs-docs", "active", m.sequence_number, { onClone });
+    const region = await screen.findByRole("region", { name: `Message ${m.sequence_number}` });
+    await within(region).findByRole("tab", { name: "Body" });
+    await userEvent.click(within(region).getByRole("button", { name: /Clone & resend/ }));
+    expect(onClone).toHaveBeenCalledWith(expect.objectContaining({ sequence_number: m.sequence_number, body: expect.anything() }));
+  });
+
   it("shows the dead-letter reason and a formatted JSON body", async () => {
     const m = await firstOf("invoice-generate", "dead-letter", 37, (x) => x.body_preview?.startsWith("{") === true);
     await pane("invoice-generate", "dead-letter", m.sequence_number);

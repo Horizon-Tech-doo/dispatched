@@ -260,10 +260,8 @@ export interface ActivityQuery { limit?: number; origin?: ActivityOrigin; profil
 
 // M2b: operate forms. Every int64 that can exceed 2^53 is a string.
 
-/** Custom property types the composer offers (the core also accepts the other AMQP types). */
-export type PropType =
-  | "string" | "int" | "long" | "double" | "bool" | "datetime" | "timespan" | "guid"
-  | "byte" | "short" | "ubyte" | "ushort" | "uint" | "ulong" | "float" | "symbol" | "uuid" | "binary" | "timestamp" | "null";
+/** Custom property types a form can send: what core `PropType::parse` accepts. */
+export type PropType = "string" | "int" | "long" | "double" | "bool" | "datetime" | "timespan" | "guid";
 export interface PropertyForm { name: string; type: PropType; value: string }
 /** System properties of an outgoing message; a blank field is not set. `time_to_live` is like `90s` or `5m`. */
 export interface OutgoingForm {

@@ -1,4 +1,4 @@
-import { Columns3, Copy, X } from "lucide-react";
+import { Columns3, Copy, SendHorizontal, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMessageDetail, type MessageDetail, type PeekView } from "@/engine";
 import {
@@ -239,6 +239,8 @@ export function DetailPane(p: {
   shownProps?: readonly string[];
   onExport?(sequence: number): void;
   onPeekAgain?(): void;
+  /** Clone & resend: the composer, seeded from this message. */
+  onClone?(d: MessageDetail): void;
 }) {
   // Holding an arrow key walks the grid faster than messages can be read: the pane waits for the focus to rest.
   const [debounced, setDebounced] = useState(p.sequence);
@@ -293,6 +295,14 @@ export function DetailPane(p: {
           <span className="truncate text-muted">{label}</span>
         </h2>
         <span role="status" className="ml-auto shrink-0 text-11 text-muted">{copied}</span>
+        {p.onClone && (
+          <Hint label={unavailable ?? "Send a copy of this message as a new message"}>
+            <Button size="sm" aria-disabled={unavailable !== null ? true : undefined} className={unavailable !== null ? "opacity-45" : undefined} onClick={() => d && unavailable === null && p.onClone!(d)}>
+              <SendHorizontal aria-hidden="true" />
+              Clone &amp; resend
+            </Button>
+          </Hint>
+        )}
         <CopyButton label="Copy JSON" hint="Copy the message as JSON, the way an export writes it" reason={jsonReason} onCopy={() => d && copy("JSON", toExportJson(d))} />
         <IconButton label="Close message" onClick={p.onClose}>
           <X />

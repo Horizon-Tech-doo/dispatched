@@ -3,6 +3,7 @@ import type { SheetState } from "../context";
 import { DASHBOARD_ID, type EntityKind, type Prefs } from "../state";
 import { displayName, entityIdOf } from "../entityId";
 import { entityUrl } from "../entityUrls";
+import { sendTarget } from "../operate/controls";
 
 export interface PaletteCommand {
   id: string;
@@ -87,6 +88,7 @@ export function buildCommands(c: PaletteContext): PaletteCommand[] {
   if (tab && c.activeProfileId !== null) {
     if (c.host) out.push({ id: "entity:url", group: "This entity", label: `Copy URL of ${displayName(tab.id)}`, keywords: ["address", "sb://"], run: () => c.copy(entityUrl(c.host, tab.id, tab.kind), `Copied the URL for ${displayName(tab.id)}`) });
     if (!c.entra) out.push({ id: "entity:string", group: "This entity", label: `Copy connection string of ${displayName(tab.id)}`, keywords: ["key", "secret"], run: () => c.copyConnectionString(tab.id) });
+    out.push({ id: "op:send", group: "This entity", label: `Send messages to ${displayName(sendTarget(tab.id))}…`, keywords: ["compose", "new message"], run: () => c.openSheet({ kind: "operation", op: "send", entity: tab.id }) });
   }
   return out;
 }

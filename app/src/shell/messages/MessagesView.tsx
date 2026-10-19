@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { Download } from "lucide-react";
+import { Download, SendHorizontal } from "lucide-react";
 import { useId, useMemo, useRef, useState } from "react";
 import { TAIL_MAX, normalizeFilter, usePeekStream, type EntityCounts, type FilterSpec, type MessageSummary, type PeekView } from "@/engine";
 import {
@@ -185,6 +185,21 @@ export function MessagesView({
     </DropdownMenu>
   );
 
+  // Operations on this view's messages. Sending puts new messages on the entity (a subscription's topic).
+  const sends = view === "active" || view === "scheduled";
+  const operations = (compact: boolean) => (
+    <>
+      {sends && (
+        <CompactHint compact={compact} label="Send">
+          <Button variant="quiet" disabled={!profileId} aria-label={compact ? "Send" : undefined} onClick={() => openSheet({ kind: "operation", op: "send", entity: tab.id })}>
+            <SendHorizontal aria-hidden="true" className="text-icon" />
+            <CompactLabel compact={compact}>Send</CompactLabel>
+          </Button>
+        </CompactHint>
+      )}
+    </>
+  );
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <Toolbar
@@ -211,6 +226,7 @@ export function MessagesView({
         onStop={stream.stop}
         onRefresh={restart}
         exportMenu={exportMenu}
+        operations={operations}
       />
       {vs.filterOpen && (
         <FilterBar
@@ -281,6 +297,7 @@ export function MessagesView({
                   onClose={closeDetail}
                   onPeekAgain={restart}
                   onExport={(sequence) => exportSheet([sequence])}
+                  onClone={(d) => openSheet({ kind: "operation", op: "send", entity: tab.id, clone: d })}
                   shownProps={shownProps}
                   onShowColumn={(name) => {
                     const id = propColumn(name);

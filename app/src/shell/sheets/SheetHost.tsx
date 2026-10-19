@@ -1,6 +1,6 @@
 import { useShell } from "../context";
 import { ExportSheet } from "../messages/ExportSheet";
-import { OperationHost } from "../operate/OperationHost";
+import { OperationHost, operationKey } from "../operate/OperationHost";
 import { ReportSheet } from "../operate/ReportSheet";
 import { ExplorerOptionsSheet } from "./ExplorerOptionsSheet";
 import { ProfileSheet } from "./ProfileSheet";
@@ -27,7 +27,7 @@ export function SheetHost() {
       // Another export opened while one is up starts from its own choices.
       return <ExportSheet key={JSON.stringify(sheet)} {...sheet} />;
     case "operation":
-      return <OperationHost key={JSON.stringify(sheet)} seed={sheet} />;
+      return <OperationHost key={operationKey(sheet)} seed={sheet} />;
     case "report":
       return <ReportSheet key={sheet.jobId} jobId={sheet.jobId} />;
     default:
