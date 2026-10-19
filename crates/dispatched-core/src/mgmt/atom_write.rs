@@ -13,7 +13,7 @@ use super::model::{
 };
 use super::rules::RuleFilter;
 use super::xml::Node;
-use quick_xml::escape::escape;
+use quick_xml::escape::{escape, partial_escape};
 use secrecy::ExposeSecret;
 use std::time::Duration;
 
@@ -120,7 +120,7 @@ const VALUE_TYPES: &[&str] = &[
 
 /// Element `name` with escaped text.
 fn leaf(name: &str, value: &str) -> String {
-    format!("<{name}>{}</{name}>", escape(value))
+    format!("<{name}>{}</{name}>", partial_escape(value))
 }
 
 /// The modelled elements of a description, each already written.
@@ -171,7 +171,7 @@ pub(crate) fn write_node(out: &mut String, node: &Node) {
         return;
     }
     out.push('>');
-    out.push_str(&escape(node.text.as_str()));
+    out.push_str(&partial_escape(node.text.as_str()));
     for c in &node.children {
         write_node(out, c);
     }
@@ -476,7 +476,7 @@ fn filter_xml(f: &RuleFilter, raw: Option<&Node>) -> Option<String> {
                 s.push_str(&format!(
                     "<KeyValueOfstringanyType>{}<Value i:type=\"d6p1:{ty}\" xmlns:d6p1=\"{XSD_NS}\">{}</Value></KeyValueOfstringanyType>",
                     leaf("Key", &p.name),
-                    escape(p.value.as_str())
+                    partial_escape(p.value.as_str())
                 ));
             }
             s.push_str("</Properties></Filter>");

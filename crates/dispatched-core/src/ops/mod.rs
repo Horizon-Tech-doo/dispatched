@@ -984,5 +984,7 @@ mod tests {
         assert_send(&o.regenerate_key(q.clone(), "p".into(), crate::mgmt::KeySlot::Primary));
         let sub = crate::mgmt::EntityRef::subscription("t", "s");
         assert_send(&o.remove_rule(sub, "r".into()));
+        assert_send(&o.import_entities(Vec::new(), false, &NoProgress, c));
+        assert_send(&o.explorer().collect_for_export(&[]));
     }
 }

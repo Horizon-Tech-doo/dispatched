@@ -2,6 +2,7 @@
 
 pub mod atom_write;
 mod details;
+pub mod incumbent;
 pub mod model;
 mod models;
 pub mod policies;

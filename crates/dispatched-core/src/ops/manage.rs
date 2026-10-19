@@ -4,7 +4,8 @@
 
 use super::{Operator, gated};
 use crate::diagnostics::error_kind;
-use crate::jobs::{ItemOutcome, ItemResult, JobKind, JobReport, JobRun, NoProgress};
+use crate::jobs::{ItemOutcome, ItemResult, JobKind, JobReport, JobRun, NoProgress, Progress};
+use crate::mgmt::incumbent::ImportEntity;
 use crate::mgmt::policies::{self, KeySlot};
 use crate::mgmt::{
     AccessRight, Description, EntityCounts, EntityKind, EntityRef, EntityStatus, ManagementClient,
@@ -12,6 +13,7 @@ use crate::mgmt::{
 };
 use crate::safety::{CountEstimate, DeleteTarget, Operation, count_text};
 use crate::{Error, Result};
+use horizon_azure_kit::safety::CancellationToken;
 
 /// An entity with its full description, to create or update.
 // Built once per command and moved into the operation; boxing would only add noise.
@@ -646,6 +648,230 @@ impl Operator {
     }
 }
 
+/// Set every field of `$base` that `$file` sets.
+macro_rules! overlay {
+    ($base:expr, $file:expr; $($field:ident),* $(,)?) => {
+        $( if $file.$field.is_some() { $base.$field = $file.$field.clone(); } )*
+    };
+}
+
+/// The settings of an existing entity with what the file sets on top; the file's policies
+/// replace those of the same name, others are kept.
+fn merge<T>(existing: &mut Description<T>, file: &Description<T>, apply: impl Fn(&mut T, &T)) {
+    apply(&mut existing.settings, &file.settings);
+    for p in &file.policies {
+        match existing
+            .policies
+            .iter_mut()
+            .find(|e| e.key_name.eq_ignore_ascii_case(&p.key_name))
+        {
+            Some(e) => *e = p.clone(),
+            None => existing.policies.push(p.clone()),
+        }
+    }
+}
+
+fn overlay_queue(b: &mut QueueSettings, f: &QueueSettings) {
+    overlay!(b, f; lock_duration, max_size_in_megabytes, requires_duplicate_detection,
+        requires_session, default_message_time_to_live, dead_lettering_on_message_expiration,
+        duplicate_detection_history_time_window, max_delivery_count, enable_batched_operations,
+        status, forward_to, forward_dead_lettered_messages_to, auto_delete_on_idle,
+        enable_partitioning, enable_express, max_message_size_in_kilobytes, user_metadata);
+}
+
+fn overlay_topic(b: &mut TopicSettings, f: &TopicSettings) {
+    overlay!(b, f; max_size_in_megabytes, requires_duplicate_detection,
+        duplicate_detection_history_time_window, default_message_time_to_live,
+        enable_batched_operations, status, auto_delete_on_idle, enable_partitioning,
+        enable_express, support_ordering, max_message_size_in_kilobytes, user_metadata);
+}
+
+fn overlay_subscription(b: &mut SubscriptionSettings, f: &SubscriptionSettings) {
+    overlay!(b, f; lock_duration, requires_session, default_message_time_to_live,
+        dead_lettering_on_message_expiration, dead_lettering_on_filter_evaluation_exceptions,
+        max_delivery_count, enable_batched_operations, status, forward_to,
+        forward_dead_lettered_messages_to, auto_delete_on_idle, user_metadata);
+}
+
+fn exists(e: &Error) -> bool {
+    matches!(e, Error::Conflict(m) if m.ends_with("already exists"))
+}
+
+fn skipped_existing(what: &str) -> ItemOutcome {
+    ItemOutcome::Skipped {
+        reason: format!("{what} already exists; use --overwrite to replace it"),
+        expected: false,
+    }
+}
+
+/// The rank of an import item: queues, then topics, then subscriptions.
+fn rank(i: &ImportEntity) -> u8 {
+    match i {
+        ImportEntity::Queue { .. } => 0,
+        ImportEntity::Topic { .. } => 1,
+        ImportEntity::Subscription { .. } => 2,
+    }
+}
+
+/// The rule a subscription is created with: `$Default` when the file has it, else the first.
+fn initial_rule(rules: &[RuleSpec]) -> Option<usize> {
+    if rules.is_empty() {
+        None
+    } else {
+        Some(rules.iter().position(|r| r.name == "$Default").unwrap_or(0))
+    }
+}
+
+impl Operator {
+    /// Create the entities of an incumbent file (see [`crate::mgmt::incumbent`]): queues,
+    /// then topics, then subscriptions with their initial rule, then their other rules. One
+    /// confirmation covers the whole import and names every entity. An entity that exists is
+    /// a skipped item, or with `overwrite` is updated with the file's settings on top of its
+    /// own. Every rule filter is checked before the confirmation.
+    pub async fn import_entities(
+        &self,
+        mut items: Vec<ImportEntity>,
+        overwrite: bool,
+        progress: &dyn Progress,
+        cancel: &CancellationToken,
+    ) -> Result<JobReport> {
+        if items.is_empty() {
+            return Err(Error::Invalid(
+                "the file holds no queue, topic or subscription".into(),
+            ));
+        }
+        for it in &items {
+            if let ImportEntity::Subscription { rules, .. } = it {
+                for r in rules {
+                    validate_filter(&r.filter).map_err(|e| {
+                        Error::Invalid(format!("{}, rule {}: {e}", it.entity(), r.name))
+                    })?;
+                }
+            }
+        }
+        items.sort_by_key(rank);
+        let entities: Vec<EntityRef> = items.iter().map(ImportEntity::entity).collect();
+        let op = Operation::import_entities(entities, overwrite);
+        let planned: usize = items
+            .iter()
+            .map(|i| match i {
+                ImportEntity::Subscription { rules, .. } => 1 + rules.len().saturating_sub(1),
+                _ => 1,
+            })
+            .sum();
+        gated(&self.gate, &op, || async move {
+            let m = self.mgmt();
+            let mut job = JobRun::new(
+                JobKind::ImportEntities,
+                "import".into(),
+                None,
+                progress,
+                Some(planned as u64),
+            );
+            // Rules still to add: (subscription, rule, the subscription existed).
+            let mut later: Vec<(EntityRef, RuleSpec, bool)> = Vec::new();
+            let mut cancelled = false;
+            for it in &items {
+                if cancel.is_cancelled() {
+                    cancelled = true;
+                    break;
+                }
+                let entity = it.entity();
+                let created: Result<()> = match it {
+                    ImportEntity::Queue { name, d } => m.create_queue(name, d).await,
+                    ImportEntity::Topic { name, d } => m.create_topic(name, d).await,
+                    ImportEntity::Subscription {
+                        topic,
+                        name,
+                        d,
+                        rules,
+                    } => {
+                        let first = initial_rule(rules);
+                        m.create_subscription_with_rule(topic, name, d, first.map(|i| &rules[i]))
+                            .await
+                    }
+                };
+                let outcome = match created {
+                    Ok(()) => {
+                        if let ImportEntity::Subscription { rules, .. } = it {
+                            let first = initial_rule(rules);
+                            for (i, r) in rules.iter().enumerate() {
+                                if Some(i) != first {
+                                    later.push((entity.clone(), r.clone(), false));
+                                }
+                            }
+                            succeeded(Some(match first {
+                                Some(i) => format!("created with rule {}", rules[i].name),
+                                None => "created".into(),
+                            }))
+                        } else {
+                            succeeded(Some("created".into()))
+                        }
+                    }
+                    Err(e) if exists(&e) && !overwrite => skipped_existing(&entity.to_string()),
+                    Err(e) if exists(&e) => {
+                        let replaced: Result<()> = async {
+                            match it {
+                                ImportEntity::Queue { name, d } => {
+                                    let mut cur = m.get_queue_description(name).await?;
+                                    merge(&mut cur, d, overlay_queue);
+                                    m.update_queue(name, &cur).await
+                                }
+                                ImportEntity::Topic { name, d } => {
+                                    let mut cur = m.get_topic_description(name).await?;
+                                    merge(&mut cur, d, overlay_topic);
+                                    m.update_topic(name, &cur).await
+                                }
+                                ImportEntity::Subscription {
+                                    topic,
+                                    name,
+                                    d,
+                                    rules,
+                                } => {
+                                    let mut cur = m.get_subscription(topic, name).await?;
+                                    merge(&mut cur, d, overlay_subscription);
+                                    m.update_subscription(topic, name, &cur).await?;
+                                    for r in rules {
+                                        later.push((entity.clone(), r.clone(), true));
+                                    }
+                                    Ok(())
+                                }
+                            }
+                        }
+                        .await;
+                        outcome(replaced.map(|()| Some("updated (--overwrite)".into())))
+                    }
+                    Err(e) => super::failed(&e),
+                };
+                job.item(entity_item(&entity, outcome));
+            }
+            for (sub, rule, existed) in later {
+                if cancelled || cancel.is_cancelled() {
+                    cancelled = true;
+                    break;
+                }
+                let EntityRef::Subscription { topic, name } = &sub else {
+                    continue;
+                };
+                let d = Description::new(rule.clone());
+                let outcome = match m.create_rule(topic, name, &d).await {
+                    Ok(()) => succeeded(Some(format!("rule {} created", rule.name))),
+                    Err(e) if exists(&e) && existed && overwrite => outcome(
+                        m.update_rule(topic, name, &d)
+                            .await
+                            .map(|()| Some(format!("rule {} updated (--overwrite)", rule.name))),
+                    ),
+                    Err(e) if exists(&e) => skipped_existing(&format!("rule {}", rule.name)),
+                    Err(e) => failed_with(&e, format!("rule {}: {e}", rule.name)),
+                };
+                job.item(entity_item(&sub, outcome));
+            }
+            Ok(job.finish(cancelled))
+        })
+        .await
+    }
+}
+
 fn no_policies() -> Error {
     Error::Invalid(
         "subscriptions have no SAS policies; add one to the topic or the namespace".into(),
@@ -1052,5 +1278,263 @@ mod tests {
             let text = format!("{e:?}");
             assert!(!text.contains("primary-key-value") && !text.contains("secondary-key-value"));
         }
+    }
+
+    #[tokio::test]
+    async fn import_skips_existing_and_creates_the_rest() {
+        use crate::mgmt::incumbent::{ImportEntity, parse_entities};
+        let mut items =
+            parse_entities(include_str!("../../tests/fixtures/incumbent_entities.xml")).unwrap();
+        items.insert(
+            1,
+            ImportEntity::Queue {
+                name: "audit".into(),
+                d: Description::default(),
+            },
+        );
+        let mut server = mockito::Server::new_async().await;
+        let mut conflict = |path: &str| {
+            server
+                .mock("PUT", path)
+                .match_query(Matcher::Any)
+                .match_header("if-match", Matcher::Missing)
+                .with_status(409)
+                .with_body("<Error><Code>409</Code><Detail>exists</Detail></Error>")
+        };
+        let orders = conflict("/orders").create_async().await;
+        let events = conflict("/events").create_async().await;
+        let audit_q = server
+            .mock("PUT", "/audit")
+            .match_query(Matcher::Any)
+            .with_status(201)
+            .create_async()
+            .await;
+        let billing = server
+            .mock("PUT", "/events/Subscriptions/billing")
+            .match_query(Matcher::Any)
+            .match_header("if-match", Matcher::Missing)
+            .match_body(Matcher::Regex(
+                "<DefaultRuleDescription><Filter i:type=\"TrueFilter\">.*<Name>\\$Default</Name></DefaultRuleDescription>".into(),
+            ))
+            .with_status(201)
+            .create_async()
+            .await;
+        let only_eu = server
+            .mock("PUT", "/events/Subscriptions/billing/Rules/only-eu")
+            .match_query(Matcher::Any)
+            .with_status(201)
+            .create_async()
+            .await;
+        let by_corr = server
+            .mock("PUT", "/events/Subscriptions/billing/Rules/by-corr")
+            .match_query(Matcher::Any)
+            .match_body(Matcher::Regex("<Key>tenant</Key>".into()))
+            .with_status(201)
+            .create_async()
+            .await;
+        let updates = server
+            .mock("PUT", Matcher::Any)
+            .match_header("if-match", "*")
+            .expect(0)
+            .create_async()
+            .await;
+        let (gate, audit) = fake_gate();
+        let progress = crate::jobs::RecordingProgress::default();
+        let r = operator(&server, gate)
+            .import_entities(
+                items,
+                false,
+                &progress,
+                &horizon_azure_kit::safety::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        for m in [orders, events, audit_q, billing, only_eu, by_corr, updates] {
+            m.assert_async().await;
+        }
+        let outcome = |entity: &str, detail: &str| {
+            r.items
+                .iter()
+                .find(|i| {
+                    i.entity == entity
+                        && match &i.outcome {
+                            ItemOutcome::Succeeded { detail: Some(d) }
+                            | ItemOutcome::Skipped { reason: d, .. } => d.contains(detail),
+                            _ => false,
+                        }
+                })
+                .map(|i| i.outcome.clone())
+        };
+        assert!(matches!(
+            outcome("orders", "already exists"),
+            Some(ItemOutcome::Skipped { .. })
+        ));
+        assert!(matches!(
+            outcome("events", "already exists"),
+            Some(ItemOutcome::Skipped { .. })
+        ));
+        assert!(matches!(
+            outcome("audit", "created"),
+            Some(ItemOutcome::Succeeded { .. })
+        ));
+        assert!(matches!(
+            outcome("events/Subscriptions/billing", "created"),
+            Some(ItemOutcome::Succeeded { .. })
+        ));
+        assert!(outcome("events/Subscriptions/billing", "rule only-eu").is_some());
+        assert!(outcome("events/Subscriptions/billing", "rule by-corr").is_some());
+        assert_eq!(r.items.len(), 6, "{:#?}", r.items);
+        let order: Vec<&str> = r.items.iter().map(|i| i.entity.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                "orders",
+                "audit",
+                "events",
+                "events/Subscriptions/billing",
+                "events/Subscriptions/billing",
+                "events/Subscriptions/billing"
+            ],
+            "queues, topics, subscriptions, then rules"
+        );
+        let entries = audit.entries();
+        assert_eq!(entries.len(), 2, "one gate for the whole import");
+        assert_eq!(
+            entries[0].summary,
+            "Import 4 entities on dev: queue orders, queue audit, topic events, subscription \
+             events/Subscriptions/billing; existing ones are skipped"
+        );
+    }
+
+    #[tokio::test]
+    async fn import_refuses_an_empty_correlation_filter_before_the_gate() {
+        use crate::mgmt::incumbent::parse_entities;
+        let xml = include_str!("../../tests/fixtures/incumbent_entities.xml")
+            .replace(
+                "<CorrelationId>abc</CorrelationId>",
+                "<CorrelationId></CorrelationId>",
+            )
+            .replace("<Label>order.created</Label>", "<Label></Label>")
+            .replace("<Property>tenant: acme</Property>", "");
+        let items = parse_entities(&xml).unwrap();
+        let server = mockito::Server::new_async().await;
+        let (gate, audit) = fake_gate();
+        let e = operator(&server, gate)
+            .import_entities(
+                items,
+                false,
+                &crate::jobs::NoProgress,
+                &horizon_azure_kit::safety::CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            e.to_string().contains("by-corr") && e.to_string().contains("#794"),
+            "{e}"
+        );
+        assert!(audit.entries().is_empty());
+    }
+
+    #[tokio::test]
+    async fn import_with_overwrite_updates_on_top_of_the_existing_entity() {
+        use crate::mgmt::incumbent::ImportEntity;
+        let mut server = mockito::Server::new_async().await;
+        let _create = server
+            .mock("PUT", "/orders")
+            .match_query(Matcher::Any)
+            .match_header("if-match", Matcher::Missing)
+            .with_status(409)
+            .create_async()
+            .await;
+        let _get = server
+            .mock("GET", "/orders")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(include_str!("../../tests/fixtures/queue_entry_full.xml"))
+            .create_async()
+            .await;
+        let update = server
+            .mock("PUT", "/orders")
+            .match_query(Matcher::Any)
+            .match_header("if-match", "*")
+            .match_body(Matcher::AllOf(vec![
+                Matcher::Regex("<MaxDeliveryCount>2</MaxDeliveryCount>".into()),
+                Matcher::Regex("<LockDuration>PT45S</LockDuration>".into()),
+                Matcher::Regex("<FutureFlag>true</FutureFlag>".into()),
+            ]))
+            .with_status(200)
+            .create_async()
+            .await;
+        let (gate, audit) = fake_gate();
+        let r = operator(&server, gate)
+            .import_entities(
+                vec![ImportEntity::Queue {
+                    name: "orders".into(),
+                    d: Description::new(QueueSettings {
+                        max_delivery_count: Some(2),
+                        ..Default::default()
+                    }),
+                }],
+                true,
+                &crate::jobs::NoProgress,
+                &horizon_azure_kit::safety::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        update.assert_async().await;
+        assert_eq!(r.succeeded(), 1, "{:?}", r.items);
+        assert!(
+            audit.entries()[0]
+                .summary
+                .ends_with("existing ones are replaced")
+        );
+    }
+
+    #[tokio::test]
+    async fn export_collects_a_selected_subscription_under_its_topic() {
+        use crate::mgmt::incumbent::ExportEntity;
+        let mut server = mockito::Server::new_async().await;
+        let _topic = server
+            .mock("GET", "/events")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(include_str!("../../tests/fixtures/topic_entry.xml"))
+            .create_async()
+            .await;
+        let _sub = server
+            .mock("GET", "/events/Subscriptions/billing")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(include_str!("../../tests/fixtures/subscription_entry.xml"))
+            .create_async()
+            .await;
+        let _rules = server
+            .mock("GET", "/events/Subscriptions/billing/Rules")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(include_str!("../../tests/fixtures/rules_feed.xml"))
+            .create_async()
+            .await;
+        let (gate, _) = fake_gate();
+        let op = operator(&server, gate);
+        let got = op
+            .explorer()
+            .collect_for_export(&[EntityRef::subscription("events", "billing")])
+            .await
+            .unwrap();
+        let [
+            ExportEntity::Topic {
+                name,
+                subscriptions,
+                ..
+            },
+        ] = got.as_slice()
+        else {
+            panic!("{got:#?}")
+        };
+        assert_eq!(name, "events");
+        assert_eq!(subscriptions.len(), 1);
+        assert_eq!(subscriptions[0].rules.len(), 3);
+        assert_eq!(subscriptions[0].rules[0].filter, RuleFilter::True);
     }
 }
