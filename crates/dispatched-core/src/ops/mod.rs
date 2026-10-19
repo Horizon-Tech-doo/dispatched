@@ -7,6 +7,7 @@
 
 pub mod import;
 pub mod locate;
+pub mod manage;
 pub mod purge;
 pub mod receive;
 pub mod remove;
@@ -17,6 +18,7 @@ pub mod session_state;
 pub use crate::messaging::sender::send_target;
 pub use import::ImportOptions;
 pub use locate::LocateLimits;
+pub use manage::EntitySpec;
 pub use purge::{PurgePlan, PurgeScope};
 pub use receive::{ReceiveAction, ReceiveOutcome, ReceiveRequest};
 pub use resubmit::{ResubmitSpec, default_target};
@@ -969,5 +971,18 @@ mod tests {
         assert_send(&o.purge(Vec::new(), &NoProgress, c));
         assert_send(&o.session_state(e, "s"));
         assert_send(&o.set_session_state(e, "s", None));
+        let q = crate::mgmt::EntityRef::queue("q");
+        let spec = || manage::EntitySpec::Queue("q".into(), crate::mgmt::Description::default());
+        assert_send(&o.create_entity(spec()));
+        assert_send(&o.update_entity(spec()));
+        assert_send(&o.delete_entities(vec![q.clone()]));
+        assert_send(&o.set_status(q.clone(), crate::mgmt::EntityStatus::Active));
+        assert_send(&o.duplicate(q.clone(), "c".into()));
+        assert_send(&o.rename(q.clone(), "c".into()));
+        assert_send(&o.add_policy(q.clone(), "p".into(), vec![]));
+        assert_send(&o.remove_policy(q.clone(), "p".into()));
+        assert_send(&o.regenerate_key(q.clone(), "p".into(), crate::mgmt::KeySlot::Primary));
+        let sub = crate::mgmt::EntityRef::subscription("t", "s");
+        assert_send(&o.remove_rule(sub, "r".into()));
     }
 }

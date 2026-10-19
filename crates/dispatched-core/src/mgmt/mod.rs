@@ -13,7 +13,7 @@ pub use atom_write::{
 };
 pub use details::{EntityDetails, EntityKind, EntityProperty};
 pub use model::{
-    AccessPolicy, AccessRight, Description, EntityStatus, QueueSettings, RuleSpec,
+    AccessPolicy, AccessRight, Description, EntityRef, EntityStatus, QueueSettings, RuleSpec,
     SubscriptionSettings, TimeSpan, TopicSettings, iso_duration, parse_iso_duration, parse_queue,
     parse_rule, parse_subscription, parse_topic, validate_filter,
 };

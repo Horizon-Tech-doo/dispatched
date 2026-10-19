@@ -72,6 +72,109 @@ impl FromStr for EntityStatus {
     }
 }
 
+/// A queue, topic or subscription, by name.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum EntityRef {
+    /// A queue.
+    Queue {
+        /// Queue name.
+        name: String,
+    },
+    /// A topic.
+    Topic {
+        /// Topic name.
+        name: String,
+    },
+    /// A topic subscription.
+    Subscription {
+        /// Its topic.
+        topic: String,
+        /// Subscription name.
+        name: String,
+    },
+}
+
+impl EntityRef {
+    /// A queue.
+    pub fn queue(name: &str) -> Self {
+        EntityRef::Queue {
+            name: name.to_string(),
+        }
+    }
+
+    /// A topic.
+    pub fn topic(name: &str) -> Self {
+        EntityRef::Topic {
+            name: name.to_string(),
+        }
+    }
+
+    /// A subscription of `topic`.
+    pub fn subscription(topic: &str, name: &str) -> Self {
+        EntityRef::Subscription {
+            topic: topic.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    /// An entity of `kind` at `path` (`topic/subscriptions/name` for a subscription).
+    pub fn parse(kind: super::EntityKind, path: &str) -> Result<Self> {
+        let p = crate::EntityPath::parse(path)?;
+        match (kind, p.subscription) {
+            (super::EntityKind::Queue, None) => Ok(Self::queue(&p.entity)),
+            (super::EntityKind::Topic, None) => Ok(Self::topic(&p.entity)),
+            (super::EntityKind::Subscription, Some(sub)) => Ok(Self::subscription(&p.entity, &sub)),
+            (super::EntityKind::Subscription, None) => Err(Error::Invalid(format!(
+                "`{path}` is not a subscription; use `topic/subscriptions/name`"
+            ))),
+            (k, Some(_)) => Err(Error::Invalid(format!(
+                "`{path}` is a subscription, not a {}",
+                k.as_str()
+            ))),
+        }
+    }
+
+    /// What it is.
+    pub fn kind(&self) -> super::EntityKind {
+        match self {
+            EntityRef::Queue { .. } => super::EntityKind::Queue,
+            EntityRef::Topic { .. } => super::EntityKind::Topic,
+            EntityRef::Subscription { .. } => super::EntityKind::Subscription,
+        }
+    }
+
+    /// The entity path: the queue or topic name, or `topic/Subscriptions/name`, as the
+    /// confirmation of a production change names it.
+    pub fn path(&self) -> String {
+        self.entity_path().base()
+    }
+
+    /// The same entity as an [`crate::EntityPath`].
+    pub fn entity_path(&self) -> crate::EntityPath {
+        match self {
+            EntityRef::Queue { name } | EntityRef::Topic { name } => crate::EntityPath::queue(name),
+            EntityRef::Subscription { topic, name } => crate::EntityPath::subscription(topic, name),
+        }
+    }
+
+    /// The same kind of entity, in the same place, named `name`.
+    pub fn renamed(&self, name: &str) -> Self {
+        match self {
+            EntityRef::Queue { .. } => Self::queue(name),
+            EntityRef::Topic { .. } => Self::topic(name),
+            EntityRef::Subscription { topic, .. } => Self::subscription(topic, name),
+        }
+    }
+}
+
+impl fmt::Display for EntityRef {
+    /// `queue orders`, `subscription events/Subscriptions/billing`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {}", self.kind().as_str(), self.path())
+    }
+}
+
 /// Every settable property of a queue. `None` means "not set": on create the service default
 /// applies, on update the property is left out (and the service resets it to its default).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]

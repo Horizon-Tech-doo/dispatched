@@ -23,9 +23,34 @@ pub enum JobKind {
     Move,
     Resubmit,
     Purge,
+    /// Queues, topics, subscriptions or rules created.
+    CreateEntities,
+    /// Entity settings, status, rules or policies changed.
+    UpdateEntities,
+    /// Entities deleted.
+    DeleteEntities,
+    /// An entity duplicated.
+    Duplicate,
+    /// An entity renamed (copied, then the original deleted).
+    Rename,
+    /// Entities imported from an entity file.
+    ImportEntities,
 }
 
 impl JobKind {
+    /// Whether the items are entities rather than messages.
+    pub fn on_entities(self) -> bool {
+        matches!(
+            self,
+            Self::CreateEntities
+                | Self::UpdateEntities
+                | Self::DeleteEntities
+                | Self::Duplicate
+                | Self::Rename
+                | Self::ImportEntities
+        )
+    }
+
     fn verb(self) -> &'static str {
         match self {
             Self::Send | Self::Import => "Sent",
@@ -36,6 +61,12 @@ impl JobKind {
             Self::Move => "Moved",
             Self::Resubmit => "Resubmitted",
             Self::Purge => "Removed",
+            Self::CreateEntities => "Created",
+            Self::UpdateEntities => "Updated",
+            Self::DeleteEntities => "Deleted",
+            Self::Duplicate => "Duplicated",
+            Self::Rename => "Renamed",
+            Self::ImportEntities => "Imported",
         }
     }
 }
@@ -236,6 +267,9 @@ impl JobReport {
 
     fn summary_line_inner(&self) -> String {
         let verb = self.kind.verb();
+        if self.kind.on_entities() {
+            return self.entity_summary_line(verb);
+        }
         let place = match (&self.target, self.kind) {
             (Some(t), _) => format!("from {} to {t}", self.entity),
             // Sends put messages on the entity.
@@ -297,6 +331,40 @@ impl JobReport {
             self.succeeded(),
             self.items.len()
         )
+    }
+
+    /// The summary of a job whose items are entities: `Created 1 of 2 entities; 1 failed
+    /// (queue b: already exists)`.
+    fn entity_summary_line(&self, verb: &str) -> String {
+        let n = self.succeeded();
+        let total = self.items.len() as u64;
+        let noun = |n: u64| if n == 1 { "entity" } else { "entities" };
+        let mut s = if n == total {
+            format!("{verb} {n} {}", noun(n))
+        } else {
+            format!("{verb} {n} of {total} {}", noun(total))
+        };
+        if self.cancelled {
+            s.push_str(" (cancelled)");
+        }
+        let skipped = self.count(|o| matches!(o, ItemOutcome::Skipped { .. }));
+        if skipped > 0 {
+            s.push_str(&format!("; {} skipped", crate::safety::count_text(skipped)));
+        }
+        let failed = self.failed();
+        if failed > 0 {
+            let list: Vec<String> = self
+                .failures()
+                .take(5)
+                .map(|i| format!("{}: {}", i.entity, Self::reason(i)))
+                .collect();
+            let mut list = list.join(", ");
+            if failed > 5 {
+                list.push_str(&format!(", and {} more", failed - 5));
+            }
+            s.push_str(&format!("; {failed} failed ({list})"));
+        }
+        s
     }
 
     fn failed_json(&self) -> Vec<serde_json::Value> {
