@@ -348,7 +348,7 @@ fn print_done_to(out: &mut dyn Write, err: &mut dyn Write, line: &str) -> JobExi
 }
 
 /// NDJSON for `.ndjson` and `.jsonl`, JSON otherwise.
-fn report_format(path: &Path) -> ExportFormat {
+pub fn report_format(path: &Path) -> ExportFormat {
     match path.extension().and_then(|e| e.to_str()) {
         Some(e) if e.eq_ignore_ascii_case("ndjson") || e.eq_ignore_ascii_case("jsonl") => {
             ExportFormat::Ndjson
