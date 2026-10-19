@@ -26,7 +26,7 @@
 - §11 (M3 row)
 - §14 Decisions 3, 7, 9, 10, 12 and 13, which a listener must respect
 
-The incumbent XML research is in `.superpowers/sdd/m3a-incumbent-xml.md`: the format from `ImportExportHelper.cs`, with line references.
+The incumbent XML research is in `2026-10-19-m3a-manage-core-cli/m3a-incumbent-xml.md (in .superpowers/sdd/)`: the format from `ImportExportHelper.cs`, with line references.
 
 ## Global Constraints
 
