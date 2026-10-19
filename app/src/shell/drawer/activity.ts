@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 import {
-  onActivity, onConfirm, onJob, type ActivityEntry, type ActivityError, type ConfirmRequest, type ExportFormat, type FilterSpec, type ItemOutcome, type JobEvent,
+  onActivity, onActivityRecord, onConfirm, onJob, type ActivityEntry, type ActivityRecord, type ActivityError, type ConfirmRequest, type ExportFormat, type FilterSpec, type ItemOutcome, type JobEvent,
   type JobKind, type PeekView, type ReportSummary,
 } from "@/engine";
 
@@ -30,6 +30,29 @@ export function createActivityStore() {
   let nextId = 1;
   return {
     add: (e: ActivityEntry) => s.set([...s.get(), { ...e, id: nextId++ }].slice(-ACTIVITY_CAP)),
+    all: s.get,
+    clear: () => s.set([]),
+    subscribe: s.subscribe,
+  };
+}
+
+/** The shared log's entries this window knows, by row id: loaded at start, then from this app's events and from
+ *  following the log (the CLI's and agents' changes). */
+export const RECORD_CAP = 2000;
+export function createRecordStore() {
+  const s = createStore<ActivityRecord>();
+  return {
+    /** Adds entries, each once (by row id), oldest first. */
+    merge(records: ActivityRecord[]) {
+      const have = new Map(s.get().map((r) => [r.id, r]));
+      let changed = false;
+      for (const r of records)
+        if (!have.has(r.id)) {
+          have.set(r.id, r);
+          changed = true;
+        }
+      if (changed) s.set([...have.values()].sort((a, b) => a.id - b.id).slice(-RECORD_CAP));
+    },
     all: s.get,
     clear: () => s.set([]),
     subscribe: s.subscribe,
@@ -159,13 +182,20 @@ export function createJobStore() {
 
 export const activityStore = createActivityStore();
 export const jobStore = createJobStore();
+export const recordStore = createRecordStore();
 
 export const useActivity = () => useSyncExternalStore(activityStore.subscribe, activityStore.all);
 export const useJobs = () => useSyncExternalStore(jobStore.subscribe, jobStore.all);
+export const useRecords = () => useSyncExternalStore(recordStore.subscribe, recordStore.all);
 
 /** Subscribe the stores to the engine's events. Returns an unsubscribe. */
 export async function startEventCapture(): Promise<() => void> {
-  const results = await Promise.allSettled([onActivity((e) => activityStore.add(e)), onJob((e) => jobStore.apply(e)), onConfirm((c) => jobStore.confirm(c))]);
+  const results = await Promise.allSettled([
+    onActivity((e) => activityStore.add(e)),
+    onJob((e) => jobStore.apply(e)),
+    onConfirm((c) => jobStore.confirm(c)),
+    onActivityRecord((r) => recordStore.merge([r])),
+  ]);
   const offs = results.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
   const failed = results.find((r): r is PromiseRejectedResult => r.status === "rejected");
   if (failed) {

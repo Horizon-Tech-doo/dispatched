@@ -1,67 +1,12 @@
 import { ChevronDown, CircleAlert } from "lucide-react";
-import { useLayoutEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { commands } from "@/engine";
-import { Button, EmptyState, Hint, IconButton, Tabs, TabsContent, TabsList, TabsTrigger, fileManagerName, formatClock, formatDuration, formatNumber } from "@/ui";
+import { Button, EmptyState, Hint, IconButton, Tabs, TabsContent, TabsList, TabsTrigger, fileManagerName, formatNumber } from "@/ui";
 import { useShell } from "../context";
-import { jobStore, useActivity, useJobs, type Job } from "./activity";
+import { jobStore, useJobs, type Job } from "./activity";
+import { ActivityLog } from "./ActivityLog";
 import { plural } from "./plural";
 import { endedText, failedTitle, finishedState, neutralEnd, outcomeText, runningText } from "../operate/words";
-
-function ActivityLog() {
-  const entries = useActivity();
-  const box = useRef<HTMLDivElement>(null);
-  // Whether the user was at the bottom before the latest rows rendered; the scroll handler keeps it current.
-  const atBottom = useRef(true);
-  const newest = entries.at(-1)?.id;
-  const toEnd = () => {
-    const el = box.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  };
-  // Opening the tab (or the drawer) starts at the newest entry.
-  useLayoutEffect(toEnd, []);
-  // New rows are followed only when the user was already at the bottom. Keyed on the newest id, not the
-  // length, which stops changing once the cap trims old rows.
-  useLayoutEffect(() => {
-    if (newest === undefined) atBottom.current = true; // a cleared log starts following again
-    else if (atBottom.current) toEnd();
-  }, [newest]);
-  if (!entries.length)
-    return <EmptyState title="No activity yet" body="Every call to Service Bus appears here: what ran, how long it took, and why anything failed." />;
-  return (
-    <div
-      ref={box}
-      onScroll={(e) => {
-        const el = e.currentTarget;
-        atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-      }}
-      className="h-full overflow-y-auto py-1 font-mono text-11 tabular-nums"
-      data-selectable
-    >
-      {entries.map((e) => {
-        // A cancelled operation is the user's choice, not a failure: neutral line, no alert mark. So is a job stopped
-        // because its connection closed.
-        const cancelled = e.error?.kind === "cancelled";
-        const failed = e.error != null && !cancelled && e.error.kind !== "stopped";
-        return (
-          <div key={e.id} className="grid grid-cols-[64px_minmax(0,1fr)_72px] gap-x-3 px-3.5 leading-[18px]">
-            <span className="text-faint">{formatClock(e.at)}</span>
-            <span className="min-w-0">
-              <span className={failed ? "text-fg" : "text-muted"}>{e.action}</span>
-              {cancelled && <span className="text-faint"> cancelled</span>}
-              {failed && e.error && (
-                <span className="flex items-start gap-1.5 text-fg">
-                  <CircleAlert aria-hidden="true" className="mt-0.5 size-3 shrink-0 text-accent" />
-                  <span>{e.error.message}</span>
-                </span>
-              )}
-            </span>
-            <span className="text-right text-faint">{formatDuration(e.duration_ms)}</span>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
 
 /** Where a job stands, in numbers: "5 of 37", or, with no total, "5 written" and how many were looked at. */
 function counts(j: Job): string {
