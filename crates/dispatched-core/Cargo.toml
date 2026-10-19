@@ -66,3 +66,7 @@ required-features = ["test-support"]
 [[test]]
 name = "emulator_m2a"
 required-features = ["test-support"]
+
+[[test]]
+name = "emulator_m3a"
+required-features = ["test-support"]
