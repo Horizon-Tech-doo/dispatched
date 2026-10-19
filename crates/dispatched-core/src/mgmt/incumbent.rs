@@ -49,6 +49,70 @@ pub enum ExportEntity {
     },
 }
 
+/// A SAS policy as an incumbent file holds it. A key the file leaves out (the default export
+/// omits keys) is `None`, never a made-up key: an import with `--overwrite` keeps the existing
+/// key then, and only a policy new to the entity gets fresh ones.
+#[derive(Clone)]
+pub struct ImportPolicy {
+    /// Policy (key) name.
+    pub key_name: String,
+    /// Granted rights.
+    pub rights: Vec<AccessRight>,
+    /// Primary key, when the file has it.
+    pub primary_key: Option<SecretString>,
+    /// Secondary key, when the file has it.
+    pub secondary_key: Option<SecretString>,
+}
+
+impl ImportPolicy {
+    /// Whether the file holds a key of this policy.
+    pub fn has_keys(&self) -> bool {
+        self.primary_key.is_some() || self.secondary_key.is_some()
+    }
+
+    /// The policy written onto an entity: the file's rights; each key from the file when it
+    /// has one, else the `existing` policy's (same name), else a new one.
+    pub fn applied(&self, existing: Option<&AccessPolicy>) -> AccessPolicy {
+        let key = |file: &Option<SecretString>, current: Option<&SecretString>| {
+            file.clone()
+                .or_else(|| current.cloned())
+                .unwrap_or_else(super::policies::new_key)
+        };
+        AccessPolicy {
+            key_name: self.key_name.clone(),
+            rights: self.rights.clone(),
+            primary_key: key(&self.primary_key, existing.map(|e| &e.primary_key)),
+            secondary_key: key(&self.secondary_key, existing.map(|e| &e.secondary_key)),
+        }
+    }
+}
+
+impl std::fmt::Debug for ImportPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let shown = |k: &Option<SecretString>| k.as_ref().map(|_| "[REDACTED]");
+        f.debug_struct("ImportPolicy")
+            .field("key_name", &self.key_name)
+            .field("rights", &self.rights)
+            .field("primary_key", &shown(&self.primary_key))
+            .field("secondary_key", &shown(&self.secondary_key))
+            .finish()
+    }
+}
+
+impl PartialEq for ImportPolicy {
+    fn eq(&self, other: &Self) -> bool {
+        let same = |a: &Option<SecretString>, b: &Option<SecretString>| {
+            a.as_ref().map(|k| k.expose_secret()) == b.as_ref().map(|k| k.expose_secret())
+        };
+        self.key_name == other.key_name
+            && self.rights == other.rights
+            && same(&self.primary_key, &other.primary_key)
+            && same(&self.secondary_key, &other.secondary_key)
+    }
+}
+
+impl Eq for ImportPolicy {}
+
 /// An entity read from an incumbent file. Subscriptions carry their rules; an import creates
 /// queues, then topics, then subscriptions, then their other rules.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,15 +121,19 @@ pub enum ImportEntity {
     Queue {
         /// Queue name.
         name: String,
-        /// Its settings and policies (a policy without keys gets new ones).
+        /// Its settings (`d.policies` is empty: the file's policies are `policies`).
         d: Description<QueueSettings>,
+        /// Its policies, with the keys the file holds.
+        policies: Vec<ImportPolicy>,
     },
     /// A topic.
     Topic {
         /// Topic name.
         name: String,
-        /// Its settings and policies.
+        /// Its settings (`d.policies` is empty: the file's policies are `policies`).
         d: Description<TopicSettings>,
+        /// Its policies, with the keys the file holds.
+        policies: Vec<ImportPolicy>,
     },
     /// A subscription with its rules.
     Subscription {
@@ -557,7 +625,7 @@ pub fn split_property(p: &str) -> Result<(String, String)> {
     Ok((k.to_string(), v.strip_prefix(' ').unwrap_or(v).to_string()))
 }
 
-fn policies(n: &Node, what: &str) -> Result<Vec<AccessPolicy>> {
+fn policies(n: &Node, what: &str) -> Result<Vec<ImportPolicy>> {
     let Some(rules) = n.child("AuthorizationRules") else {
         return Ok(Vec::new());
     };
@@ -582,13 +650,9 @@ fn policies(n: &Node, what: &str) -> Result<Vec<AccessPolicy>> {
                 })
                 .transpose()?
                 .unwrap_or_default();
-            // A file exported without keys gets new ones.
-            let key = |name: &str| {
-                text(r, name)
-                    .map(SecretString::from)
-                    .unwrap_or_else(super::policies::new_key)
-            };
-            Ok(AccessPolicy {
+            // A file exported without keys has none: `None`, not a new key (see `ImportPolicy`).
+            let key = |name: &str| text(r, name).map(SecretString::from);
+            Ok(ImportPolicy {
                 rights,
                 primary_key: key("PrimaryKey"),
                 secondary_key: key("SecondaryKey"),
@@ -700,9 +764,10 @@ pub fn parse_entities(xml_text: &str) -> Result<Vec<ImportEntity>> {
                     max_message_size_in_kilobytes: num(q, "MaxMessageSizeInKilobytes", w)?,
                     user_metadata: text(q, "UserMetadata"),
                 },
-                policies: policies(q, w)?,
+                policies: Vec::new(),
                 raw: Node::default(),
             },
+            policies: policies(q, w)?,
             name,
         });
     }
@@ -733,9 +798,10 @@ pub fn parse_entities(xml_text: &str) -> Result<Vec<ImportEntity>> {
                     max_message_size_in_kilobytes: num(t, "MaxMessageSizeInKilobytes", w)?,
                     user_metadata: text(t, "UserMetadata"),
                 },
-                policies: policies(t, w)?,
+                policies: Vec::new(),
                 raw: Node::default(),
             },
+            policies: policies(t, w)?,
             name: name.clone(),
         });
         let mut subs = Vec::new();
@@ -1060,8 +1126,12 @@ mod tests {
         let items =
             parse_entities(include_str!("../../tests/fixtures/incumbent_entities.xml")).unwrap();
         let [
-            ImportEntity::Queue { name: q, d: qd },
-            ImportEntity::Topic { name: t, d: td },
+            ImportEntity::Queue {
+                name: q,
+                d: qd,
+                policies: qp,
+            },
+            ImportEntity::Topic { name: t, d: td, .. },
             ImportEntity::Subscription {
                 topic,
                 name: s,
@@ -1086,12 +1156,13 @@ mod tests {
             qd.settings.forward_to, None,
             "an empty ForwardTo is not set"
         );
-        assert_eq!(qd.policies.len(), 1);
+        assert!(qd.policies.is_empty(), "the file's policies are apart");
+        assert_eq!(qp.len(), 1);
+        assert_eq!(qp[0].rights, [AccessRight::Send, AccessRight::Listen]);
         assert_eq!(
-            qd.policies[0].rights,
-            [AccessRight::Send, AccessRight::Listen]
+            qp[0].primary_key.as_ref().map(|k| k.expose_secret()),
+            Some("BASE64KEY==")
         );
-        assert_eq!(qd.policies[0].primary_key.expose_secret(), "BASE64KEY==");
         assert_eq!(
             td.settings.default_message_time_to_live,
             Some(TimeSpan::MAX)
@@ -1161,7 +1232,7 @@ mod tests {
         </Entities>"#;
         let items = parse_entities(xml).unwrap();
         assert_eq!(items.len(), 1, "{items:#?}");
-        let ImportEntity::Queue { name, d } = &items[0] else {
+        let ImportEntity::Queue { name, d, .. } = &items[0] else {
             panic!()
         };
         assert_eq!(name, "a");
@@ -1194,7 +1265,11 @@ mod tests {
             panic!()
         };
         let [
-            ImportEntity::Queue { d: q2, .. },
+            ImportEntity::Queue {
+                d: q2,
+                policies: p2,
+                ..
+            },
             ImportEntity::Topic { d: t2, .. },
             ImportEntity::Subscription { d: s2, rules, .. },
         ] = items.as_slice()
@@ -1202,7 +1277,8 @@ mod tests {
             panic!("{items:#?}")
         };
         assert_eq!(q2.settings, q.settings);
-        assert_eq!(q2.policies, q.policies);
+        let applied: Vec<AccessPolicy> = p2.iter().map(|p| p.applied(None)).collect();
+        assert_eq!(applied, q.policies, "the keys written are the keys read");
         assert_eq!(t2.settings, t.settings);
         assert_eq!(s2.settings, subscriptions[0].d.settings);
         assert_eq!(rules, &subscriptions[0].rules);

@@ -332,19 +332,12 @@ async fn take_all(
                 break;
             }
             None => {
+                // Receive-and-delete messages already buffered were removed: the close returns
+                // them (`take_and_close`). They are not taken back here, because another
+                // `receive` would reset the receiver's shortfall and quiet state, so a close
+                // that then failed would not note the credit still out, and its sweep would
+                // stop at the short idle instead of the drain grace (§14 Decisions 12–13).
                 ended.cancelled = true;
-                if req.action == ReceiveAction::Delete && rx.buffered() > 0 {
-                    // Already removed from the entity: return them rather than lose them.
-                    // Asking for no more than is buffered grants no credit.
-                    let n = u32::try_from(rx.buffered()).unwrap_or(u32::MAX);
-                    match rx.receive(n, Duration::ZERO).await {
-                        Ok(batch) => {
-                            ended.received += batch.len() as u64;
-                            record(rx, req, address, run, messages.as_deref_mut(), batch).await
-                        }
-                        Err(e) => ended.error = Some(e),
-                    }
-                }
                 break;
             }
         };
@@ -862,6 +855,44 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_cancel_leaves_the_outstanding_credit_for_the_close_to_account_for() {
+        // Ctrl-C while a receive-and-delete holds credit: 3 messages are buffered and 497
+        // credit is still out. Taking the buffered ones back before the close would reset the
+        // receiver's shortfall (and its quiet flag, which shortens the close sweep), so a
+        // close that then failed would say nothing about the 497. The close returns the 3
+        // instead, and its failure keeps the note (§14 Decisions 12 and 13).
+        let b = FakeBroker::default().with_receive_delay(Duration::from_millis(10));
+        for _ in 0..3 {
+            b.add("q", FakeMsg::active("x"));
+        }
+        b.fail_next_close();
+        let cancel = CancellationToken::new();
+        let stop = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            stop.cancel();
+        });
+        let mut req = recv("q", 500, ReceiveAction::Delete);
+        req.wait = Duration::from_secs(60);
+        let out = receive::run(&mut b.clone(), &req, &NoProgress, &cancel)
+            .await
+            .unwrap();
+        assert!(out.report.cancelled);
+        assert_eq!(
+            out.messages.len(),
+            3,
+            "the close returned the buffered ones"
+        );
+        assert_eq!(out.report.succeeded(), 3);
+        assert!(b.all("q").is_empty());
+        assert!(
+            out.report.notes.contains(&stopped_drain_note(497)),
+            "{:?}",
+            out.report.notes
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn wait_is_an_idle_timeout_so_a_steady_trickle_is_all_received() {
         // A message arrives every second; the wait is 1.5 s. The whole run takes longer than
         // the wait, but no gap is as long as it, so every message is received.
@@ -890,9 +921,9 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn messages_a_receive_never_returned_come_back_from_the_close() {
-        // One message is taken, then the receive is cancelled and getting the buffered
-        // message back fails: it stays on the receiver, and `close` returns it, so it is
-        // recorded and kept in full.
+        // One message is taken, then the receive is cancelled. Nothing calls the receiver
+        // again (a receive fault armed now is never hit): the message stays buffered, and
+        // `close` returns it, so it is recorded and kept in full.
         let b = FakeBroker::default().with_receive_delay(Duration::from_secs(1));
         for _ in 0..2 {
             b.add("q", FakeMsg::active("x"));
@@ -913,19 +944,13 @@ mod tests {
         assert!(out.report.cancelled);
         assert_eq!(out.messages.len(), 1, "the close returned it");
         assert_eq!(out.report.succeeded(), 1);
+        assert_eq!(out.report.failed(), 0, "no receive after the cancel");
         assert_eq!(b.all("q").len(), 1);
         let notes = &out.report.notes;
         assert!(
             !notes.iter().any(|n| n.contains("may have been removed")),
             "the close completed, so nothing is uncertain: {notes:?}"
         );
-        assert!(
-            notes
-                .iter()
-                .any(|n| n == "the receive stopped early: timed out: receive"),
-            "{notes:?}"
-        );
-        assert_eq!(out.report.failed(), 1, "the job reads as incomplete");
     }
 
     #[tokio::test(start_paused = true)]

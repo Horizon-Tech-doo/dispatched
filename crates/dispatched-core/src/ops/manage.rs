@@ -5,7 +5,7 @@
 use super::{Operator, gated};
 use crate::diagnostics::error_kind;
 use crate::jobs::{ItemOutcome, ItemResult, JobKind, JobReport, JobRun, NoProgress, Progress};
-use crate::mgmt::incumbent::ImportEntity;
+use crate::mgmt::incumbent::{ImportEntity, ImportPolicy};
 use crate::mgmt::policies::{self, KeySlot};
 use crate::mgmt::{
     AccessRight, Description, EntityCounts, EntityKind, EntityRef, EntityStatus, ManagementClient,
@@ -115,6 +115,7 @@ pub(crate) async fn create(m: &ManagementClient, spec: &EntitySpec) -> Result<()
             d,
             rule,
         } => {
+            let rule = rule.clone().map(Description::new);
             m.create_subscription_with_rule(topic, name, d, rule.as_ref())
                 .await
         }
@@ -162,8 +163,9 @@ async fn copy_subscription(
 ) -> Result<usize> {
     let d = m.get_subscription(from_topic, from_name).await?;
     let rules = read_rules(m, from_topic, from_name).await?;
-    let first = rules.first().map(|r| r.settings.clone());
-    m.create_subscription_with_rule(to_topic, to_name, &d, first.as_ref())
+    // Every rule goes through its raw element, the first one too, so typed correlation
+    // values (int, long, …) stay typed in the copy.
+    m.create_subscription_with_rule(to_topic, to_name, &d, rules.first())
         .await?;
     if rules.is_empty() {
         // The service adds `$Default`; the source has no rule at all.
@@ -395,7 +397,8 @@ impl Operator {
     /// Rename a queue or topic: create `new_name` as a copy (a topic with its subscriptions
     /// and rules), then delete the original. Refused before the confirmation when the entity
     /// (any subscription of a topic) holds messages, or when they cannot be counted: the
-    /// delete would lose them.
+    /// delete would lose them. Counted again right before the delete: when messages arrived
+    /// meanwhile, the copy stays, the original is kept and its item fails.
     pub async fn rename(&self, source: EntityRef, new_name: String) -> Result<JobReport> {
         if source.kind() == EntityKind::Subscription {
             return Err(Error::Invalid(
@@ -475,11 +478,39 @@ impl Operator {
             let copied_ok = copied.is_ok();
             job.item(entity_item(&to, outcome(copied)));
             if copied_ok {
-                let item = match delete_one(m, &source).await {
-                    Ok(()) => succeeded(Some(format!("deleted after the copy to {new_name}"))),
+                // Count again right before the delete: messages may have arrived while the
+                // confirmation was open or the copy was made, and a rename never deletes any.
+                let item = match self.entity_contents(&source).await.map(|t| t.messages) {
+                    Ok(CountEstimate::Exact(0) | CountEstimate::About(0)) => {
+                        match delete_one(m, &source).await {
+                            Ok(()) => {
+                                succeeded(Some(format!("deleted after the copy to {new_name}")))
+                            }
+                            Err(e) => {
+                                let reason = format!(
+                                    "{} was created; {} could not be deleted ({e}); delete one of them",
+                                    to.path(),
+                                    source.path()
+                                );
+                                failed_with(&e, reason)
+                            }
+                        }
+                    }
+                    Ok(held) => {
+                        let reason = format!(
+                            "{} was created; {} now holds {} and was kept; move them to {}, then delete {}",
+                            to.path(),
+                            source.path(),
+                            held.text("message"),
+                            to.path(),
+                            source.path()
+                        );
+                        failed_with(&Error::Conflict(reason.clone()), reason)
+                    }
                     Err(e) => {
                         let reason = format!(
-                            "{} was created; {} could not be deleted ({e}); delete one of them",
+                            "{} was created; {} could not be counted again ({e}) and was kept; \
+                             make sure it is empty, then delete it",
                             to.path(),
                             source.path()
                         );
@@ -655,19 +686,55 @@ macro_rules! overlay {
     };
 }
 
-/// The settings of an existing entity with what the file sets on top; the file's policies
-/// replace those of the same name, others are kept.
-fn merge<T>(existing: &mut Description<T>, file: &Description<T>, apply: impl Fn(&mut T, &T)) {
+/// The settings of an existing entity with what the file sets on top. A file policy of the
+/// same name as an existing one replaces its rights, and its keys only where the file holds
+/// keys (a file without keys keeps them, so restoring a default export rotates nothing); a
+/// policy new to the entity gets the file's keys or fresh ones; others are kept. Returns the
+/// existing policies whose keys the file replaced.
+fn merge<T>(
+    existing: &mut Description<T>,
+    file: &Description<T>,
+    policies: &[ImportPolicy],
+    apply: impl Fn(&mut T, &T),
+) -> Vec<String> {
     apply(&mut existing.settings, &file.settings);
-    for p in &file.policies {
+    let mut replaced = Vec::new();
+    for p in policies {
         match existing
             .policies
             .iter_mut()
             .find(|e| e.key_name.eq_ignore_ascii_case(&p.key_name))
         {
-            Some(e) => *e = p.clone(),
-            None => existing.policies.push(p.clone()),
+            Some(e) => {
+                if p.has_keys() {
+                    replaced.push(e.key_name.clone());
+                }
+                *e = p.applied(Some(e));
+            }
+            None => existing.policies.push(p.applied(None)),
         }
+    }
+    replaced
+}
+
+/// `d` with the file's policies, for a new entity: keys the file lacks are fresh.
+fn with_policies<T: Clone>(d: &Description<T>, policies: &[ImportPolicy]) -> Description<T> {
+    let mut d = d.clone();
+    d.policies = policies.iter().map(|p| p.applied(None)).collect();
+    d
+}
+
+/// The detail of an entity updated by `--overwrite`, naming policies whose keys changed.
+fn overwritten(replaced: &[String]) -> String {
+    match replaced {
+        [] => "updated (--overwrite)".into(),
+        [one] => {
+            format!("updated (--overwrite); the keys of policy {one} were replaced from the file")
+        }
+        many => format!(
+            "updated (--overwrite); the keys of policies {} were replaced from the file",
+            many.join(", ")
+        ),
     }
 }
 
@@ -778,16 +845,20 @@ impl Operator {
                 }
                 let entity = it.entity();
                 let created: Result<()> = match it {
-                    ImportEntity::Queue { name, d } => m.create_queue(name, d).await,
-                    ImportEntity::Topic { name, d } => m.create_topic(name, d).await,
+                    ImportEntity::Queue { name, d, policies } => {
+                        m.create_queue(name, &with_policies(d, policies)).await
+                    }
+                    ImportEntity::Topic { name, d, policies } => {
+                        m.create_topic(name, &with_policies(d, policies)).await
+                    }
                     ImportEntity::Subscription {
                         topic,
                         name,
                         d,
                         rules,
                     } => {
-                        let first = initial_rule(rules);
-                        m.create_subscription_with_rule(topic, name, d, first.map(|i| &rules[i]))
+                        let first = initial_rule(rules).map(|i| Description::new(rules[i].clone()));
+                        m.create_subscription_with_rule(topic, name, d, first.as_ref())
                             .await
                     }
                 };
@@ -810,17 +881,17 @@ impl Operator {
                     }
                     Err(e) if exists(&e) && !overwrite => skipped_existing(&entity.to_string()),
                     Err(e) if exists(&e) => {
-                        let replaced: Result<()> = async {
+                        let replaced: Result<Vec<String>> = async {
                             match it {
-                                ImportEntity::Queue { name, d } => {
+                                ImportEntity::Queue { name, d, policies } => {
                                     let mut cur = m.get_queue_description(name).await?;
-                                    merge(&mut cur, d, overlay_queue);
-                                    m.update_queue(name, &cur).await
+                                    let keys = merge(&mut cur, d, policies, overlay_queue);
+                                    m.update_queue(name, &cur).await.map(|()| keys)
                                 }
-                                ImportEntity::Topic { name, d } => {
+                                ImportEntity::Topic { name, d, policies } => {
                                     let mut cur = m.get_topic_description(name).await?;
-                                    merge(&mut cur, d, overlay_topic);
-                                    m.update_topic(name, &cur).await
+                                    let keys = merge(&mut cur, d, policies, overlay_topic);
+                                    m.update_topic(name, &cur).await.map(|()| keys)
                                 }
                                 ImportEntity::Subscription {
                                     topic,
@@ -829,17 +900,17 @@ impl Operator {
                                     rules,
                                 } => {
                                     let mut cur = m.get_subscription(topic, name).await?;
-                                    merge(&mut cur, d, overlay_subscription);
+                                    merge(&mut cur, d, &[], overlay_subscription);
                                     m.update_subscription(topic, name, &cur).await?;
                                     for r in rules {
                                         later.push((entity.clone(), r.clone(), true));
                                     }
-                                    Ok(())
+                                    Ok(Vec::new())
                                 }
                             }
                         }
                         .await;
-                        outcome(replaced.map(|()| Some("updated (--overwrite)".into())))
+                        outcome(replaced.map(|keys| Some(overwritten(&keys))))
                     }
                     Err(e) => super::failed(&e),
                 };
@@ -1038,6 +1109,168 @@ mod tests {
                 .summary
                 .starts_with("Duplicate queue a as b on dev")
         );
+    }
+
+    /// A rule entry with a correlation filter whose properties are an int and a long.
+    fn typed_rule_entry(name: &str) -> String {
+        format!(
+            r#"<entry xmlns="http://www.w3.org/2005/Atom"><title type="text">{name}</title><content type="application/xml"><RuleDescription xmlns="http://schemas.microsoft.com/netservices/2010/10/servicebus/connect" xmlns:i="http://www.w3.org/2001/XMLSchema-instance"><Filter i:type="CorrelationFilter"><Label>orders</Label><Properties><KeyValueOfstringanyType><Key>priority</Key><Value xmlns:d6p1="http://www.w3.org/2001/XMLSchema" i:type="d6p1:int">5</Value></KeyValueOfstringanyType><KeyValueOfstringanyType><Key>tenant</Key><Value xmlns:d6p1="http://www.w3.org/2001/XMLSchema" i:type="d6p1:long">9000000000</Value></KeyValueOfstringanyType></Properties></Filter><Action i:type="EmptyRuleAction"/><CreatedAt>2026-09-01T08:00:00Z</CreatedAt><Name>{name}</Name></RuleDescription></content></entry>"#
+        )
+    }
+
+    /// The body of a PUT that keeps both value types of [`typed_rule_entry`].
+    fn keeps_typed_values() -> Matcher {
+        Matcher::AllOf(vec![
+            Matcher::Regex(r#"<Key>priority</Key><Value i:type="d6p1:int"[^>]*>5</Value>"#.into()),
+            Matcher::Regex(
+                r#"<Key>tenant</Key><Value i:type="d6p1:long"[^>]*>9000000000</Value>"#.into(),
+            ),
+        ])
+    }
+
+    /// Mocks for subscription `topic/name` with one rule, [`typed_rule_entry`] `only`.
+    async fn typed_subscription(server: &mut mockito::Server, topic: &str, name: &str) {
+        let base = format!("/{topic}/Subscriptions/{name}");
+        for (path, body) in [
+            (base.clone(), subscription_entry(name, 0)),
+            (format!("{base}/Rules"), feed(&[typed_rule_entry("only")])),
+            (format!("{base}/Rules/only"), typed_rule_entry("only")),
+        ] {
+            server
+                .mock("GET", path.as_str())
+                .match_query(Matcher::Any)
+                .with_status(200)
+                .with_body(body)
+                .create_async()
+                .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn duplicate_keeps_the_value_types_of_the_first_rule() {
+        // The first (here the only) rule is written into the new subscription's
+        // DefaultRuleDescription: an int and a long correlation property stay typed, or the
+        // copy would compare them as strings and stop matching.
+        let mut server = mockito::Server::new_async().await;
+        typed_subscription(&mut server, "events", "billing").await;
+        let put = server
+            .mock("PUT", "/events/Subscriptions/billing-copy")
+            .match_query(Matcher::Any)
+            .match_body(Matcher::AllOf(vec![
+                Matcher::Regex("<DefaultRuleDescription>".into()),
+                keeps_typed_values(),
+            ]))
+            .with_status(201)
+            .create_async()
+            .await;
+        let (gate, _audit) = fake_gate();
+        let r = operator(&server, gate)
+            .duplicate(
+                EntityRef::subscription("events", "billing"),
+                "billing-copy".into(),
+            )
+            .await
+            .unwrap();
+        put.assert_async().await;
+        assert_eq!(r.succeeded(), 1, "{:?}", r.items);
+    }
+
+    #[tokio::test]
+    async fn rename_keeps_the_original_when_messages_arrive_after_the_confirmation() {
+        // Empty when counted before the confirmation (and when read for the copy), 12
+        // messages by the time the copy exists: the original is kept, never deleted.
+        let mut server = mockito::Server::new_async().await;
+        let _empty = server
+            .mock("GET", "/a")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(queue_entry("a", 0))
+            .expect(2)
+            .create_async()
+            .await;
+        let _arrived = server
+            .mock("GET", "/a")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(queue_entry("a", 12))
+            .create_async()
+            .await;
+        let create = server
+            .mock("PUT", "/b")
+            .match_query(Matcher::Any)
+            .with_status(201)
+            .create_async()
+            .await;
+        let del = server
+            .mock("DELETE", Matcher::Any)
+            .expect(0)
+            .create_async()
+            .await;
+        let (gate, audit) = fake_gate();
+        let r = operator(&server, gate)
+            .rename(EntityRef::queue("a"), "b".into())
+            .await
+            .unwrap();
+        create.assert_async().await;
+        del.assert_async().await;
+        let failed: Vec<_> = r.failures().collect();
+        assert_eq!(failed.len(), 1, "{:?}", r.items);
+        assert_eq!(failed[0].entity, "a");
+        assert_eq!(
+            JobReport::reason(failed[0]),
+            "b was created; a now holds 12 messages and was kept; move them to b, then delete a"
+        );
+        assert_eq!(audit.entries()[1].outcome, Outcome::PartlyFailed);
+    }
+
+    #[tokio::test]
+    async fn rename_copies_a_topic_with_typed_rules_and_counts_again_before_the_delete() {
+        let mut server = mockito::Server::new_async().await;
+        let topic = server
+            .mock("GET", "/events")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(include_str!("../../tests/fixtures/topic_entry.xml"))
+            .expect(3)
+            .create_async()
+            .await;
+        let _subs = server
+            .mock("GET", "/events/Subscriptions")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(feed(&[subscription_entry("billing", 0)]))
+            .create_async()
+            .await;
+        typed_subscription(&mut server, "events", "billing").await;
+        let _new_topic = server
+            .mock("PUT", "/events-v2")
+            .match_query(Matcher::Any)
+            .with_status(201)
+            .create_async()
+            .await;
+        let copy = server
+            .mock("PUT", "/events-v2/Subscriptions/billing")
+            .match_query(Matcher::Any)
+            .match_body(keeps_typed_values())
+            .with_status(201)
+            .create_async()
+            .await;
+        let del = server
+            .mock("DELETE", "/events")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .create_async()
+            .await;
+        let (gate, _audit) = fake_gate();
+        let r = operator(&server, gate)
+            .rename(EntityRef::topic("events"), "events-v2".into())
+            .await
+            .unwrap();
+        copy.assert_async().await;
+        // Counted before the confirmation, read for the copy, counted before the delete.
+        topic.assert_async().await;
+        del.assert_async().await;
+        assert_eq!(r.succeeded(), 2, "{:?}", r.items);
     }
 
     #[tokio::test]
@@ -1290,6 +1523,7 @@ mod tests {
             ImportEntity::Queue {
                 name: "audit".into(),
                 d: Description::default(),
+                policies: Vec::new(),
             },
         );
         let mut server = mockito::Server::new_async().await;
@@ -1474,6 +1708,7 @@ mod tests {
                         max_delivery_count: Some(2),
                         ..Default::default()
                     }),
+                    policies: Vec::new(),
                 }],
                 true,
                 &crate::jobs::NoProgress,
@@ -1487,6 +1722,121 @@ mod tests {
             audit.entries()[0]
                 .summary
                 .ends_with("existing ones are replaced")
+        );
+    }
+
+    /// An incumbent file with queue `orders` and these policy elements.
+    fn orders_file(policies: &str) -> String {
+        format!(
+            r#"<Entities xmlns="http://schemas.microsoft.com/servicebusexplorer" serviceBusNamespace="ns"><Queues><Queue><Path>orders</Path><MaxDeliveryCount>2</MaxDeliveryCount><AuthorizationRules>{policies}</AuthorizationRules></Queue></Queues></Entities>"#
+        )
+    }
+
+    /// `orders` exists (`queue_entry_full.xml`: policy `app` with keys `primary-key-value`
+    /// and `secondary-key-value`); import `file` with `--overwrite` and return the PUT body
+    /// and the item's detail.
+    async fn overwrite_orders_with(file: &str) -> (String, String) {
+        let mut server = mockito::Server::new_async().await;
+        let _create = server
+            .mock("PUT", "/orders")
+            .match_query(Matcher::Any)
+            .match_header("if-match", Matcher::Missing)
+            .with_status(409)
+            .create_async()
+            .await;
+        let _get = server
+            .mock("GET", "/orders")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(include_str!("../../tests/fixtures/queue_entry_full.xml"))
+            .create_async()
+            .await;
+        let body = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let seen = body.clone();
+        let update = server
+            .mock("PUT", "/orders")
+            .match_query(Matcher::Any)
+            .match_header("if-match", "*")
+            .match_request(move |req| {
+                *seen.lock().unwrap() = req
+                    .utf8_lossy_body()
+                    .map(|b| b.into_owned())
+                    .unwrap_or_default();
+                true
+            })
+            .with_status(200)
+            .create_async()
+            .await;
+        let (gate, _audit) = fake_gate();
+        let items = crate::mgmt::incumbent::parse_entities(file).unwrap();
+        let r = operator(&server, gate)
+            .import_entities(
+                items,
+                true,
+                &crate::jobs::NoProgress,
+                &horizon_azure_kit::safety::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        update.assert_async().await;
+        assert_eq!(r.succeeded(), 1, "{:?}", r.items);
+        let ItemOutcome::Succeeded {
+            detail: Some(detail),
+        } = &r.items[0].outcome
+        else {
+            panic!("{:?}", r.items)
+        };
+        (body.lock().unwrap().clone(), detail.clone())
+    }
+
+    #[tokio::test]
+    async fn import_overwrite_keeps_the_keys_when_the_file_has_none() {
+        // The default export leaves keys out. Restoring it with --overwrite updates the
+        // rights of `app` and keeps its keys (rotating both would break every client at
+        // once); `ops`, new to the queue, gets fresh keys.
+        let (body, detail) = overwrite_orders_with(&orders_file(
+            "<SharedAccessAuthorizationRule><Rights><Right>Listen</Right></Rights><KeyName>app</KeyName></SharedAccessAuthorizationRule>\
+             <SharedAccessAuthorizationRule><Rights><Right>Send</Right></Rights><KeyName>ops</KeyName></SharedAccessAuthorizationRule>",
+        ))
+        .await;
+        assert!(
+            body.contains("<Rights><AccessRights>Listen</AccessRights></Rights><KeyName>app</KeyName><PrimaryKey>primary-key-value</PrimaryKey><SecondaryKey>secondary-key-value</SecondaryKey>"),
+            "{body}"
+        );
+        let ops = body
+            .split("<KeyName>ops</KeyName>")
+            .nth(1)
+            .expect("ops is added");
+        let key = |tag: &str| {
+            ops.split(&format!("<{tag}>"))
+                .nth(1)
+                .and_then(|s| s.split('<').next())
+                .unwrap_or_default()
+                .to_string()
+        };
+        let (p, s) = (key("PrimaryKey"), key("SecondaryKey"));
+        assert!(
+            p.len() >= 40 && s.len() >= 40 && p != s,
+            "fresh keys: {p} {s}"
+        );
+        assert!(!body.contains("<KeyName>ops</KeyName><PrimaryKey>primary-key-value"));
+        assert_eq!(detail, "updated (--overwrite)");
+    }
+
+    #[tokio::test]
+    async fn import_overwrite_takes_the_keys_the_file_holds() {
+        let (body, detail) = overwrite_orders_with(&orders_file(
+            "<SharedAccessAuthorizationRule><Rights><Right>Listen</Right></Rights><KeyName>app</KeyName><PrimaryKey>file-primary</PrimaryKey><SecondaryKey>file-secondary</SecondaryKey></SharedAccessAuthorizationRule>",
+        ))
+        .await;
+        assert!(
+            body.contains("<KeyName>app</KeyName><PrimaryKey>file-primary</PrimaryKey><SecondaryKey>file-secondary</SecondaryKey>"),
+            "{body}"
+        );
+        assert!(!body.contains("primary-key-value"));
+        assert_eq!(
+            detail,
+            "updated (--overwrite); the keys of policy app were replaced from the file"
         );
     }
 

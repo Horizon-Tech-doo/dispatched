@@ -319,16 +319,17 @@ impl ManagementClient {
     }
 
     /// Create subscription `name` of `topic`; `rule`, when given, is its initial rule instead
-    /// of `$Default`. The filter is validated before any request.
+    /// of `$Default`, written through its `raw` element (a rule read from the service keeps
+    /// its value types). The filter is validated before any request.
     pub async fn create_subscription_with_rule(
         &self,
         topic: &str,
         name: &str,
         d: &Description<SubscriptionSettings>,
-        rule: Option<&RuleSpec>,
+        rule: Option<&Description<RuleSpec>>,
     ) -> Result<()> {
         if let Some(r) = rule {
-            validate_filter(&r.filter)?;
+            validate_filter(&r.settings.filter)?;
         }
         let fwd = forwarding(
             &d.settings.forward_to,
@@ -926,16 +927,23 @@ mod tests {
             .mock("PUT", "/events/Subscriptions/billing")
             .match_query(Matcher::Any)
             .match_header("if-match", Matcher::Missing)
-            .match_body(subscription_entry_with_rule(&d, Some(&rule)).as_str())
+            .match_body(
+                subscription_entry_with_rule(&d, Some(&Description::new(rule.clone()))).as_str(),
+            )
             .with_status(201)
             .create_async()
             .await;
         let c = client(&server);
-        c.create_subscription_with_rule("events", "billing", &d, Some(&rule))
-            .await
-            .unwrap();
+        c.create_subscription_with_rule(
+            "events",
+            "billing",
+            &d,
+            Some(&Description::new(rule.clone())),
+        )
+        .await
+        .unwrap();
         m.assert_async().await;
-        let body = subscription_entry_with_rule(&d, Some(&rule));
+        let body = subscription_entry_with_rule(&d, Some(&Description::new(rule.clone())));
         assert!(body.contains("<DefaultRuleDescription><Filter i:type=\"SqlFilter\">"));
         assert!(body.contains("<Name>eu</Name></DefaultRuleDescription>"));
         let empty = RuleSpec {
@@ -955,8 +963,13 @@ mod tests {
         };
         assert!(
             matches!(
-                c.create_subscription_with_rule("events", "other", &d, Some(&empty))
-                    .await,
+                c.create_subscription_with_rule(
+                    "events",
+                    "other",
+                    &d,
+                    Some(&Description::new(empty))
+                )
+                .await,
                 Err(Error::Invalid(_))
             ),
             "refused before any request"

@@ -331,10 +331,12 @@ pub fn subscription_entry(d: &Description<SubscriptionSettings>) -> String {
 }
 
 /// The full ATOM entry to create a subscription whose initial rule is `rule`
-/// (`DefaultRuleDescription`) instead of the service's `$Default`.
+/// (`DefaultRuleDescription`) instead of the service's `$Default`. The rule is written through
+/// its `raw` element, as [`rule_entry`] writes one, so a rule read from the service keeps its
+/// correlation value types (int, long, …) and unknown elements.
 pub fn subscription_entry_with_rule(
     d: &Description<SubscriptionSettings>,
-    rule: Option<&RuleSpec>,
+    rule: Option<&Description<RuleSpec>>,
 ) -> String {
     let s = &d.settings;
     let mut k = Known::new();
@@ -351,7 +353,7 @@ pub fn subscription_entry_with_rule(
         )
         .xml(
             "DefaultRuleDescription",
-            rule.map(|r| rule_element("DefaultRuleDescription", r, None)),
+            rule.map(|r| rule_element("DefaultRuleDescription", &r.settings, Some(&r.raw))),
         )
         .num("MaxDeliveryCount", s.max_delivery_count)
         .flag("EnableBatchedOperations", s.enable_batched_operations)
@@ -640,7 +642,7 @@ mod tests {
             },
             action: None,
         };
-        let written = subscription_entry_with_rule(&s, Some(&rule));
+        let written = subscription_entry_with_rule(&s, Some(&Description::new(rule)));
         let names = element_names(&written, "SubscriptionDescription");
         assert!(in_order(&names, SUBSCRIPTION_ORDER), "{names:?}");
         assert!(names.iter().any(|n| n == "DefaultRuleDescription"));
