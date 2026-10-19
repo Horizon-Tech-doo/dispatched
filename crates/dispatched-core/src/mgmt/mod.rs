@@ -46,7 +46,7 @@ fn segment(name: &str) -> String {
     utf8_percent_encode(name, SEGMENT).to_string()
 }
 
-/// Read-side management client (M0). Create/update/delete arrive in M3.
+/// The management client: listings, descriptions, and create, update and delete.
 #[derive(Clone)]
 pub struct ManagementClient {
     http: reqwest::Client,
@@ -182,6 +182,343 @@ impl ManagementClient {
         .await
     }
 
+    // -----------------------------------------------------------------------------------
+    // Descriptions (read-modify-write) and writes
+
+    /// A queue's full description, for an update. A missing queue is `NotFound`.
+    pub async fn get_queue_description(&self, name: &str) -> Result<Description<QueueSettings>> {
+        self.description(
+            &segment(name),
+            &format!("queue {name}"),
+            "QueueDescription",
+            parse_queue,
+        )
+        .await
+    }
+
+    /// A topic's full description, for an update. A missing topic is `NotFound`.
+    pub async fn get_topic_description(&self, name: &str) -> Result<Description<TopicSettings>> {
+        self.description(
+            &segment(name),
+            &format!("topic {name}"),
+            "TopicDescription",
+            parse_topic,
+        )
+        .await
+    }
+
+    /// One subscription's full description. A missing subscription is `NotFound`.
+    pub async fn get_subscription(
+        &self,
+        topic: &str,
+        name: &str,
+    ) -> Result<Description<SubscriptionSettings>> {
+        self.description(
+            &subscription_path(topic, name),
+            &format!("subscription {topic}/subscriptions/{name}"),
+            "SubscriptionDescription",
+            parse_subscription,
+        )
+        .await
+    }
+
+    /// One rule of a subscription. A missing rule is `NotFound`.
+    pub async fn get_rule(
+        &self,
+        topic: &str,
+        subscription: &str,
+        rule: &str,
+    ) -> Result<Description<RuleSpec>> {
+        self.description(
+            &rule_path(topic, subscription, rule),
+            &format!("rule {rule} of {topic}/subscriptions/{subscription}"),
+            "RuleDescription",
+            parse_rule,
+        )
+        .await
+    }
+
+    /// Create queue `name`. An existing queue is `Conflict`.
+    pub async fn create_queue(&self, name: &str, d: &Description<QueueSettings>) -> Result<()> {
+        let fwd = forwarding(
+            &d.settings.forward_to,
+            &d.settings.forward_dead_lettered_messages_to,
+        );
+        self.put(
+            &segment(name),
+            queue_entry(d),
+            Write::Create,
+            &format!("queue {name}"),
+            fwd,
+        )
+        .await
+    }
+
+    /// Replace queue `name`'s description (`If-Match: *`). A missing queue is `NotFound`.
+    pub async fn update_queue(&self, name: &str, d: &Description<QueueSettings>) -> Result<()> {
+        let fwd = forwarding(
+            &d.settings.forward_to,
+            &d.settings.forward_dead_lettered_messages_to,
+        );
+        self.put(
+            &segment(name),
+            queue_entry(d),
+            Write::Update,
+            &format!("queue {name}"),
+            fwd,
+        )
+        .await
+    }
+
+    /// Delete queue `name` and its messages. A missing queue is `NotFound`.
+    pub async fn delete_queue(&self, name: &str) -> Result<()> {
+        self.delete(&segment(name), &format!("queue {name}")).await
+    }
+
+    /// Create topic `name`.
+    pub async fn create_topic(&self, name: &str, d: &Description<TopicSettings>) -> Result<()> {
+        self.put(
+            &segment(name),
+            topic_entry(d),
+            Write::Create,
+            &format!("topic {name}"),
+            (None, None),
+        )
+        .await
+    }
+
+    /// Replace topic `name`'s description.
+    pub async fn update_topic(&self, name: &str, d: &Description<TopicSettings>) -> Result<()> {
+        self.put(
+            &segment(name),
+            topic_entry(d),
+            Write::Update,
+            &format!("topic {name}"),
+            (None, None),
+        )
+        .await
+    }
+
+    /// Delete topic `name` with its subscriptions and their messages.
+    pub async fn delete_topic(&self, name: &str) -> Result<()> {
+        self.delete(&segment(name), &format!("topic {name}")).await
+    }
+
+    /// Create subscription `name` of `topic` with the service's default rule.
+    pub async fn create_subscription(
+        &self,
+        topic: &str,
+        name: &str,
+        d: &Description<SubscriptionSettings>,
+    ) -> Result<()> {
+        self.create_subscription_with_rule(topic, name, d, None)
+            .await
+    }
+
+    /// Create subscription `name` of `topic`; `rule`, when given, is its initial rule instead
+    /// of `$Default`. The filter is validated before any request.
+    pub async fn create_subscription_with_rule(
+        &self,
+        topic: &str,
+        name: &str,
+        d: &Description<SubscriptionSettings>,
+        rule: Option<&RuleSpec>,
+    ) -> Result<()> {
+        if let Some(r) = rule {
+            validate_filter(&r.filter)?;
+        }
+        let fwd = forwarding(
+            &d.settings.forward_to,
+            &d.settings.forward_dead_lettered_messages_to,
+        );
+        self.put(
+            &subscription_path(topic, name),
+            subscription_entry_with_rule(d, rule),
+            Write::Create,
+            &format!("subscription {topic}/subscriptions/{name}"),
+            fwd,
+        )
+        .await
+    }
+
+    /// Replace a subscription's description (its rules are not touched).
+    pub async fn update_subscription(
+        &self,
+        topic: &str,
+        name: &str,
+        d: &Description<SubscriptionSettings>,
+    ) -> Result<()> {
+        let fwd = forwarding(
+            &d.settings.forward_to,
+            &d.settings.forward_dead_lettered_messages_to,
+        );
+        self.put(
+            &subscription_path(topic, name),
+            subscription_entry(d),
+            Write::Update,
+            &format!("subscription {topic}/subscriptions/{name}"),
+            fwd,
+        )
+        .await
+    }
+
+    /// Delete a subscription and its messages.
+    pub async fn delete_subscription(&self, topic: &str, name: &str) -> Result<()> {
+        self.delete(
+            &subscription_path(topic, name),
+            &format!("subscription {topic}/subscriptions/{name}"),
+        )
+        .await
+    }
+
+    /// Add rule `d` to a subscription. The filter is validated first.
+    pub async fn create_rule(
+        &self,
+        topic: &str,
+        subscription: &str,
+        d: &Description<RuleSpec>,
+    ) -> Result<()> {
+        validate_filter(&d.settings.filter)?;
+        self.put(
+            &rule_path(topic, subscription, &d.settings.name),
+            rule_entry(d),
+            Write::Create,
+            &format!(
+                "rule {} of {topic}/subscriptions/{subscription}",
+                d.settings.name
+            ),
+            (None, None),
+        )
+        .await
+    }
+
+    /// Replace a rule. The filter is validated first.
+    pub async fn update_rule(
+        &self,
+        topic: &str,
+        subscription: &str,
+        d: &Description<RuleSpec>,
+    ) -> Result<()> {
+        validate_filter(&d.settings.filter)?;
+        self.put(
+            &rule_path(topic, subscription, &d.settings.name),
+            rule_entry(d),
+            Write::Update,
+            &format!(
+                "rule {} of {topic}/subscriptions/{subscription}",
+                d.settings.name
+            ),
+            (None, None),
+        )
+        .await
+    }
+
+    /// Remove a rule from a subscription.
+    pub async fn delete_rule(&self, topic: &str, subscription: &str, rule: &str) -> Result<()> {
+        self.delete(
+            &rule_path(topic, subscription, rule),
+            &format!("rule {rule} of {topic}/subscriptions/{subscription}"),
+        )
+        .await
+    }
+
+    async fn description<T>(
+        &self,
+        path: &str,
+        what: &str,
+        element: &str,
+        parse: impl Fn(&Node) -> Result<T>,
+    ) -> Result<T> {
+        let root = self.get_with(path, &[], true).await?;
+        let entry = entries(&root)
+            .into_iter()
+            .find(|e| e.path(&["content", element]).is_some())
+            .ok_or_else(|| Error::NotFound(what.to_string()))?;
+        parse(entry)
+    }
+
+    /// The `Authorization` value for `url`.
+    async fn authorization(&self, url: &str) -> Result<String> {
+        Ok(self
+            .tokens
+            .token(&url.to_ascii_lowercase())
+            .await?
+            .http_authorization())
+    }
+
+    /// The URL of a forwarding target: as given when absolute, else an entity of this
+    /// namespace.
+    fn target_url(&self, target: &str) -> String {
+        if target.contains("://") {
+            target.to_string()
+        } else {
+            format!("{}/{}", self.base, target.trim_start_matches('/'))
+        }
+    }
+
+    async fn put(
+        &self,
+        path: &str,
+        body: String,
+        mode: Write,
+        what: &str,
+        (forward_to, forward_dlq_to): (Option<&str>, Option<&str>),
+    ) -> Result<()> {
+        let url = format!("{}/{path}", self.base);
+        let mut req = self
+            .http
+            .put(&url)
+            .query(&[("api-version", API_VERSION)])
+            .header(
+                reqwest::header::AUTHORIZATION,
+                self.authorization(&url).await?,
+            )
+            .header(reqwest::header::CONTENT_TYPE, ATOM_ENTRY_TYPE);
+        if mode == Write::Update {
+            req = req.header(reqwest::header::IF_MATCH, "*");
+        }
+        // Forwarding needs the right to send to the target, proven with its own token (as the
+        // Azure SDKs send it).
+        if let Some(t) = forward_to {
+            let auth = self.authorization(&self.target_url(t)).await?;
+            req = req.header("ServiceBusSupplementaryAuthorization", auth);
+        }
+        if let Some(t) = forward_dlq_to {
+            let auth = self.authorization(&self.target_url(t)).await?;
+            req = req.header("ServiceBusDlqSupplementaryAuthorization", auth);
+        }
+        let resp =
+            req.body(body).send().await.map_err(|e| {
+                Error::Network(format!("management API {url}: {}", e.without_url()))
+            })?;
+        match (mode, resp.status().as_u16()) {
+            (_, 200..=299) => Ok(()),
+            (Write::Create, 409) => Err(Error::Conflict(format!("{what} already exists"))),
+            (Write::Update, 404) => Err(Error::NotFound(what.to_string())),
+            (_, status) => Err(error_of(resp, status, &url).await),
+        }
+    }
+
+    async fn delete(&self, path: &str, what: &str) -> Result<()> {
+        let url = format!("{}/{path}", self.base);
+        let resp = self
+            .http
+            .delete(&url)
+            .query(&[("api-version", API_VERSION)])
+            .header(
+                reqwest::header::AUTHORIZATION,
+                self.authorization(&url).await?,
+            )
+            .send()
+            .await
+            .map_err(|e| Error::Network(format!("management API {url}: {}", e.without_url())))?;
+        match resp.status().as_u16() {
+            200..=299 => Ok(()),
+            404 => Err(Error::NotFound(what.to_string())),
+            status => Err(error_of(resp, status, &url).await),
+        }
+    }
+
     /// Page through a feed. Stops on a short page, on a page with no names
     /// not already seen (a server ignoring `$skip`), or fails after `MAX_PAGES`.
     async fn list<T>(&self, path: &str, map: impl Fn(&Node) -> Option<T>) -> Result<Vec<T>> {
@@ -221,6 +558,11 @@ impl ManagementClient {
     }
 
     async fn get(&self, path: &str, query: &[(&str, &str)]) -> Result<Node> {
+        self.get_with(path, query, false).await
+    }
+
+    /// GET `path`; `exact` keeps leaf text as written (descriptions read for an update).
+    async fn get_with(&self, path: &str, query: &[(&str, &str)], exact: bool) -> Result<Node> {
         let url = format!("{}/{path}", self.base);
         let token = self.tokens.token(&url.to_ascii_lowercase()).await?;
         let resp = self
@@ -244,10 +586,57 @@ impl ManagementClient {
             .await
             .map_err(|e| Error::Network(e.to_string()))?;
         if (200..300).contains(&status) {
-            return xml::parse(&body);
+            return if exact {
+                xml::parse_exact(&body)
+            } else {
+                xml::parse(&body)
+            };
         }
         Err(map_http_error(status, &body, retry_after, &url))
     }
+}
+
+const ATOM_ENTRY_TYPE: &str = "application/atom+xml;type=entry;charset=utf-8";
+
+/// Whether a PUT creates (no `If-Match`) or replaces (`If-Match: *`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Write {
+    Create,
+    Update,
+}
+
+fn forwarding<'a>(
+    to: &'a Option<String>,
+    dlq_to: &'a Option<String>,
+) -> (Option<&'a str>, Option<&'a str>) {
+    (
+        to.as_deref().filter(|t| !t.is_empty()),
+        dlq_to.as_deref().filter(|t| !t.is_empty()),
+    )
+}
+
+fn subscription_path(topic: &str, name: &str) -> String {
+    format!("{}/Subscriptions/{}", segment(topic), segment(name))
+}
+
+fn rule_path(topic: &str, subscription: &str, rule: &str) -> String {
+    format!(
+        "{}/Rules/{}",
+        subscription_path(topic, subscription),
+        segment(rule)
+    )
+}
+
+/// The error of a failed response, read from its body.
+async fn error_of(resp: reqwest::Response, status: u16, url: &str) -> Error {
+    let retry_after = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs);
+    let body = resp.text().await.unwrap_or_default();
+    map_http_error(status, &body, retry_after, url)
 }
 
 fn map_http_error(status: u16, body: &str, retry_after: Option<Duration>, url: &str) -> Error {
@@ -264,6 +653,8 @@ fn map_http_error(status: u16, body: &str, retry_after: Option<Duration>, url: &
             detail,
         },
         404 => Error::NotFound(url.to_string()),
+        409 => Error::Conflict(detail),
+        412 => Error::Conflict("the entity changed meanwhile; read it again and retry".into()),
         429 | 503 => Error::Throttled { retry_after },
         _ => Error::Protocol(format!("management API returned {status}: {detail}")),
     }
@@ -344,6 +735,298 @@ mod tests {
 
     fn client(server: &mockito::Server) -> ManagementClient {
         ManagementClient::with_base(server.url(), Arc::new(FixedToken))
+    }
+
+    const ATOM_ENTRY: &str = "application/atom+xml;type=entry;charset=utf-8";
+
+    fn orders() -> Description<QueueSettings> {
+        Description::new(QueueSettings {
+            lock_duration: Some(Duration::from_secs(30)),
+            max_delivery_count: Some(5),
+            ..Default::default()
+        })
+    }
+
+    #[tokio::test]
+    async fn create_queue_puts_the_entry() {
+        let mut server = mockito::Server::new_async().await;
+        let d = orders();
+        let m = server
+            .mock("PUT", "/orders")
+            .match_query(Matcher::UrlEncoded("api-version".into(), "2024-05".into()))
+            .match_header("content-type", ATOM_ENTRY)
+            .match_header("if-match", Matcher::Missing)
+            .match_header(
+                "authorization",
+                Matcher::Regex("^SharedAccessSignature sr=".into()),
+            )
+            .match_body(queue_entry(&d).as_str())
+            .with_status(201)
+            .create_async()
+            .await;
+        client(&server).create_queue("orders", &d).await.unwrap();
+        m.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn update_sends_if_match_star() {
+        let mut server = mockito::Server::new_async().await;
+        let entry =
+            xml::parse_exact(include_str!("../../tests/fixtures/queue_entry_full.xml")).unwrap();
+        let mut d = parse_queue(&entry).unwrap();
+        d.settings.max_delivery_count = Some(3);
+        let m = server
+            .mock("PUT", "/orders")
+            .match_query(Matcher::Any)
+            .match_header("content-type", ATOM_ENTRY)
+            .match_header("if-match", "*")
+            .match_body(Matcher::AllOf(vec![
+                Matcher::Regex("<MaxDeliveryCount>3</MaxDeliveryCount>".into()),
+                Matcher::Regex("<FutureFlag>true</FutureFlag>".into()),
+            ]))
+            .with_status(200)
+            .create_async()
+            .await;
+        client(&server).update_queue("orders", &d).await.unwrap();
+        m.assert_async().await;
+        let _missing = server
+            .mock("PUT", "/gone")
+            .match_query(Matcher::Any)
+            .with_status(404)
+            .create_async()
+            .await;
+        assert!(matches!(
+            client(&server).update_queue("gone", &d).await,
+            Err(Error::NotFound(_))
+        ));
+        let _changed = server
+            .mock("PUT", "/raced")
+            .match_query(Matcher::Any)
+            .with_status(412)
+            .create_async()
+            .await;
+        let e = client(&server).update_queue("raced", &d).await.unwrap_err();
+        assert!(
+            matches!(&e, Error::Conflict(m) if m.contains("changed meanwhile")),
+            "{e}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_existing_is_conflict() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("PUT", "/orders")
+            .match_query(Matcher::Any)
+            .with_status(409)
+            .with_body("<Error><Code>409</Code><Detail>The messaging entity already exists.</Detail></Error>")
+            .create_async()
+            .await;
+        let e = client(&server)
+            .create_queue("orders", &orders())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&e, Error::Conflict(m) if m == "queue orders already exists"),
+            "{e}"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_missing_is_not_found() {
+        let mut server = mockito::Server::new_async().await;
+        let ok = server
+            .mock("DELETE", "/events/Subscriptions/billing")
+            .match_query(Matcher::UrlEncoded("api-version".into(), "2024-05".into()))
+            .match_header(
+                "authorization",
+                Matcher::Regex("^SharedAccessSignature sr=".into()),
+            )
+            .with_status(200)
+            .create_async()
+            .await;
+        let _missing = server
+            .mock("DELETE", "/nope")
+            .match_query(Matcher::Any)
+            .with_status(404)
+            .create_async()
+            .await;
+        let c = client(&server);
+        c.delete_subscription("events", "billing").await.unwrap();
+        ok.assert_async().await;
+        assert!(matches!(
+            c.delete_queue("nope").await,
+            Err(Error::NotFound(m)) if m.contains("nope")
+        ));
+    }
+
+    #[tokio::test]
+    async fn get_subscription_reads_one() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/events/Subscriptions/billing")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(include_str!("../../tests/fixtures/subscription_entry.xml"))
+            .create_async()
+            .await;
+        let _gone = server
+            .mock("GET", "/events/Subscriptions/gone")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(include_str!("../../tests/fixtures/empty_feed.xml"))
+            .create_async()
+            .await;
+        let c = client(&server);
+        let d = c.get_subscription("events", "billing").await.unwrap();
+        assert_eq!(d.settings.max_delivery_count, Some(5));
+        assert!(matches!(
+            c.get_subscription("events", "gone").await,
+            Err(Error::NotFound(_))
+        ));
+        let _q = server
+            .mock("GET", "/orders")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(include_str!("../../tests/fixtures/queue_entry_full.xml"))
+            .create_async()
+            .await;
+        let q = c.get_queue_description("orders").await.unwrap();
+        assert_eq!(
+            q.settings.user_metadata.as_deref(),
+            Some("owner: team <a&b>")
+        );
+        assert!(
+            matches!(
+                c.get_topic_description("orders").await,
+                Err(Error::NotFound(_))
+            ),
+            "a queue is not a topic"
+        );
+    }
+
+    #[tokio::test]
+    async fn subscription_create_carries_the_initial_rule() {
+        let mut server = mockito::Server::new_async().await;
+        let d = Description::new(SubscriptionSettings {
+            max_delivery_count: Some(4),
+            ..Default::default()
+        });
+        let rule = RuleSpec {
+            name: "eu".into(),
+            filter: RuleFilter::Sql {
+                expression: "region = 'eu'".into(),
+            },
+            action: Some("SET seen = 1".into()),
+        };
+        let m = server
+            .mock("PUT", "/events/Subscriptions/billing")
+            .match_query(Matcher::Any)
+            .match_header("if-match", Matcher::Missing)
+            .match_body(subscription_entry_with_rule(&d, Some(&rule)).as_str())
+            .with_status(201)
+            .create_async()
+            .await;
+        let c = client(&server);
+        c.create_subscription_with_rule("events", "billing", &d, Some(&rule))
+            .await
+            .unwrap();
+        m.assert_async().await;
+        let body = subscription_entry_with_rule(&d, Some(&rule));
+        assert!(body.contains("<DefaultRuleDescription><Filter i:type=\"SqlFilter\">"));
+        assert!(body.contains("<Name>eu</Name></DefaultRuleDescription>"));
+        let empty = RuleSpec {
+            name: "c".into(),
+            filter: RuleFilter::Correlation {
+                correlation_id: None,
+                message_id: None,
+                to: None,
+                reply_to: None,
+                subject: None,
+                session_id: None,
+                reply_to_session_id: None,
+                content_type: None,
+                properties: vec![],
+            },
+            action: None,
+        };
+        assert!(
+            matches!(
+                c.create_subscription_with_rule("events", "other", &d, Some(&empty))
+                    .await,
+                Err(Error::Invalid(_))
+            ),
+            "refused before any request"
+        );
+    }
+
+    #[tokio::test]
+    async fn rule_create_puts_rule_description() {
+        let mut server = mockito::Server::new_async().await;
+        let d = Description::new(RuleSpec {
+            name: "eu".into(),
+            filter: RuleFilter::Sql {
+                expression: "region = 'eu'".into(),
+            },
+            action: None,
+        });
+        let m = server
+            .mock("PUT", "/events/Subscriptions/billing/Rules/eu")
+            .match_query(Matcher::Any)
+            .match_header("content-type", ATOM_ENTRY)
+            .match_header("if-match", Matcher::Missing)
+            .match_body(rule_entry(&d).as_str())
+            .with_status(201)
+            .create_async()
+            .await;
+        let c = client(&server);
+        c.create_rule("events", "billing", &d).await.unwrap();
+        m.assert_async().await;
+        let _r = server
+            .mock("GET", "/events/Subscriptions/billing/Rules/priority")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(include_str!("../../tests/fixtures/rule_entry.xml"))
+            .create_async()
+            .await;
+        let r = c.get_rule("events", "billing", "priority").await.unwrap();
+        assert_eq!(r.settings.action.as_deref(), Some("SET tier = 3"));
+        let del = server
+            .mock("DELETE", "/events/Subscriptions/billing/Rules/%24Default")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .create_async()
+            .await;
+        c.delete_rule("events", "billing", "$Default")
+            .await
+            .unwrap();
+        del.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn forwarding_sends_supplementary_authorization() {
+        let mut server = mockito::Server::new_async().await;
+        let d = Description::new(QueueSettings {
+            forward_to: Some("archive".into()),
+            forward_dead_lettered_messages_to: Some("dlq-sink".into()),
+            ..Default::default()
+        });
+        let m = server
+            .mock("PUT", "/orders")
+            .match_query(Matcher::Any)
+            .match_header(
+                "servicebussupplementaryauthorization",
+                Matcher::Regex("^SharedAccessSignature ".into()),
+            )
+            .match_header(
+                "servicebusdlqsupplementaryauthorization",
+                Matcher::Regex("^SharedAccessSignature ".into()),
+            )
+            .with_status(201)
+            .create_async()
+            .await;
+        client(&server).create_queue("orders", &d).await.unwrap();
+        m.assert_async().await;
     }
 
     #[tokio::test]
