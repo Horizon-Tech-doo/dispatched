@@ -3,6 +3,7 @@ mod commands;
 mod error;
 mod events;
 mod jobs;
+mod manage_commands;
 mod ops;
 mod safety;
 mod state;
@@ -106,6 +107,11 @@ pub fn run() {
             commands::export_start,
             commands::job_cancel,
             commands::confirm_answer,
+            manage_commands::entity_settings,
+            manage_commands::entity_policies,
+            manage_commands::check_settings,
+            manage_commands::check_rule,
+            manage_commands::copy_policy_secret,
             commands::op_send,
             commands::op_import,
             commands::op_cancel_scheduled,
