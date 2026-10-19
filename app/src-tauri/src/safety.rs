@@ -123,6 +123,7 @@ impl Confirms {
     }
 
     /// How many questions wait.
+    #[cfg(test)]
     pub fn waiting(&self) -> usize {
         self.pending.lock().unwrap().len()
     }

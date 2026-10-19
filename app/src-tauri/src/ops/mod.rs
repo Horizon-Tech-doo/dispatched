@@ -8,6 +8,8 @@ pub mod dashboard;
 pub mod discovery;
 pub mod entity;
 pub mod export;
+pub mod operate;
+pub mod operate_types;
 pub mod profiles;
 pub mod settings;
 pub mod tree;
