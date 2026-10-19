@@ -574,7 +574,7 @@ async fn m3a_manage() {
             });
         }
     }
-    let xml = export_entities("sbemulatorns", &entities, false);
+    let xml = export_entities("sbemulatorns", &entities, false).unwrap();
     assert!(
         xml.starts_with("<Entities xmlns=\"http://schemas.microsoft.com/servicebusexplorer\""),
         "9 root: {xml}"

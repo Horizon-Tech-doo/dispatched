@@ -397,7 +397,34 @@ fn write_rule(o: &mut Out, r: &RuleSpec) {
 
 /// The incumbent's `Entities` document for `entities` of namespace `ns_name`. Keys are
 /// written only with `include_keys` (the file then holds secrets).
-pub fn export_entities(ns_name: &str, entities: &[ExportEntity], include_keys: bool) -> String {
+pub fn export_entities(
+    ns_name: &str,
+    entities: &[ExportEntity],
+    include_keys: bool,
+) -> Result<String> {
+    // A filter this reader could not read would be written as `<Filter />`, which reads
+    // back as match-all: refuse the export rather than invert a rule.
+    for e in entities {
+        if let ExportEntity::Topic {
+            name,
+            subscriptions,
+            ..
+        } = e
+        {
+            for sub in subscriptions {
+                if let Some(r) = sub
+                    .rules
+                    .iter()
+                    .find(|r| matches!(r.filter, RuleFilter::Unknown))
+                {
+                    return Err(Error::Invalid(format!(
+                        "rule {} of {name}/subscriptions/{} has a filter Dispatched cannot read, so it cannot be exported faithfully; leave that subscription out",
+                        r.name, sub.name
+                    )));
+                }
+            }
+        }
+    }
     let mut o = Out {
         s: String::new(),
         depth: 0,
@@ -529,7 +556,7 @@ pub fn export_entities(ns_name: &str, entities: &[ExportEntity], include_keys: b
     }
     o.depth -= 1;
     o.line("</Entities>");
-    o.s
+    Ok(o.s)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1069,7 +1096,7 @@ mod tests {
 
     #[test]
     fn export_matches_the_incumbent_shape() {
-        let xml = export_entities("contoso-dev", &sample(), true);
+        let xml = export_entities("contoso-dev", &sample(), true).unwrap();
         assert!(xml.starts_with(
             "<Entities xmlns=\"http://schemas.microsoft.com/servicebusexplorer\" serviceBusNamespace=\"contoso-dev\">"
         ), "{xml}");
@@ -1110,14 +1137,14 @@ mod tests {
 
     #[test]
     fn export_omits_keys_unless_asked() {
-        let xml = export_entities("ns", &sample(), false);
+        let xml = export_entities("ns", &sample(), false).unwrap();
         assert!(xml.contains("<KeyName>app</KeyName>"));
         assert!(
             !xml.contains("PRIMARY-1") && !xml.contains("SECONDARY-2"),
             "{xml}"
         );
         assert!(!xml.contains("<PrimaryKey>"));
-        let with = export_entities("ns", &sample(), true);
+        let with = export_entities("ns", &sample(), true).unwrap();
         assert!(with.contains("<SecondaryKey>SECONDARY-2</SecondaryKey>"));
     }
 
@@ -1251,7 +1278,7 @@ mod tests {
         if let ExportEntity::Queue { d, .. } = &mut entities[0] {
             d.settings.forward_to = Some("archive".into());
         }
-        let xml = export_entities("ns", &entities, true);
+        let xml = export_entities("ns", &entities, true).unwrap();
         let items = parse_entities(&xml).unwrap();
         let ExportEntity::Queue { d: q, .. } = &entities[0] else {
             panic!()
@@ -1282,5 +1309,21 @@ mod tests {
         assert_eq!(t2.settings, t.settings);
         assert_eq!(s2.settings, subscriptions[0].d.settings);
         assert_eq!(rules, &subscriptions[0].rules);
+    }
+
+    #[test]
+    fn an_unreadable_filter_is_refused_not_exported_as_match_all() {
+        let mut entities = sample();
+        if let ExportEntity::Topic { subscriptions, .. } = &mut entities[1] {
+            subscriptions[0].rules.push(RuleSpec {
+                name: "odd".into(),
+                filter: RuleFilter::Unknown,
+                action: None,
+            });
+        } else {
+            panic!("sample()[1] is a topic");
+        }
+        let e = export_entities("ns", &entities, false).unwrap_err();
+        assert!(e.to_string().contains("odd"), "{e}");
     }
 }

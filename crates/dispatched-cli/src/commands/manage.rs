@@ -977,7 +977,7 @@ async fn export(
     let ns = namespace_name(ex.namespace().host()).to_string();
     ex.close().await;
     let entities = result?;
-    let xml = export_entities(&ns, &entities, a.include_keys);
+    let xml = export_entities(&ns, &entities, a.include_keys)?;
     if a.include_keys {
         eprintln!("{KEYS_WARNING}");
     }
@@ -995,15 +995,14 @@ async fn export(
         return Ok(());
     }
     let path = Path::new(&a.out);
-    let mut file = dispatched_core::FileExport::create(path, ExportFormat::Json, a.force)?;
+    // With keys, the file is owner-only from its first byte (the temp file included).
+    let mut file = if a.include_keys {
+        dispatched_core::FileExport::create_private(path, ExportFormat::Json, a.force)?
+    } else {
+        dispatched_core::FileExport::create(path, ExportFormat::Json, a.force)?
+    };
     file.write_raw(xml.as_bytes())?;
     file.finish()?;
-    #[cfg(unix)]
-    if a.include_keys && !dispatched_core::export::is_special(path) {
-        // Best effort: only the owner reads a file that holds keys.
-        use std::os::unix::fs::PermissionsExt as _;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
     let line = format!(
         "Exported {count} {} to {}",
         if count == 1 { "entity" } else { "entities" },
