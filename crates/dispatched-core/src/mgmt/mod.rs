@@ -1,13 +1,24 @@
 //! Service Bus management API (ATOM over HTTPS; plain HTTP on the emulator).
 
+pub mod atom_write;
 mod details;
+pub mod model;
 mod models;
 mod rules;
 pub(crate) mod xml;
 
+pub use atom_write::{
+    queue_entry, rule_entry, subscription_entry, subscription_entry_with_rule, topic_entry,
+};
 pub use details::{EntityDetails, EntityKind, EntityProperty};
+pub use model::{
+    AccessPolicy, AccessRight, Description, EntityStatus, QueueSettings, RuleSpec,
+    SubscriptionSettings, TimeSpan, TopicSettings, iso_duration, parse_iso_duration, parse_queue,
+    parse_rule, parse_subscription, parse_topic, validate_filter,
+};
 pub use models::{EntityCounts, QueueInfo, SubscriptionInfo, TopicInfo};
 pub use rules::{CorrelationProperty, RuleFilter, RuleInfo};
+pub use xml::Node;
 
 use crate::namespace::Namespace;
 use crate::tokens::TokenSource;
@@ -17,7 +28,6 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
-use xml::Node;
 
 const API_VERSION: &str = "2024-05";
 const PAGE_SIZE: usize = 100;
@@ -721,9 +731,8 @@ mod tests {
         assert_eq!(rules.len(), 3);
         assert_eq!(
             rules[0].filter,
-            RuleFilter::Sql {
-                expression: "1=1".into()
-            }
+            RuleFilter::True,
+            "the TrueFilter of $Default"
         );
         assert_eq!(rules[0].action, None);
         assert_eq!(rules[0].created_at.as_deref(), Some("2026-09-01T08:00:00Z"));
