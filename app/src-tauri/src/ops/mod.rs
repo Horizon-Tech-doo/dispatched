@@ -9,6 +9,8 @@ pub mod dashboard;
 pub mod discovery;
 #[cfg(test)]
 mod emulator_m2b;
+#[cfg(test)]
+mod emulator_m3b;
 pub mod entity;
 pub mod export;
 pub mod listen;
