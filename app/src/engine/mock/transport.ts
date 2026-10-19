@@ -8,6 +8,7 @@ import type {
 import { setUpdater } from "../updater";
 import * as fx from "./fixtures";
 import { accepts, summarize, textOf, without, type MockMessage } from "./messages";
+import { createOperateMock, UNHANDLED } from "./operate";
 
 export type Scenario =
   | "default" | "empty" | "forbidden" | "missing-secret" | "network" | "sign-in-expired" | "many" | "many-topics"
@@ -32,7 +33,11 @@ export type Scenario =
   | "message-gone"
   // The queues' counts as the service can give them: counted by peeking (`~N`), counted by peeking up to the cap
   // (`~N+`), or not reported at all (`?`); and a stored connection string that is scoped to another entity.
-  | "counts-approx" | "counts-capped" | "counts-unknown" | "copy-scoped";
+  | "counts-approx" | "counts-capped" | "counts-unknown" | "copy-scoped"
+  // Operations (M2b): confirmations off production (`operate-ok`), on production with typed names (`operate-prod`; a move
+  // asks for its source, then its target), one failed message (`operate-partial`), the connection closing after the
+  // first message (`operate-stopped`).
+  | "operate-ok" | "operate-prod" | "operate-partial" | "operate-stopped";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -266,6 +271,36 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
             : fx.queues;
   const listedTopics = (): TopicInfo[] => (scenario === "many-topics" ? fx.manyTopics : fx.topics);
 
+  /** Messages operations took away (`entity|sequence`); the fixtures themselves are shared and never change. */
+  const removed = new Set<string>();
+  const present = (entity: string) => fx.messagesOf(entity, scenario).filter((m) => !removed.has(`${entity}|${m.sequence_number}`));
+  const operate = createOperateMock({
+    scenario,
+    tick: delayMs ? 90 : 0,
+    emit: (event, payload) => emit(event, payload),
+    connectedTo: (profileId) => connectedTo(profileId),
+    messagesOf: present,
+    remove: (entity, sequences) => sequences.forEach((n) => removed.add(`${entity}|${n}`)),
+    matches: (m, f) => matches(m, f),
+    kindOf: (entity) =>
+      listedQueues().some((q) => q.name === entity)
+        ? "queue"
+        : listedTopics().some((t) => t.name === entity)
+          ? "topic"
+          : (() => {
+              const [topic, sub] = entity.split("/subscriptions/");
+              return sub !== undefined && fx.subscriptions[topic]?.some((x) => x.name === sub) ? "subscription" : null;
+            })(),
+    countsOf: (entity) => {
+      const [topic, sub] = entity.split("/subscriptions/");
+      const c = sub === undefined ? listedQueues().find((q) => q.name === entity)?.counts : fx.subscriptions[topic]?.find((x) => x.name === sub)?.counts;
+      if (!c) return null;
+      // What is still there after operations took messages away.
+      const gone = (k: MockMessage["sub"]) => fx.messagesOf(entity, scenario).filter((m) => m.sub === k && removed.has(`${entity}|${m.sequence_number}`)).length;
+      return { active: Math.max(0, c.active - gone("main")), dead_letter: Math.max(0, c.dead_letter - gone("dlq")), transfer_dead_letter: Math.max(0, c.transfer_dead_letter - gone("tdlq")) };
+    },
+  });
+
   /** Export jobs: running ones (with their cancel), the files finished ones wrote, and the save dialog's picks. */
   interface Job { timer?: ReturnType<typeof setTimeout>; cancelling: boolean; finish: (error: ActivityError | null) => void }
   const running = new Map<string, Job>();
@@ -286,7 +321,10 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
     return true;
   };
   /** Closing the connection (disconnect, another connect, signing out its sign-in) stops its exports. */
-  const cancelRunning = () => [...running.keys()].forEach((id) => cancelJob(id, true));
+  const cancelRunning = () => {
+    [...running.keys()].forEach((id) => cancelJob(id, true));
+    operate.closeAll();
+  };
   /** The prompt of the sign-in that is waiting, for "Open sign-in page". */
   let lastPrompt: { url: string } | null = null;
 
@@ -528,7 +566,7 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
         return quietly(`Peeking ${entity} failed`, started, () => {
           if (scenario === "peek-error")
             throw new EngineError("forbidden", "access denied (needs Listen): Unauthorized access. 'Listen' claim(s) are required to perform this operation.");
-          const all = fx.messagesOf(entity, scenario).filter((m) => m.sub === subOf(r.view));
+          const all = present(entity).filter((m) => m.sub === subOf(r.view));
           if (tail) {
             // The newest first, back towards the oldest; the budget may run out inside the newest window.
             const out: MockMessage[] = [];
@@ -559,7 +597,7 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
         return quietly(`Reading message ${args.sequence} of ${entity} failed`, started, () => {
           // As Rust: read through the row's session when given, so another session's message is not there.
           const session = (args.sessionId as string | null | undefined) ?? null;
-          const m = fx.messagesOf(entity, scenario).find(
+          const m = present(entity).find(
             (x) => x.sequence_number === args.sequence && accepts(args.view as PeekView, x) && (session === null || x.session_id === session),
           );
           if (!m || scenario === "message-gone") return null;
@@ -734,7 +772,7 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
           total = max != null && hint != null ? Math.min(max, hint) : (max ?? hint);
         }
         const id = `job-${Math.random().toString(36).slice(2, 10)}`;
-        job({ type: "started", id, title, total, file_name: name });
+        job({ type: "started", id, kind: "export", title, total, file_name: name });
         let written = 0;
         const entry: Job = {
           cancelling: false,
@@ -746,13 +784,13 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
               // As `tracked`: a cancel (or a stop because the connection closed) is logged as its message without an error.
               const stop = error.kind === "cancelled" || error.kind === "stopped";
               activity(stop ? error.message.replace(/\.$/, "") : `${title} to ${name} failed`, started, stop ? null : e);
-              job({ type: "finished", id, error, summary: null, output: null, written: null, missing: null, file_name: null });
+              job({ type: "finished", id, error, report: null, summary: null, output: null, written: null, missing: null, file_name: null });
               return;
             }
             const summary = `Exported ${thousands(written)} ${written === 1 ? "message" : "messages"} to ${name}${note}`;
             outputs.set(id, path);
             activity(summary, started);
-            job({ type: "finished", id, error: null, summary, output: path, written, missing: missingCount, file_name: name });
+            job({ type: "finished", id, error: null, report: null, summary, output: path, written, missing: missingCount, file_name: name });
           },
         };
         // A page at a time (selected messages in one write); `export-slow` writes one message a tick and never ends.
@@ -774,7 +812,7 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
         return { id } satisfies JobStarted;
       }
       case "job_cancel":
-        return cancelJob(args.id as string);
+        return cancelJob(args.id as string) || operate.cancel(args.id as string);
       case "job_reveal":
         if (!outputs.has(args.id as string)) throw new EngineError("not_found", "That export has no file to show.");
         return null;
@@ -874,13 +912,18 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
         if (!lastPrompt) throw new EngineError("not_found", "No sign-in is waiting.");
         if (!lastPrompt.url.startsWith("https://")) throw new EngineError("invalid", "The sign-in page is not an https address, so it was not opened.");
         return null;
-      default:
-        throw new EngineError("unknown", `mock: unknown command ${cmd}`);
+      default: {
+        const r = operate.handle(cmd, args);
+        if (r === UNHANDLED) throw new EngineError("unknown", `mock: unknown command ${cmd}`);
+        return r;
+      }
     }
   }
 
-  const transport: IpcTransport & { calls: typeof calls } = {
+  const transport: IpcTransport & { calls: typeof calls; external: typeof operate.external } = {
     calls,
+    /** A change made by the CLI or an agent, written to the shared activity log. */
+    external: operate.external,
     async invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       calls.push(args === undefined ? { cmd } : { cmd, args });
       return (await handle(cmd, args)) as T;

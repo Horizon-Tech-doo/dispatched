@@ -1,6 +1,8 @@
 import { localOffsetMinutes } from "./exportName";
 import { call } from "./ipc";
 import type {
+  ActivityQuery, ActivityRecord, ConfirmAnswer, DlqSummaryView, ImportForm, OpenedFiles, OpenPurpose, PurgePlans, PurgeScope, ReceiveForm,
+  ReportPage, ResubmitForm, SelectForm, SendForm, SessionStateView, Settlement, SubQueue,
   AccountView, AppInfo, ConnectionReport, ConnectionView, DashboardView, DiscoveryView, EntityDetails, EntityKindName, EntityListing, ExportFormat,
   ExportRequest, FilterIssue, FilterSpec, JobStarted, MessageDetail, PeekPageView, PeekRequest, PeekView, PickedPath, Profile, ProfileDraft, RuleInfo,
   SessionListing, SignedOut, SignInView, StoredSignIn, SubscriptionInfo, TenantView,
@@ -66,3 +68,47 @@ export const signInsList = () => call<StoredSignIn[]>("sign_ins_list");
 export const signOut = (id: string) => call<SignedOut>("sign_out", { id });
 /** Opens the waiting sign-in's https page again; `not_found` when no sign-in is waiting. */
 export const openSignInPage = () => call<void>("open_sign_in_page");
+
+// ---- M2b operate: each `op*` returns the job id at once; confirmations, items and the finish arrive as events ----
+
+export const opSend = (profileId: string, form: SendForm) => call<JobStarted>("op_send", { profileId, form });
+export const opImport = (profileId: string, form: ImportForm) => call<JobStarted>("op_import", { profileId, form });
+/** Sequence numbers as strings (they can exceed 2^53). */
+export const opCancelScheduled = (profileId: string, entity: string, sequences: string[]) =>
+  call<JobStarted>("op_cancel_scheduled", { profileId, entity, sequences });
+export const opReceive = (profileId: string, form: ReceiveForm) => call<JobStarted>("op_receive", { profileId, form });
+export const opSettleDeferred = (profileId: string, entity: string, subQueue: SubQueue, sequences: string[], session: string | null, how: Settlement) =>
+  call<JobStarted>("op_settle_deferred", { profileId, entity, subQueue, sequences, session, how });
+export const opDelete = (profileId: string, form: SelectForm) => call<JobStarted>("op_delete", { profileId, form });
+export const opMove = (profileId: string, form: SelectForm, target: string, dropUncopyable: boolean) =>
+  call<JobStarted>("op_move", { profileId, form, target, dropUncopyable });
+export const opResubmit = (profileId: string, form: ResubmitForm) => call<JobStarted>("op_resubmit", { profileId, form });
+/** Counts what a purge would remove (nothing changes). The plans run once, within 10 minutes, through `opPurge`. */
+export const purgePlan = (profileId: string, entities: string[], scope: PurgeScope) => call<PurgePlans>("purge_plan", { profileId, entities, scope });
+export const opPurge = (profileId: string, planId: string) => call<JobStarted>("op_purge", { profileId, planId });
+export const dlqSummary = (profileId: string, entity: string, subQueue: SubQueue) => call<DlqSummaryView>("dlq_summary", { profileId, entity, subQueue });
+/** `null` when the session has no state. */
+export const sessionStateGet = (profileId: string, entity: string, session: string) =>
+  call<SessionStateView | null>("session_state_get", { profileId, entity, session });
+/** `value` is base64, or null to clear it. Over 256 KiB needs `allowLarge`. */
+export const opSessionStateSet = (profileId: string, entity: string, session: string, value: string | null, allowLarge: boolean) =>
+  call<JobStarted>("op_session_state_set", { profileId, entity, session, value, allowLarge });
+/** What a pinned or `EntityPath` entity is, or null when the namespace does not say. */
+export const resolveKind = (profileId: string, entity: string) => call<EntityKindName | null>("resolve_kind", { profileId, entity });
+/** The native open dialog; `null` when cancelled. The paths stay in the engine under `pick`. */
+export const pickOpenPaths = (purpose: OpenPurpose) => call<OpenedFiles | null>("pick_open_paths", { purpose });
+/** A page of a finished job's items (`limit` at most 1,000); null when the job has no report. */
+export const jobReport = (id: string, offset: number, limit: number, onlyProblems: boolean) =>
+  call<ReportPage | null>("job_report", { id, offset, limit, onlyProblems });
+export const pickReportPath = (id: string, format: ExportFormat) => call<PickedPath | null>("pick_report_path", { id, format });
+/** Writes the report; returns the path written. */
+export const jobReportSave = (id: string, pick: string, format: ExportFormat) => call<string>("job_report_save", { id, pick, format });
+/** False when the confirmation no longer waits. */
+export const confirmAnswer = (id: string, answer: ConfirmAnswer) => call<boolean>("confirm_answer", { id, answer });
+/** The shared activity log, newest first. */
+export const activityList = (query: ActivityQuery) => call<ActivityRecord[]>("activity_list", { query });
+/** Entries after row `afterId`, oldest first; `null` returns just the newest entry, to follow from it. */
+export const activitySince = (afterId: number | null) => call<ActivityRecord[]>("activity_since", { afterId });
+export const pickActivityExportPath = (format: ExportFormat) => call<PickedPath | null>("pick_activity_export_path", { format });
+/** Writes the matching entries; returns how many. */
+export const activityExport = (query: ActivityQuery, pick: string, format: ExportFormat) => call<number>("activity_export", { query, pick, format });
