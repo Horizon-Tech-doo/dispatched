@@ -4,6 +4,7 @@ mod error;
 mod events;
 mod jobs;
 mod ops;
+mod safety;
 mod state;
 
 /// The macOS menu bar. Tauri's default one has File > Close Window on Cmd+W, which would close the
@@ -104,6 +105,7 @@ pub fn run() {
             commands::pick_export_path,
             commands::export_start,
             commands::job_cancel,
+            commands::confirm_answer,
             commands::job_reveal,
         ])
         .build(tauri::generate_context!())

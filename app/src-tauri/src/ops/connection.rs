@@ -47,6 +47,8 @@ pub async fn connect(
             let explorer = Arc::new(Explorer::new(ns)?);
             let previous = state.active.write().await.replace(Active {
                 profile_id: p.id.clone(),
+                profile_name: p.name.clone(),
+                production: p.production,
                 explorer,
             });
             if let Some(old) = previous {

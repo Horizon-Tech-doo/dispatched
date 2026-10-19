@@ -10,6 +10,10 @@ use std::time::Instant;
 pub const ACTIVITY: &str = "activity";
 pub const JOB: &str = "job";
 pub const SIGN_IN_PROMPT: &str = "sign-in-prompt";
+/// A mutating operation asks to be confirmed ([`crate::safety::ConfirmEvent`]).
+pub const CONFIRM: &str = "confirm";
+/// An entry written to the shared activity log (core `ActivityEntry`, with its row id).
+pub const ACTIVITY_RECORD: &str = "activity-record";
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ActivityError {
@@ -74,6 +78,8 @@ pub trait Events: Send + Sync {
     fn activity(&self, e: ActivityEntry);
     fn job(&self, e: JobEvent);
     fn sign_in_prompt(&self, p: SignInPrompt);
+    fn confirm(&self, e: crate::safety::ConfirmEvent);
+    fn activity_record(&self, e: dispatched_core::activity::ActivityEntry);
 }
 
 /// Emits to every window.
@@ -92,6 +98,14 @@ impl Events for TauriEvents {
         use tauri::Emitter as _;
         let _ = self.0.emit(SIGN_IN_PROMPT, p);
     }
+    fn confirm(&self, e: crate::safety::ConfirmEvent) {
+        use tauri::Emitter as _;
+        let _ = self.0.emit(CONFIRM, e);
+    }
+    fn activity_record(&self, e: dispatched_core::activity::ActivityEntry) {
+        use tauri::Emitter as _;
+        let _ = self.0.emit(ACTIVITY_RECORD, e);
+    }
 }
 
 /// Collects events (tests).
@@ -101,6 +115,8 @@ pub struct Recorder {
     pub activity: std::sync::Mutex<Vec<ActivityEntry>>,
     pub jobs: std::sync::Mutex<Vec<JobEvent>>,
     pub prompts: std::sync::Mutex<Vec<SignInPrompt>>,
+    pub confirms: std::sync::Mutex<Vec<crate::safety::ConfirmEvent>>,
+    pub records: std::sync::Mutex<Vec<dispatched_core::activity::ActivityEntry>>,
 }
 
 #[cfg(test)]
@@ -113,6 +129,12 @@ impl Events for Recorder {
     }
     fn sign_in_prompt(&self, p: SignInPrompt) {
         self.prompts.lock().unwrap().push(p);
+    }
+    fn confirm(&self, e: crate::safety::ConfirmEvent) {
+        self.confirms.lock().unwrap().push(e);
+    }
+    fn activity_record(&self, e: dispatched_core::activity::ActivityEntry) {
+        self.records.lock().unwrap().push(e);
     }
 }
 

@@ -24,6 +24,9 @@ pub struct Jobs {
     /// Exports write only to these: the webview names a pick, never a path, and the dialog has
     /// asked "replace?" for each. At most one is unspent, and only for [`PICK_TTL`].
     picks: Mutex<HashMap<String, (PathBuf, Instant)>>,
+    /// Confirmations the jobs wait for: cancelling a job, or closing its connection, answers
+    /// them "no".
+    confirms: std::sync::Arc<crate::safety::Confirms>,
 }
 
 impl Jobs {
@@ -58,6 +61,11 @@ impl Jobs {
             .insert(id.to_string(), (path, Instant::now()));
     }
 
+    /// The confirmations the jobs wait for.
+    pub fn confirms(&self) -> std::sync::Arc<crate::safety::Confirms> {
+        self.confirms.clone()
+    }
+
     /// A new job id and its cancel token.
     pub fn start(&self) -> (String, CancellationToken) {
         let id = format!("job-{}", uuid::Uuid::new_v4().simple());
@@ -75,6 +83,7 @@ impl Jobs {
 
     /// Ask a running job to stop. False when there is no such running job.
     pub fn cancel(&self, id: &str) -> bool {
+        self.confirms.cancel_job(id);
         match self
             .inner
             .lock()
@@ -102,6 +111,7 @@ impl Jobs {
     }
 
     fn stop_running(&self, by_close: bool) -> usize {
+        self.confirms.cancel_all();
         let mut inner = self.inner.lock().unwrap();
         let mut n = 0;
         for e in inner.values_mut() {

@@ -347,6 +347,16 @@ pub fn job_cancel(state: State<'_, AppState>, id: String) -> bool {
     state.jobs.cancel(&id)
 }
 
+/// Answer a confirmation a job asked for (`confirm` event). False when it no longer waits.
+#[tauri::command]
+pub fn confirm_answer(
+    state: State<'_, AppState>,
+    id: String,
+    answer: crate::safety::ConfirmAnswer,
+) -> bool {
+    state.jobs.confirms().answer(&id, answer)
+}
+
 /// Show a finished export's file in the file manager (runs a short-lived process).
 #[tauri::command]
 pub async fn job_reveal(state: State<'_, AppState>, id: String) -> Result<(), CommandError> {

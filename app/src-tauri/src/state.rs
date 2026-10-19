@@ -12,6 +12,10 @@ use tokio::sync::{Mutex, Notify, RwLock};
 #[derive(Clone)]
 pub struct Active {
     pub profile_id: String,
+    /// Shown in confirmations and written to the activity log.
+    pub profile_name: String,
+    /// The profile is marked production: confirmations need the entity name typed.
+    pub production: bool,
     pub explorer: Arc<Explorer>,
 }
 
@@ -20,6 +24,8 @@ impl std::fmt::Debug for Active {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Active")
             .field("profile_id", &self.profile_id)
+            .field("profile_name", &self.profile_name)
+            .field("production", &self.production)
             .finish_non_exhaustive()
     }
 }
@@ -39,6 +45,9 @@ pub struct AppState {
     pub startup_error: Option<String>,
     /// Running and finished jobs (exports).
     pub jobs: Arc<crate::jobs::Jobs>,
+    /// The shared activity log (`activity.db`, also written by the CLI). `None` when it could not
+    /// be opened: then nothing that changes messages runs, since every change is logged first.
+    pub activity: Option<Arc<dispatched_core::activity::ActivityLog>>,
     /// The URL of the sign-in prompt shown last, while a sign-in waits for it.
     /// Shared, so a finishing sign-in can tell its own URL from a newer one's (`ops::account::PromptUrl`).
     pub last_prompt_url: std::sync::Mutex<Option<Arc<str>>>,
@@ -60,6 +69,9 @@ impl AppState {
             sign_in_cancel: Notify::new(),
             startup_error: None,
             jobs: Arc::default(),
+            activity: dispatched_core::activity::ActivityLog::open_in_memory()
+                .ok()
+                .map(Arc::new),
             last_prompt_url: std::sync::Mutex::new(None),
         }
     }
@@ -69,7 +81,7 @@ impl AppState {
     /// the UI shows `startup_error`.
     pub fn open() -> Self {
         let secrets: Arc<dyn CredentialStore> = Arc::new(OsKeychain::new(KEYCHAIN_SERVICE));
-        match dispatched_core::paths::open_store() {
+        let mut s = match dispatched_core::paths::open_store() {
             Ok(store) => Self::new(store, secrets),
             Err(e) => {
                 let mut s = Self::new(
@@ -81,7 +93,21 @@ impl AppState {
                 ));
                 s
             }
-        }
+        };
+        s.activity = match dispatched_core::paths::open_activity_log() {
+            Ok(log) => Some(Arc::new(log)),
+            Err(e) => {
+                let note = format!(
+                    "The activity log could not be opened ({e}), so nothing that changes messages can run."
+                );
+                s.startup_error = Some(match s.startup_error.take() {
+                    Some(first) => format!("{first} {note}"),
+                    None => note,
+                });
+                None
+            }
+        };
+        s
     }
 
     /// Close a connection that was taken out of `active`. Running jobs read through it, so they
