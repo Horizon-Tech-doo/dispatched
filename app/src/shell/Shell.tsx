@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Panel, PanelGroup, ResizeHandle, type ImperativePanelHandle } from "@/ui";
 import { useShell } from "./context";
 import { JobAnnouncer } from "./drawer/JobAnnouncer";
+import { JobRefresh } from "./operate/JobRefresh";
 import { Hotkeys } from "./Hotkeys";
 import { CommandPalette } from "./palette/CommandPalette";
 import { SheetHost } from "./sheets/SheetHost";
@@ -92,6 +93,7 @@ export function Shell({ tree, workspace, drawer }: { tree?: ReactNode; workspace
       </div>
       <StatusBar />
       <JobAnnouncer />
+      <JobRefresh />
       <SheetHost />
       <Hotkeys />
       <CommandPalette />

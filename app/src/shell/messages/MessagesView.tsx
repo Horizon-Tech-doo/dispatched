@@ -1,9 +1,9 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { Download, SendHorizontal } from "lucide-react";
-import { useId, useMemo, useRef, useState } from "react";
+import { ArrowRightToLine, CalendarX, CheckCheck, ChevronDown, Download, Inbox, ListTree, Repeat2, SendHorizontal, Trash2 } from "lucide-react";
+import { useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { TAIL_MAX, normalizeFilter, usePeekStream, type EntityCounts, type FilterSpec, type MessageSummary, type PeekView } from "@/engine";
 import {
-  Button, DataGrid, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, EmptyState, Panel, PanelGroup, Problem, ResizeHandle, formatNumber, rowHeight,
+  Button, DataGrid, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, EmptyState, Panel, PanelGroup, Problem, ResizeHandle, cn, formatNumber, rowHeight,
 } from "@/ui";
 import { yearOf } from "../time";
 import { useShell } from "../context";
@@ -11,6 +11,7 @@ import type { EntityTab } from "../state";
 import { VIEW_LABEL } from "../tabs/subtabs";
 import { buildColumns, optionalColumns, propColumn, useColumnPrefs } from "./columns";
 import { DetailPane } from "./DetailPane";
+import { DlqSummary, reasonFilter } from "./DlqSummary";
 import { FilterBar } from "./FilterBar";
 import { useAuthKind } from "../access";
 import { describePeekError } from "./peekError";
@@ -165,6 +166,7 @@ export function MessagesView({
 
   // Export: the whole view (with its filter and session), the selected rows, or one message from the detail pane.
   // The sheet gets what the view holds now; the engine reads the messages again when the export runs.
+  const [summaryOpen, setSummaryOpen] = useState(false);
   const exportSheet = (selected: number[]) =>
     openSheet({ kind: "export", entity: tab.id, view, filter: vs.filter, selected, total: counts && listedView ? listedView.count(counts) : null });
   const selectedSequences = () => [...sel.ids].map(Number).sort((a, b) => a - b);
@@ -185,20 +187,74 @@ export function MessagesView({
     </DropdownMenu>
   );
 
-  // Operations on this view's messages. Sending puts new messages on the entity (a subscription's topic).
-  const sends = view === "active" || view === "scheduled";
-  const operations = (compact: boolean) => (
-    <>
-      {sends && (
-        <CompactHint compact={compact} label="Send">
-          <Button variant="quiet" disabled={!profileId} aria-label={compact ? "Send" : undefined} onClick={() => openSheet({ kind: "operation", op: "send", entity: tab.id })}>
-            <SendHorizontal aria-hidden="true" className="text-icon" />
-            <CompactLabel compact={compact}>Send</CompactLabel>
-          </Button>
-        </CompactHint>
-      )}
-    </>
+  // Operations on this view's messages: the selected rows, or (none selected) every message matching the view's
+  // filter. Sending puts new messages on the entity (a subscription's topic).
+  const dlqView = view === "dead-letter" || view === "transfer-dead-letter";
+  const subQueue = view === "dead-letter" ? "dead-letter" : view === "transfer-dead-letter" ? "transfer-dead-letter" : "active";
+  const total = counts && listedView ? listedView.count(counts) : null;
+  const pick = (op: "delete" | "move" | "resubmit") => openSheet({ kind: "operation", op, entity: tab.id, view, sequences: selectedSequences(), filter: vs.filter, total });
+  const settle = (how: "complete" | "abandon" | "dead-letter") =>
+    openSheet({ kind: "operation", op: "settle-deferred", entity: tab.id, subQueue: "active", sequences: selectedSequences(), session: vs.filter.session_id ?? null, how });
+  const opButton = (compact: boolean, label: string, icon: ReactNode, run: () => void, pressed?: boolean) => (
+    <CompactHint key={label} compact={compact} label={label}>
+      <Button variant="quiet" disabled={!profileId} aria-label={compact ? label : undefined} aria-pressed={pressed} onClick={run} className={cn("shrink-0", pressed && "bg-selection")}>
+        {icon}
+        <CompactLabel compact={compact}>{label}</CompactLabel>
+      </Button>
+    </CompactHint>
   );
+  const operations = (compact: boolean) => {
+    const send = opButton(compact, "Send", <SendHorizontal aria-hidden="true" className="text-icon" />, () => openSheet({ kind: "operation", op: "send", entity: tab.id }));
+    const receive = opButton(compact, "Receive", <Inbox aria-hidden="true" className="text-icon" />, () =>
+      openSheet({ kind: "operation", op: "receive", entity: tab.id, subQueue, session: vs.filter.session_id ?? null }),
+    );
+    const resubmit = opButton(compact, "Resubmit", <Repeat2 aria-hidden="true" className="text-icon" />, () => pick("resubmit"));
+    const move = opButton(compact, "Move", <ArrowRightToLine aria-hidden="true" className="text-icon" />, () => pick("move"));
+    const del = opButton(compact, "Delete", <Trash2 aria-hidden="true" className="text-icon" />, () => pick("delete"));
+    if (view === "scheduled")
+      return (
+        <>
+          {send}
+          {opButton(compact, "Cancel scheduled", <CalendarX aria-hidden="true" className="text-icon" />, () =>
+            openSheet({ kind: "operation", op: "cancel-scheduled", entity: tab.id, sequences: selectedSequences() }),
+          )}
+        </>
+      );
+    if (view === "deferred")
+      return (
+        <>
+          <DropdownMenu>
+            <CompactHint compact={compact} label="Settle">
+              <DropdownMenuTrigger asChild>
+                <Button variant="quiet" disabled={!profileId} aria-label={compact ? "Settle" : undefined}>
+                  <CheckCheck aria-hidden="true" className="text-icon" />
+                  <CompactLabel compact={compact}>Settle</CompactLabel>
+                  <ChevronDown aria-hidden="true" className="!size-3 text-icon" />
+                </Button>
+              </DropdownMenuTrigger>
+            </CompactHint>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onSelect={() => settle("complete")}>Complete…</DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => settle("abandon")}>Abandon…</DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => settle("dead-letter")}>Dead-letter…</DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => pick("delete")}>Delete…</DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+          {resubmit}
+          {move}
+        </>
+      );
+    return (
+      <>
+        {view === "active" && send}
+        {receive}
+        {resubmit}
+        {move}
+        {del}
+        {dlqView && opButton(compact, "Summary", <ListTree aria-hidden="true" className="text-icon" />, () => setSummaryOpen(!summaryOpen), summaryOpen)}
+      </>
+    );
+  };
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -245,7 +301,20 @@ export function MessagesView({
           <Problem role="alert" title={failure.title} body={failure.body} detail={stream.error!.message} action={fixAction} />
         </div>
       )}
-      <div ref={gridBox} className="min-h-0 flex-1">
+      {dlqView && summaryOpen && (
+        <DlqSummary profileId={profileId} entity={tab.id} subQueue={subQueue} onPick={(reason) => applyFilter({ ...vs.filter, property: reasonFilter(reason) })} />
+      )}
+      <div
+        ref={gridBox}
+        className="min-h-0 flex-1"
+        onKeyDown={(e) => {
+          // The Delete key opens the delete sheet for the selected rows; it never deletes by itself.
+          if ((e.key === "Delete" || e.key === "Backspace") && sel.ids.size > 0 && (e.target as HTMLElement).closest('[role="grid"]')) {
+            e.preventDefault();
+            pick("delete");
+          }
+        }}
+      >
         <PanelGroup
           direction="horizontal"
           onLayout={(sizes) => sizes.length === 2 && dispatch({ type: "layout", patch: { detailSize: Math.round(sizes[1]) } })}

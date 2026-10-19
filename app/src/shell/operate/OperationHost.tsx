@@ -1,5 +1,10 @@
 import { ComposerSheet } from "./ComposerSheet";
+import { DeleteSheet } from "./DeleteSheet";
 import { ImportSheet } from "./ImportSheet";
+import { MoveSheet } from "./MoveSheet";
+import { ReceiveSheet } from "./ReceiveSheet";
+import { ResubmitSheet } from "./ResubmitSheet";
+import { CancelScheduledSheet, SettleDeferredSheet } from "./ScheduledSheets";
 import type { OperationSeed } from "./seed";
 
 /** Renders the sheet of one operation. */
@@ -9,6 +14,18 @@ export function OperationHost({ seed }: { seed: OperationSeed }) {
       return <ComposerSheet entity={seed.entity} clone={seed.clone} />;
     case "import":
       return <ImportSheet entity={seed.entity} />;
+    case "receive":
+      return <ReceiveSheet entity={seed.entity} subQueue={seed.subQueue} session={seed.session} />;
+    case "delete":
+      return <DeleteSheet {...seed} />;
+    case "move":
+      return <MoveSheet {...seed} />;
+    case "resubmit":
+      return <ResubmitSheet {...seed} />;
+    case "cancel-scheduled":
+      return <CancelScheduledSheet entity={seed.entity} sequences={seed.sequences} />;
+    case "settle-deferred":
+      return <SettleDeferredSheet {...seed} />;
     default:
       return null;
   }

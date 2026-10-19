@@ -109,6 +109,8 @@ export interface Job {
   report: ReportSummary | null;
   /** The confirmation the job waits for, if any. */
   confirm: ConfirmRequest | null;
+  /** Entities its items were in (a purge of several entities names each). */
+  entities: string[];
   /** The job has begun its work (a progress, item, note or received event): every confirmation it needed was given. */
   progressed: boolean;
 }
@@ -129,7 +131,7 @@ export function createJobStore() {
         const job: Job = {
           id: e.id, kind: e.kind ?? "export", title: e.title, fileName: e.file_name, done: 0, total: e.total, scanned: 0, error: null, finished: false,
           summary: null, output: null, written: null, missing: null, retry: pendingRetry.get(e.id) ?? null,
-          tally: noTally(), notes: [], received: 0, report: null, confirm: pendingConfirm.get(e.id) ?? null, progressed: false,
+          tally: noTally(), notes: [], received: 0, report: null, confirm: pendingConfirm.get(e.id) ?? null, progressed: false, entities: [],
         };
         pendingRetry.delete(e.id);
         pendingConfirm.delete(e.id);
@@ -140,7 +142,10 @@ export function createJobStore() {
         case "progress":
           return update(e.id, (j) => ({ ...j, done: e.done, total: e.total, scanned: e.scanned, progressed: true }));
         case "item":
-          return update(e.id, (j) => ({ ...j, tally: { ...j.tally, [e.item.outcome]: j.tally[e.item.outcome] + 1 }, progressed: true }));
+          return update(e.id, (j) => ({
+            ...j, tally: { ...j.tally, [e.item.outcome]: j.tally[e.item.outcome] + 1 }, progressed: true,
+            entities: j.entities.includes(e.item.entity) ? j.entities : [...j.entities, e.item.entity],
+          }));
         case "note":
           return update(e.id, (j) => ({ ...j, notes: [...j.notes, e.text], progressed: true }));
         case "received":
