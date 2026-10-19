@@ -317,6 +317,11 @@ enum Effect {
         session: String,
         replace: bool,
     },
+    /// A listener that removes what it receives, until stopped: by receive-and-delete
+    /// (`delete`) or by completing each message.
+    Listen {
+        delete: bool,
+    },
 }
 
 /// How many sequence numbers a sentence lists before `and N more`.
@@ -513,6 +518,22 @@ impl Operation {
                 session: session.to_string(),
                 replace,
             },
+        )
+    }
+
+    /// Listen until stopped, removing every message that arrives: receive-and-delete
+    /// (`delete`) or peek-lock and complete. How many is not known.
+    pub fn listen(target: Target, delete: bool) -> Self {
+        let mutation = if delete {
+            Mutation::Delete
+        } else {
+            Mutation::Settle
+        };
+        Self::build(
+            mutation,
+            target,
+            CountEstimate::Unknown,
+            Effect::Listen { delete },
         )
     }
 
@@ -725,6 +746,8 @@ impl Operation {
             Effect::RemovePolicy { .. } => "remove-policy",
             Effect::RegenerateKey { .. } => "regenerate-key",
             Effect::ImportEntities { .. } => "import-entities",
+            Effect::Listen { delete: true } => "listen-delete",
+            Effect::Listen { delete: false } => "listen-complete",
         }
     }
 
@@ -831,6 +854,14 @@ impl Operation {
             Effect::SessionState { session, replace } => format!(
                 "{} the state of session {session} in {at} on {on}",
                 if *replace { "Replace" } else { "Clear" }
+            ),
+            Effect::Listen { delete } => format!(
+                "Remove every message that arrives on {at} until stopped, on {on} ({})",
+                if *delete {
+                    "receive and delete"
+                } else {
+                    "receive and complete"
+                }
             ),
             Effect::CreateEntity { entity, rule } => match rule {
                 Some(rule) => format!("Create {entity} with rule {rule} on {on}"),

@@ -56,6 +56,7 @@ pub fn filter_text(f: &RuleFilter) -> String {
                 parts.join(" AND ")
             }
         }
+        RuleFilter::True => "TRUE (matches every message)".into(),
         RuleFilter::Unknown => "unknown filter".into(),
     }
 }

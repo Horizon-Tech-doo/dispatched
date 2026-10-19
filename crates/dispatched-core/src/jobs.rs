@@ -35,6 +35,9 @@ pub enum JobKind {
     Rename,
     /// Entities imported from an entity file.
     ImportEntities,
+    /// A listener: messages received as they arrive, until stopped. Its report holds counts
+    /// (its first note), not one item per message; only failures are items.
+    Listen,
 }
 
 impl JobKind {
@@ -67,6 +70,7 @@ impl JobKind {
             Self::Duplicate => "Duplicated",
             Self::Rename => "Renamed",
             Self::ImportEntities => "Imported",
+            Self::Listen => "Listened to",
         }
     }
 }
@@ -270,6 +274,9 @@ impl JobReport {
         if self.kind.on_entities() {
             return self.entity_summary_line(verb);
         }
+        if self.kind == JobKind::Listen {
+            return self.listen_summary_line(verb);
+        }
         let place = match (&self.target, self.kind) {
             (Some(t), _) => format!("from {} to {t}", self.entity),
             // Sends put messages on the entity.
@@ -331,6 +338,25 @@ impl JobReport {
             self.succeeded(),
             self.items.len()
         )
+    }
+
+    /// The summary of a listener: `Listened to orders: 12 messages received, 12 removed`, then
+    /// its failures. The counts are the listener's first note.
+    fn listen_summary_line(&self, verb: &str) -> String {
+        let mut s = format!("{verb} {}", self.entity);
+        if let Some(counts) = self.notes.first() {
+            s.push_str(&format!(": {counts}"));
+        }
+        let failed = self.failed();
+        if failed > 0 {
+            let list: Vec<String> = self.failures().take(5).map(Self::reason).collect();
+            let mut list = list.join(", ");
+            if failed > 5 {
+                list.push_str(&format!(", and {} more", failed - 5));
+            }
+            s.push_str(&format!("; {failed} failed ({list})"));
+        }
+        s
     }
 
     /// The summary of a job whose items are entities: `Created 1 of 2 entities; 1 failed
@@ -695,7 +721,10 @@ impl<'a> JobRun<'a> {
     /// Close the run.
     pub(crate) fn finish(self, cancelled: bool) -> JobReport {
         // Only where the total is a list of messages: a receive's or a purge's is a bound.
-        let listed = !matches!(self.kind, JobKind::Receive | JobKind::Purge);
+        let listed = !matches!(
+            self.kind,
+            JobKind::Receive | JobKind::Purge | JobKind::Listen
+        );
         let not_attempted = match (cancelled && listed, self.total) {
             (true, Some(total)) => total.saturating_sub(self.items.len() as u64),
             _ => 0,

@@ -53,8 +53,8 @@ pub use namespace::{
     EmulatorPorts, EntityPath, Namespace, PeekView, ProxyConfig, SubQueue, Transport,
 };
 pub use ops::{
-    EntitySpec, Operator, PurgePlan, PurgeScope, ReceiveAction, ReceiveOutcome, ReceiveRequest,
-    SendRequest,
+    EntitySpec, ListenMode, ListenOutcome, ListenRequest, ListenSessions, Operator, PurgePlan,
+    PurgeScope, ReceiveAction, ReceiveOutcome, ReceiveRequest, SendRequest,
 };
 pub use safety::{
     Actor, CountEstimate, DeleteTarget, Mutation, OpKind, Operation, ProfileRef, SettleVerb,

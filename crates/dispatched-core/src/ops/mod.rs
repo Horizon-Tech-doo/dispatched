@@ -6,6 +6,7 @@
 //! `pub(crate)` function over a [`MessagingBackend`], so tests drive it with the fake broker.
 
 pub mod import;
+pub mod listen;
 pub mod locate;
 pub mod manage;
 pub mod purge;
@@ -17,6 +18,7 @@ pub mod session_state;
 
 pub use crate::messaging::sender::send_target;
 pub use import::ImportOptions;
+pub use listen::{ListenMode, ListenOutcome, ListenRequest, ListenSessions};
 pub use locate::LocateLimits;
 pub use manage::EntitySpec;
 pub use purge::{PurgePlan, PurgeScope};
@@ -398,6 +400,31 @@ impl Operator {
             }
         })
         .await
+    }
+
+    /// Listen to a queue or subscription until `cancel`, emitting `JobEvent::Received` per
+    /// message. `Complete` and `Delete` are gated once, at the start ("Remove every message
+    /// that arrives on … until stopped"); `Watch` reads only and is not gated. Refused before
+    /// the gate: peek-lock with prefetch, and limits out of range.
+    pub async fn listen(
+        &self,
+        req: ListenRequest,
+        progress: &dyn Progress,
+        cancel: &CancellationToken,
+    ) -> Result<ListenOutcome> {
+        listen::check(&req)?;
+        let work = || {
+            let explorer = self.explorer.clone();
+            let req = &req;
+            async move {
+                let mut p = explorer.plane();
+                listen::run(&mut p, req, progress, cancel).await
+            }
+        };
+        match listen::operation(&req) {
+            None => work().await,
+            Some(op) => gated(&self.gate, &op, work).await,
+        }
     }
 
     /// Settle deferred messages by sequence number.
@@ -949,6 +976,15 @@ mod tests {
         assert_send(&o.send(three_texts(), &NoProgress, c));
         assert_send(&o.cancel_scheduled(e, &[1], &NoProgress, c));
         assert_send(&o.receive(recv("q", 1, ReceiveAction::Delete), &NoProgress, c));
+        let listen = ListenRequest {
+            entity: e.clone(),
+            sub_queue: SubQueue::Active,
+            sessions: ListenSessions::None,
+            mode: ListenMode::Delete,
+            concurrency: 2,
+            prefetch: 10,
+        };
+        assert_send(&o.listen(listen, &NoProgress, c));
         assert_send(&o.settle_deferred(
             e,
             SubQueue::Active,
