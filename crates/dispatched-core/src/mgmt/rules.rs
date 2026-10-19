@@ -1,4 +1,4 @@
-//! Subscription rules (read-only in M1c).
+//! Subscription rules as listed.
 
 use super::xml::Node;
 use serde::Serialize;
@@ -12,10 +12,12 @@ pub struct CorrelationProperty {
     pub value: String,
 }
 
-/// A rule's filter. `TrueFilter`/`FalseFilter` arrive as SQL `1=1` / `1=0`.
+/// A rule's filter. A `FalseFilter` arrives as SQL `1=0`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum RuleFilter {
+    /// Matches every message (`TrueFilter`, the filter of the default rule `$Default`).
+    True,
     /// SQL filter expression.
     Sql {
         /// The expression.
@@ -43,7 +45,7 @@ pub enum RuleFilter {
         properties: Vec<CorrelationProperty>,
     },
     /// A filter this reader does not understand (missing, empty or of a type it does not know).
-    /// Shown as such rather than guessed at; the XML reader does not keep the `i:type` name.
+    /// Shown as such rather than guessed at.
     Unknown,
 }
 
@@ -111,11 +113,11 @@ fn correlation(f: &Node) -> RuleFilter {
 pub(crate) fn rule_from_entry(entry: &Node) -> Option<RuleInfo> {
     let name = entry.text_of("title")?.to_string();
     let d = entry.path(&["content", "RuleDescription"])?;
-    // The element's i:type attribute is not kept by the XML reader; SQL-shaped filters
-    // (SqlFilter, TrueFilter, FalseFilter) carry SqlExpression, correlation filters carry
-    // correlation fields. Anything else is unknown, never guessed.
+    // The i:type names the filter. Without one, SQL-shaped filters carry SqlExpression and
+    // correlation filters carry correlation fields; anything else is unknown, never guessed.
     let filter = match d.child("Filter") {
         None => RuleFilter::Unknown,
+        Some(f) if f.xsi_type().is_some() => super::model::filter_from(f),
         Some(f) => match f.text_of("SqlExpression") {
             Some(expression) => RuleFilter::Sql {
                 expression: expression.to_string(),

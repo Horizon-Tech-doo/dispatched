@@ -198,6 +198,21 @@ impl FileExport {
     /// Start an export to `path`. Fails at once when a regular file is there and
     /// `overwrite` is off, or when `path` is a directory.
     pub fn create(path: &Path, format: ExportFormat, overwrite: bool) -> Result<Self> {
+        Self::create_with(path, format, overwrite, false)
+    }
+
+    /// [`FileExport::create`] for a file that holds secrets: on Unix the temp file, and so the
+    /// finished file, is readable by its owner only (0600) from its first byte.
+    pub fn create_private(path: &Path, format: ExportFormat, overwrite: bool) -> Result<Self> {
+        Self::create_with(path, format, overwrite, true)
+    }
+
+    fn create_with(
+        path: &Path,
+        format: ExportFormat,
+        overwrite: bool,
+        private: bool,
+    ) -> Result<Self> {
         if path.is_dir() {
             return Err(Error::Invalid(format!(
                 "{} is a directory; choose a file name inside it",
@@ -223,11 +238,16 @@ impl FileExport {
             return Err(exists(path));
         }
         let tmp = temp_path(path);
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)
-            .map_err(io)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        if private {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        #[cfg(not(unix))]
+        let _ = private;
+        let file = options.open(&tmp).map_err(io)?;
         Ok(Self {
             target: path.into(),
             tmp: Some(tmp),
@@ -1037,5 +1057,21 @@ mod tests {
             // dropped unfinished: the buffered lines must not reach the pipe
         }
         assert_eq!(reader.join().unwrap(), "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_private_export_is_owner_only_from_its_first_byte() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keys.xml");
+        let mut f = FileExport::create_private(&path, ExportFormat::Json, false).unwrap();
+        let tmp = f.tmp.clone().unwrap();
+        let mode = std::fs::metadata(&tmp).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the temp file already holds secrets");
+        f.write_raw(b"<x/>").unwrap();
+        f.finish().unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 }

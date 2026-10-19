@@ -1084,6 +1084,7 @@ impl LockReceiver for FakeReceiver {
         self.shortfall
     }
 
+    #[cfg(test)]
     fn buffered(&self) -> usize {
         self.buffer.len()
     }

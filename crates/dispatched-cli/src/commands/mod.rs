@@ -4,6 +4,8 @@ pub mod activity;
 pub mod auth;
 pub mod browse;
 pub mod inspect;
+pub mod listen;
+pub mod manage;
 pub mod profile;
 pub mod receive;
 pub mod repair;

@@ -6,7 +6,9 @@
 //! `pub(crate)` function over a [`MessagingBackend`], so tests drive it with the fake broker.
 
 pub mod import;
+pub mod listen;
 pub mod locate;
+pub mod manage;
 pub mod purge;
 pub mod receive;
 pub mod remove;
@@ -16,7 +18,9 @@ pub mod session_state;
 
 pub use crate::messaging::sender::send_target;
 pub use import::ImportOptions;
+pub use listen::{ListenMode, ListenOutcome, ListenRequest, ListenSessions};
 pub use locate::LocateLimits;
+pub use manage::EntitySpec;
 pub use purge::{PurgePlan, PurgeScope};
 pub use receive::{ReceiveAction, ReceiveOutcome, ReceiveRequest};
 pub use resubmit::{ResubmitSpec, default_target};
@@ -396,6 +400,31 @@ impl Operator {
             }
         })
         .await
+    }
+
+    /// Listen to a queue or subscription until `cancel`, emitting `JobEvent::Received` per
+    /// message. `Complete` and `Delete` are gated once, at the start ("Remove every message
+    /// that arrives on … until stopped"); `Watch` reads only and is not gated. Refused before
+    /// the gate: peek-lock with prefetch, and limits out of range.
+    pub async fn listen(
+        &self,
+        req: ListenRequest,
+        progress: &dyn Progress,
+        cancel: &CancellationToken,
+    ) -> Result<ListenOutcome> {
+        listen::check(&req)?;
+        let work = || {
+            let explorer = self.explorer.clone();
+            let req = &req;
+            async move {
+                let mut p = explorer.plane();
+                listen::run(&mut p, req, progress, cancel).await
+            }
+        };
+        match listen::operation(&req) {
+            None => work().await,
+            Some(op) => gated(&self.gate, &op, work).await,
+        }
     }
 
     /// Settle deferred messages by sequence number.
@@ -947,6 +976,15 @@ mod tests {
         assert_send(&o.send(three_texts(), &NoProgress, c));
         assert_send(&o.cancel_scheduled(e, &[1], &NoProgress, c));
         assert_send(&o.receive(recv("q", 1, ReceiveAction::Delete), &NoProgress, c));
+        let listen = ListenRequest {
+            entity: e.clone(),
+            sub_queue: SubQueue::Active,
+            sessions: ListenSessions::None,
+            mode: ListenMode::Delete,
+            concurrency: 2,
+            prefetch: 10,
+        };
+        assert_send(&o.listen(listen, &NoProgress, c));
         assert_send(&o.settle_deferred(
             e,
             SubQueue::Active,
@@ -969,5 +1007,20 @@ mod tests {
         assert_send(&o.purge(Vec::new(), &NoProgress, c));
         assert_send(&o.session_state(e, "s"));
         assert_send(&o.set_session_state(e, "s", None));
+        let q = crate::mgmt::EntityRef::queue("q");
+        let spec = || manage::EntitySpec::Queue("q".into(), crate::mgmt::Description::default());
+        assert_send(&o.create_entity(spec()));
+        assert_send(&o.update_entity(spec()));
+        assert_send(&o.delete_entities(vec![q.clone()]));
+        assert_send(&o.set_status(q.clone(), crate::mgmt::EntityStatus::Active));
+        assert_send(&o.duplicate(q.clone(), "c".into()));
+        assert_send(&o.rename(q.clone(), "c".into()));
+        assert_send(&o.add_policy(q.clone(), "p".into(), vec![]));
+        assert_send(&o.remove_policy(q.clone(), "p".into()));
+        assert_send(&o.regenerate_key(q.clone(), "p".into(), crate::mgmt::KeySlot::Primary));
+        let sub = crate::mgmt::EntityRef::subscription("t", "s");
+        assert_send(&o.remove_rule(sub, "r".into()));
+        assert_send(&o.import_entities(Vec::new(), false, &NoProgress, c));
+        assert_send(&o.explorer().collect_for_export(&[]));
     }
 }

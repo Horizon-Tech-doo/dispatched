@@ -53,9 +53,11 @@ pub use namespace::{
     EmulatorPorts, EntityPath, Namespace, PeekView, ProxyConfig, SubQueue, Transport,
 };
 pub use ops::{
-    Operator, PurgePlan, PurgeScope, ReceiveAction, ReceiveOutcome, ReceiveRequest, SendRequest,
+    EntitySpec, ListenMode, ListenOutcome, ListenRequest, ListenSessions, Operator, PurgePlan,
+    PurgeScope, ReceiveAction, ReceiveOutcome, ReceiveRequest, SendRequest,
 };
 pub use safety::{
-    Actor, CountEstimate, Mutation, OpKind, Operation, ProfileRef, SettleVerb, Target, count_text,
+    Actor, CountEstimate, DeleteTarget, Mutation, OpKind, Operation, ProfileRef, SettleVerb,
+    Target, count_text,
 };
 pub use tokens::{ServiceBusToken, TokenKind, TokenSource};

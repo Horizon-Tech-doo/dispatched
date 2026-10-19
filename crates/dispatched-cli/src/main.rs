@@ -122,11 +122,23 @@ enum Command {
         #[command(subcommand)]
         cmd: SessionCmd,
     },
-    /// Rules of a subscription.
+    /// Rules of a subscription: list, add and remove.
     Rule {
         #[command(subcommand)]
         cmd: RuleCmd,
     },
+    /// Create, update, delete, copy, export and import queues, topics and subscriptions.
+    Entity {
+        #[command(subcommand)]
+        cmd: commands::manage::EntityCmd,
+    },
+    /// SAS policies of a queue or topic.
+    Policy {
+        #[command(subcommand)]
+        cmd: commands::manage::PolicyCmd,
+    },
+    /// Show messages live as they arrive, until Ctrl-C (--complete or --delete removes them).
+    Listen(commands::listen::ListenArgs),
     /// Manage saved profiles.
     Profile {
         #[command(subcommand)]
@@ -183,6 +195,10 @@ enum SessionCmd {
 enum RuleCmd {
     /// List the rules of a subscription.
     Ls { subscription: String },
+    /// Add a rule (a SQL or correlation filter, with an optional action).
+    Add(commands::manage::RuleAddArgs),
+    /// Remove a rule.
+    Rm(commands::manage::RuleRmArgs),
 }
 
 #[tokio::main]
@@ -237,6 +253,13 @@ fn mutates(command: &Command) -> bool {
         | Command::Purge(_) => true,
         Command::Deferred { cmd } => !matches!(cmd, commands::receive::DeferredCmd::Ls(_)),
         Command::Dlq { cmd } => !matches!(cmd, commands::repair::DlqCmd::Summary(_)),
+        Command::Rule { cmd } => !matches!(cmd, RuleCmd::Ls { .. }),
+        Command::Entity { cmd } => !matches!(cmd, commands::manage::EntityCmd::Export(_)),
+        Command::Policy { cmd } => !matches!(
+            cmd,
+            commands::manage::PolicyCmd::Ls { .. } | commands::manage::PolicyCmd::Keys { .. }
+        ),
+        Command::Listen(a) => a.complete || a.delete,
         Command::Session {
             cmd: SessionCmd::State { cmd },
         } => !matches!(cmd, commands::state::StateCmd::Get(_)),
@@ -249,7 +272,6 @@ fn mutates(command: &Command) -> bool {
         | Command::Export { .. }
         | Command::Show { .. }
         | Command::Session { .. }
-        | Command::Rule { .. }
         | Command::Profile { .. }
         | Command::Activity { .. } => false,
     }
@@ -327,6 +349,9 @@ async fn run(cli: Cli) -> Result<JobExit, (anyhow::Error, Hints)> {
                 | Command::Resubmit(_)
                 | Command::Purge(_)
                 | Command::Dlq { .. }
+                | Command::Entity { .. }
+                | Command::Policy { .. }
+                | Command::Listen(_)
         ) && resolve::select(&flags, &env).namespace.is_some(),
     };
     // Opens nothing: the profile store, activity log and keychain are touched
@@ -410,6 +435,15 @@ async fn run_command(ctx: &Ctx, cli: Cli) -> anyhow::Result<JobExit> {
         Command::Rule {
             cmd: RuleCmd::Ls { subscription },
         } => commands::inspect::rules(ctx, &sel, &subscription, format).await,
+        Command::Rule {
+            cmd: RuleCmd::Add(args),
+        } => return commands::manage::rule_add(ctx, &sel, &args, format).await,
+        Command::Rule {
+            cmd: RuleCmd::Rm(args),
+        } => return commands::manage::rule_rm(ctx, &sel, &args, format).await,
+        Command::Entity { cmd } => return commands::manage::entity(ctx, &sel, &cmd, format).await,
+        Command::Policy { cmd } => return commands::manage::policy(ctx, &sel, &cmd, format).await,
+        Command::Listen(args) => return commands::listen::listen(ctx, &sel, &args, format).await,
         Command::Export {
             view,
             top,
@@ -479,6 +513,14 @@ mod tests {
             &["dlq", "purge", "q"],
             &["scheduled", "cancel", "q", "--all"],
             &["session", "state", "clear", "q", "s"],
+            &["entity", "delete", "q"],
+            &["entity", "create", "queue", "q"],
+            &["entity", "import", "e.xml"],
+            &["rule", "add", "t/subscriptions/s", "r", "--sql", "1=1"],
+            &["rule", "rm", "t/subscriptions/s", "r"],
+            &["policy", "renew", "q", "p", "primary"],
+            &["listen", "q", "--delete"],
+            &["listen", "q", "--complete"],
         ] {
             assert!(mutates_line(args), "{args:?}");
         }
@@ -490,6 +532,11 @@ mod tests {
             &["session", "state", "get", "q", "s"],
             &["session", "ls", "q"],
             &["activity", "ls"],
+            &["entity", "export", "--out", "e.xml"],
+            &["policy", "ls", "q"],
+            &["policy", "keys", "q", "p"],
+            &["rule", "ls", "t/subscriptions/s"],
+            &["listen", "q"],
         ] {
             assert!(!mutates_line(args), "{args:?}");
         }

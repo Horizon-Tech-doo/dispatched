@@ -63,22 +63,12 @@ impl ReceiveKeeper {
             );
             return;
         };
-        let now = time::OffsetDateTime::now_utc();
-        let report = JobReport {
-            op_id: None,
-            kind: JobKind::Receive,
-            entity: self.entity.clone(),
-            target: None,
-            started_at: now,
-            finished_at: now,
-            cancelled: true,
+        let report = interrupted_report(
+            JobKind::Receive,
+            self.entity.clone(),
             items,
-            notes: vec![
-                "interrupted by a second Ctrl-C before the receive finished; it may have removed more than this report lists"
-                    .into(),
-            ],
-            not_attempted: 0,
-        };
+            "interrupted by a second Ctrl-C before the receive finished; it may have removed more than this report lists",
+        );
         let shown = sanitize(&path.display().to_string());
         match report.write_with_messages(path, report_format(path), args.force_report, &messages) {
             Ok(()) => {
@@ -113,6 +103,29 @@ impl Progress for ReceiveKeeper {
             _ => {}
         }
         self.progress.event(e);
+    }
+}
+
+/// The report a second Ctrl-C writes for a job that did not return: cancelled, with the
+/// items kept so far and `note`.
+pub fn interrupted_report(
+    kind: JobKind,
+    entity: String,
+    items: Vec<ItemResult>,
+    note: &str,
+) -> JobReport {
+    let now = time::OffsetDateTime::now_utc();
+    JobReport {
+        op_id: None,
+        kind,
+        entity,
+        target: None,
+        started_at: now,
+        finished_at: now,
+        cancelled: true,
+        items,
+        notes: vec![note.into()],
+        not_attempted: 0,
     }
 }
 
@@ -348,7 +361,7 @@ fn print_done_to(out: &mut dyn Write, err: &mut dyn Write, line: &str) -> JobExi
 }
 
 /// NDJSON for `.ndjson` and `.jsonl`, JSON otherwise.
-fn report_format(path: &Path) -> ExportFormat {
+pub fn report_format(path: &Path) -> ExportFormat {
     match path.extension().and_then(|e| e.to_str()) {
         Some(e) if e.eq_ignore_ascii_case("ndjson") || e.eq_ignore_ascii_case("jsonl") => {
             ExportFormat::Ndjson

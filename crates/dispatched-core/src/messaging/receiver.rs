@@ -720,6 +720,7 @@ impl AmqpReceiver {
     /// Messages taken off the link but not yet returned by `receive` (left
     /// by a failed or cancelled call). On a receive-and-delete link they are
     /// already removed from the entity.
+    #[cfg(test)]
     pub(crate) fn buffered(&self) -> usize {
         self.intake.ready.len()
     }

@@ -84,7 +84,9 @@ pub(crate) trait LockReceiver: Send {
     async fn receive(&mut self, max: u32, wait: Duration) -> Result<Vec<ReceivedMessage>>;
     /// Credit unaccounted for when the last receive ended.
     fn drain_shortfall(&self) -> u32;
-    /// Messages taken off the link but not yet returned.
+    /// Messages taken off the link but not yet returned (tests only: a cancelled job leaves
+    /// them for `close`, which returns them).
+    #[cfg(test)]
     fn buffered(&self) -> usize;
     /// A failure the last receive held back while it returned what it had taken (the next
     /// receive would report it); taking it clears it.
@@ -136,6 +138,7 @@ impl LockReceiver for AmqpReceiver {
     fn drain_shortfall(&self) -> u32 {
         AmqpReceiver::drain_shortfall(self)
     }
+    #[cfg(test)]
     fn buffered(&self) -> usize {
         AmqpReceiver::buffered(self)
     }

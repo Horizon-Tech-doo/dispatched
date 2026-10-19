@@ -1,0 +1,30 @@
+<entry xmlns="http://www.w3.org/2005/Atom">
+  <id>https://myns.servicebus.windows.net/events/Subscriptions/billing?api-version=2024-05</id>
+  <title type="text">billing</title>
+  <content type="application/xml">
+    <SubscriptionDescription xmlns="http://schemas.microsoft.com/netservices/2010/10/servicebus/connect" xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+      <LockDuration>PT1M</LockDuration>
+      <RequiresSession>false</RequiresSession>
+      <DefaultMessageTimeToLive>P14D</DefaultMessageTimeToLive>
+      <DeadLetteringOnMessageExpiration>false</DeadLetteringOnMessageExpiration>
+      <DeadLetteringOnFilterEvaluationExceptions>true</DeadLetteringOnFilterEvaluationExceptions>
+      <MessageCount>3</MessageCount>
+      <MaxDeliveryCount>5</MaxDeliveryCount>
+      <EnableBatchedOperations>true</EnableBatchedOperations>
+      <Status>Active</Status>
+      <ForwardTo/>
+      <CreatedAt>2026-09-01T08:00:00.0000000Z</CreatedAt>
+      <UpdatedAt>2026-10-01T08:00:00.0000000Z</UpdatedAt>
+      <AccessedAt>2026-10-15T09:41:00.0000000Z</AccessedAt>
+      <CountDetails xmlns:d2p1="http://schemas.microsoft.com/netservices/2011/06/servicebus">
+        <d2p1:ActiveMessageCount>2</d2p1:ActiveMessageCount>
+        <d2p1:DeadLetterMessageCount>1</d2p1:DeadLetterMessageCount>
+        <d2p1:ScheduledMessageCount>0</d2p1:ScheduledMessageCount>
+        <d2p1:TransferMessageCount>0</d2p1:TransferMessageCount>
+        <d2p1:TransferDeadLetterMessageCount>0</d2p1:TransferDeadLetterMessageCount>
+      </CountDetails>
+      <AutoDeleteOnIdle>P10675199DT2H48M5.4775807S</AutoDeleteOnIdle>
+      <EntityAvailabilityStatus>Available</EntityAvailabilityStatus>
+    </SubscriptionDescription>
+  </content>
+</entry>

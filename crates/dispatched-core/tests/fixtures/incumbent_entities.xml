@@ -1,0 +1,79 @@
+<Entities xmlns="http://schemas.microsoft.com/servicebusexplorer" serviceBusNamespace="contoso-dev">
+  <Queues>
+    <Queue>
+      <Path>orders</Path>
+      <LockDuration>00:01:00</LockDuration>
+      <MaxSizeInMegabytes>1024</MaxSizeInMegabytes>
+      <RequiresDuplicateDetection>False</RequiresDuplicateDetection>
+      <RequiresSession>False</RequiresSession>
+      <DefaultMessageTimeToLive>14.00:00:00</DefaultMessageTimeToLive>
+      <EnableDeadLetteringOnMessageExpiration>False</EnableDeadLetteringOnMessageExpiration>
+      <DuplicateDetectionHistoryTimeWindow>00:10:00</DuplicateDetectionHistoryTimeWindow>
+      <MaxDeliveryCount>10</MaxDeliveryCount>
+      <EnableBatchedOperations>True</EnableBatchedOperations>
+      <Status>Active</Status>
+      <ForwardTo></ForwardTo>
+      <AutoDeleteOnIdle>10675199.02:48:05.4775807</AutoDeleteOnIdle>
+      <EnablePartitioning>False</EnablePartitioning>
+      <AuthorizationRules>
+        <SharedAccessAuthorizationRule>
+          <ClaimType>SharedAccessKey</ClaimType>
+          <ClaimValue>None</ClaimValue>
+          <Rights><Right>Send</Right><Right>Listen</Right></Rights>
+          <KeyName>app</KeyName>
+          <PrimaryKey>BASE64KEY==</PrimaryKey>
+          <SecondaryKey>BASE64KEY2==</SecondaryKey>
+        </SharedAccessAuthorizationRule>
+      </AuthorizationRules>
+    </Queue>
+  </Queues>
+  <Topics>
+    <Topic>
+      <Path>events</Path>
+      <MaxSizeInMegabytes>1024</MaxSizeInMegabytes>
+      <RequiresDuplicateDetection>False</RequiresDuplicateDetection>
+      <DefaultMessageTimeToLive>10675199.02:48:05.4775807</DefaultMessageTimeToLive>
+      <EnableBatchedOperations>True</EnableBatchedOperations>
+      <Status>Active</Status>
+      <Subscriptions>
+        <Subscription>
+          <Name>billing</Name>
+          <TopicPath>events</TopicPath>
+          <LockDuration>00:01:00</LockDuration>
+          <RequiresSession>False</RequiresSession>
+          <MaxDeliveryCount>10</MaxDeliveryCount>
+          <Status>Active</Status>
+          <Rules>
+            <Rule>
+              <Name>$Default</Name>
+              <Filter />
+              <Action><EmptyRuleAction /></Action>
+            </Rule>
+            <Rule>
+              <Name>only-eu</Name>
+              <Filter>
+                <SqlFilter><SqlExpression>region = 'eu'</SqlExpression></SqlFilter>
+              </Filter>
+              <Action>
+                <SqlRuleAction><SqlExpression>SET tagged = 1</SqlExpression></SqlRuleAction>
+              </Action>
+            </Rule>
+            <Rule>
+              <Name>by-corr</Name>
+              <Filter>
+                <CorrelationFilter>
+                  <CorrelationId>abc</CorrelationId>
+                  <MessageId></MessageId><To></To><ReplyTo></ReplyTo>
+                  <Label>order.created</Label>
+                  <SessionId></SessionId><ReplyToSessionId></ReplyToSessionId><ContentType></ContentType>
+                  <Properties><Property>tenant: acme</Property></Properties>
+                </CorrelationFilter>
+              </Filter>
+              <Action></Action>
+            </Rule>
+          </Rules>
+        </Subscription>
+      </Subscriptions>
+    </Topic>
+  </Topics>
+</Entities>

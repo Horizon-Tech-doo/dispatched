@@ -8,6 +8,7 @@
 use crate::activity::{ActivityEntry, Audit, Outcome, Phase};
 use crate::error::{Error, Result};
 use crate::jobs::JobReport;
+use crate::mgmt::{AccessRight, EntityKind, EntityRef, EntityStatus, KeySlot};
 use crate::namespace::{EntityPath, SubQueue};
 use horizon_azure_kit::safety::{ConfirmRequest, Origin, Policy, require};
 use serde::{Deserialize, Serialize};
@@ -190,9 +191,94 @@ impl SettleVerb {
     }
 }
 
+/// An entity a delete removes, with what it holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteTarget {
+    /// The entity.
+    pub entity: EntityRef,
+    /// The messages it holds (for a topic, those of all its subscriptions).
+    pub messages: CountEstimate,
+    /// For a topic, how many subscriptions it has.
+    pub subscriptions: Option<u64>,
+}
+
+impl DeleteTarget {
+    /// `queue orders and its 1,284 messages`, `topic events, its 3 subscriptions and their
+    /// 1,204 messages`.
+    fn text(&self) -> String {
+        let messages = match self.messages {
+            CountEstimate::Unknown => "messages (count unknown)".to_string(),
+            CountEstimate::AtLeast(n) => format!("at least {}", messages(n)),
+            c => c.text("message"),
+        };
+        match (self.entity.kind(), self.subscriptions) {
+            (EntityKind::Topic, Some(0)) => format!("{} (no subscriptions)", self.entity),
+            (EntityKind::Topic, Some(n)) => format!(
+                "{}, its {} {} and their {messages}",
+                self.entity,
+                count_text(n),
+                if n == 1 {
+                    "subscription"
+                } else {
+                    "subscriptions"
+                }
+            ),
+            _ => format!("{} and its {messages}", self.entity),
+        }
+    }
+}
+
 /// One exact sentence per kind of operation.
 #[derive(Debug, Clone)]
 enum Effect {
+    CreateEntity {
+        entity: EntityRef,
+        rule: Option<String>,
+    },
+    UpdateEntity {
+        entity: EntityRef,
+    },
+    DeleteEntities {
+        targets: Vec<DeleteTarget>,
+    },
+    SetStatus {
+        entity: EntityRef,
+        status: EntityStatus,
+    },
+    Duplicate {
+        from: EntityRef,
+        to: EntityRef,
+    },
+    Rename {
+        from: EntityRef,
+        to: EntityRef,
+    },
+    AddRule {
+        subscription: EntityRef,
+        rule: String,
+    },
+    RemoveRule {
+        subscription: EntityRef,
+        rule: String,
+    },
+    AddPolicy {
+        entity: EntityRef,
+        name: String,
+        rights: Vec<AccessRight>,
+    },
+    RemovePolicy {
+        entity: EntityRef,
+        name: String,
+    },
+    RegenerateKey {
+        entity: EntityRef,
+        name: String,
+        slot: KeySlot,
+    },
+    ImportEntities {
+        entities: Vec<EntityRef>,
+        overwrite: bool,
+    },
     Send {
         n: u64,
         schedule: Option<OffsetDateTime>,
@@ -230,6 +316,11 @@ enum Effect {
     SessionState {
         session: String,
         replace: bool,
+    },
+    /// A listener that removes what it receives, until stopped: by receive-and-delete
+    /// (`delete`) or by completing each message.
+    Listen {
+        delete: bool,
     },
 }
 
@@ -430,6 +521,171 @@ impl Operation {
         )
     }
 
+    /// Listen until stopped, removing every message that arrives: receive-and-delete
+    /// (`delete`) or peek-lock and complete. How many is not known.
+    pub fn listen(target: Target, delete: bool) -> Self {
+        let mutation = if delete {
+            Mutation::Delete
+        } else {
+            Mutation::Settle
+        };
+        Self::build(
+            mutation,
+            target,
+            CountEstimate::Unknown,
+            Effect::Listen { delete },
+        )
+    }
+
+    /// An entity change on `primary` (the entity its activity entry names). The count is the
+    /// number of entities it changes.
+    fn entity_change(primary: &EntityRef, effect: Effect) -> Self {
+        let mut op = Self::build(
+            Mutation::EntityChange,
+            Target::all(primary.entity_path()),
+            CountEstimate::Unknown,
+            effect,
+        );
+        op.count = CountEstimate::Exact(op.entities().len() as u64);
+        op
+    }
+
+    /// Create a queue, topic or subscription (with its initial rule `rule`).
+    pub fn create_entity(entity: &EntityRef, rule: Option<&str>) -> Self {
+        Self::entity_change(
+            entity,
+            Effect::CreateEntity {
+                entity: entity.clone(),
+                rule: rule.map(str::to_string),
+            },
+        )
+    }
+
+    /// Replace the settings of an entity.
+    pub fn update_entity(entity: &EntityRef) -> Self {
+        Self::entity_change(
+            entity,
+            Effect::UpdateEntity {
+                entity: entity.clone(),
+            },
+        )
+    }
+
+    /// Delete entities with what they hold. `targets` must not be empty.
+    pub fn delete_entities(targets: Vec<DeleteTarget>) -> Self {
+        let primary = targets
+            .first()
+            .map(|t| t.entity.clone())
+            .expect("a delete names an entity");
+        Self::entity_change(&primary, Effect::DeleteEntities { targets })
+    }
+
+    /// Change an entity's status.
+    pub fn set_status(entity: &EntityRef, status: EntityStatus) -> Self {
+        Self::entity_change(
+            entity,
+            Effect::SetStatus {
+                entity: entity.clone(),
+                status,
+            },
+        )
+    }
+
+    /// Create `to` with the settings of `from` (no messages).
+    pub fn duplicate(from: &EntityRef, to: &EntityRef) -> Self {
+        Self::entity_change(
+            to,
+            Effect::Duplicate {
+                from: from.clone(),
+                to: to.clone(),
+            },
+        )
+    }
+
+    /// Create `to` as a copy of `from`, then delete `from`.
+    pub fn rename(from: &EntityRef, to: &EntityRef) -> Self {
+        Self::entity_change(
+            from,
+            Effect::Rename {
+                from: from.clone(),
+                to: to.clone(),
+            },
+        )
+    }
+
+    /// Add rule `rule` to a subscription.
+    pub fn add_rule(subscription: &EntityRef, rule: &str) -> Self {
+        Self::entity_change(
+            subscription,
+            Effect::AddRule {
+                subscription: subscription.clone(),
+                rule: rule.to_string(),
+            },
+        )
+    }
+
+    /// Remove rule `rule` from a subscription.
+    pub fn remove_rule(subscription: &EntityRef, rule: &str) -> Self {
+        Self::entity_change(
+            subscription,
+            Effect::RemoveRule {
+                subscription: subscription.clone(),
+                rule: rule.to_string(),
+            },
+        )
+    }
+
+    /// Add SAS policy `name` with `rights`.
+    pub fn add_policy(entity: &EntityRef, name: &str, rights: &[AccessRight]) -> Self {
+        Self::entity_change(
+            entity,
+            Effect::AddPolicy {
+                entity: entity.clone(),
+                name: name.to_string(),
+                rights: rights.to_vec(),
+            },
+        )
+    }
+
+    /// Remove SAS policy `name`.
+    pub fn remove_policy(entity: &EntityRef, name: &str) -> Self {
+        Self::entity_change(
+            entity,
+            Effect::RemovePolicy {
+                entity: entity.clone(),
+                name: name.to_string(),
+            },
+        )
+    }
+
+    /// Replace one key of SAS policy `name`.
+    pub fn regenerate_key(entity: &EntityRef, name: &str, slot: KeySlot) -> Self {
+        Self::entity_change(
+            entity,
+            Effect::RegenerateKey {
+                entity: entity.clone(),
+                name: name.to_string(),
+                slot,
+            },
+        )
+    }
+
+    /// Create (or with `overwrite` replace) the entities of an import file. `entities` must
+    /// not be empty.
+    pub fn import_entities(entities: Vec<EntityRef>, overwrite: bool) -> Self {
+        let primary = entities
+            .first()
+            .cloned()
+            .expect("an import names an entity");
+        Self::entity_change(
+            &primary,
+            Effect::ImportEntities {
+                entities,
+                overwrite,
+            },
+        )
+    }
+
     /// List the selection's sequence numbers in the sentence: the first 20, then `and N more`
     /// (none listed for an empty slice). Delete, cancel scheduled, move and resubmit use it.
     pub fn with_sequences(mut self, sequence_numbers: &[i64]) -> Self {
@@ -478,6 +734,20 @@ impl Operation {
             Effect::Import { .. } => "import",
             Effect::SessionState { replace: true, .. } => "set-session-state",
             Effect::SessionState { .. } => "clear-session-state",
+            Effect::CreateEntity { .. } => "create-entity",
+            Effect::UpdateEntity { .. } => "update-entity",
+            Effect::DeleteEntities { .. } => "delete-entity",
+            Effect::SetStatus { .. } => "set-status",
+            Effect::Duplicate { .. } => "duplicate",
+            Effect::Rename { .. } => "rename",
+            Effect::AddRule { .. } => "add-rule",
+            Effect::RemoveRule { .. } => "remove-rule",
+            Effect::AddPolicy { .. } => "add-policy",
+            Effect::RemovePolicy { .. } => "remove-policy",
+            Effect::RegenerateKey { .. } => "regenerate-key",
+            Effect::ImportEntities { .. } => "import-entities",
+            Effect::Listen { delete: true } => "listen-delete",
+            Effect::Listen { delete: false } => "listen-complete",
         }
     }
 
@@ -585,6 +855,105 @@ impl Operation {
                 "{} the state of session {session} in {at} on {on}",
                 if *replace { "Replace" } else { "Clear" }
             ),
+            Effect::Listen { delete } => format!(
+                "Remove every message that arrives on {at} until stopped, on {on} ({})",
+                if *delete {
+                    "receive and delete"
+                } else {
+                    "receive and complete"
+                }
+            ),
+            Effect::CreateEntity { entity, rule } => match rule {
+                Some(rule) => format!("Create {entity} with rule {rule} on {on}"),
+                None => format!("Create {entity} on {on}"),
+            },
+            Effect::UpdateEntity { entity } => format!("Update {entity} on {on}"),
+            Effect::DeleteEntities { targets } => match targets.as_slice() {
+                [one] => format!("Delete {} on {on}", one.text()),
+                many => format!(
+                    "Delete {} entities on {on}: {}",
+                    count_text(many.len() as u64),
+                    many.iter()
+                        .map(DeleteTarget::text)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
+            },
+            Effect::SetStatus { entity, status } => {
+                format!("Set {entity} to {status} on {on}")
+            }
+            Effect::Duplicate { from, to } => {
+                let what = match from.kind() {
+                    EntityKind::Subscription => "settings and rules",
+                    _ => "settings and policies, with new keys",
+                };
+                format!(
+                    "Duplicate {from} as {} on {on} ({what}; messages are not copied)",
+                    to.path()
+                )
+            }
+            Effect::Rename { from, to } => {
+                let with = if from.kind() == EntityKind::Topic {
+                    " with its subscriptions and rules"
+                } else {
+                    ""
+                };
+                format!(
+                    "Rename {from} to {}{with} (create {}, then delete {}) on {on}",
+                    to.path(),
+                    to.path(),
+                    from.path()
+                )
+            }
+            Effect::AddRule { subscription, rule } => {
+                format!("Add rule {rule} to {} on {on}", subscription.path())
+            }
+            Effect::RemoveRule { subscription, rule } => {
+                format!("Remove rule {rule} from {} on {on}", subscription.path())
+            }
+            Effect::AddPolicy {
+                entity,
+                name,
+                rights,
+            } => format!(
+                "Add policy {name} ({}) to {} on {on}",
+                rights
+                    .iter()
+                    .map(|r| r.as_str().to_ascii_lowercase())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                entity.path()
+            ),
+            Effect::RemovePolicy { entity, name } => {
+                format!("Remove policy {name} from {} on {on}", entity.path())
+            }
+            Effect::RegenerateKey { entity, name, slot } => format!(
+                "Regenerate the {} key of policy {name} on {} on {on}",
+                slot.as_str(),
+                entity.path()
+            ),
+            Effect::ImportEntities {
+                entities,
+                overwrite,
+            } => format!(
+                "Import {} {} on {on}: {}; {}",
+                count_text(entities.len() as u64),
+                if entities.len() == 1 {
+                    "entity"
+                } else {
+                    "entities"
+                },
+                entities
+                    .iter()
+                    .map(EntityRef::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if *overwrite {
+                    "existing ones are replaced"
+                } else {
+                    "existing ones are skipped"
+                }
+            ),
         };
         if let Some(examined) = self.matched_within {
             text.push_str(&format!(
@@ -602,6 +971,32 @@ impl Operation {
     /// Every entity the operation changes, each named once: the source, and for a move or a
     /// resubmit the entity the copies go to.
     pub fn entities(&self) -> Vec<String> {
+        let changed: Option<Vec<&EntityRef>> = match &self.effect {
+            Effect::CreateEntity { entity, .. }
+            | Effect::UpdateEntity { entity }
+            | Effect::SetStatus { entity, .. }
+            | Effect::AddPolicy { entity, .. }
+            | Effect::RemovePolicy { entity, .. }
+            | Effect::RegenerateKey { entity, .. } => Some(vec![entity]),
+            Effect::AddRule { subscription, .. } | Effect::RemoveRule { subscription, .. } => {
+                Some(vec![subscription])
+            }
+            Effect::DeleteEntities { targets } => Some(targets.iter().map(|t| &t.entity).collect()),
+            Effect::Duplicate { to, .. } => Some(vec![to]),
+            Effect::Rename { from, to } => Some(vec![from, to]),
+            Effect::ImportEntities { entities, .. } => Some(entities.iter().collect()),
+            _ => None,
+        };
+        if let Some(changed) = changed {
+            let mut out: Vec<String> = Vec::new();
+            for e in changed {
+                let path = e.path();
+                if !out.contains(&path) {
+                    out.push(path);
+                }
+            }
+            return out;
+        }
         let mut out = vec![self.target.entity.base()];
         if let Effect::Move { to, .. } | Effect::Resubmit { to, .. } = &self.effect
             && !out.contains(to)
@@ -1196,6 +1591,151 @@ mod tests {
             serde_json::to_string(&Mutation::SessionState).unwrap(),
             "\"session-state\""
         );
+    }
+
+    fn dev() -> ProfileRef {
+        ProfileRef {
+            name: "dev".into(),
+            production: false,
+        }
+    }
+
+    #[test]
+    fn effects_name_every_entity_they_touch() {
+        use crate::mgmt::{AccessRight, EntityRef, EntityStatus, KeySlot};
+        let q = |n: &str| EntityRef::queue(n);
+        let sub = EntityRef::subscription("events", "billing");
+        let rename = Operation::rename(&q("a"), &q("b"));
+        assert_eq!(rename.entities(), ["a", "b"]);
+        assert_eq!(
+            rename.summary(&dev()),
+            "Rename queue a to b (create b, then delete a) on dev"
+        );
+        let bulk = Operation::delete_entities(vec![
+            DeleteTarget {
+                entity: q("orders"),
+                messages: CountEstimate::Exact(1284),
+                subscriptions: None,
+            },
+            DeleteTarget {
+                entity: EntityRef::topic("events"),
+                messages: CountEstimate::Exact(1204),
+                subscriptions: Some(3),
+            },
+            DeleteTarget {
+                entity: sub.clone(),
+                messages: CountEstimate::Unknown,
+                subscriptions: None,
+            },
+        ]);
+        assert_eq!(
+            bulk.entities(),
+            ["orders", "events", "events/Subscriptions/billing"]
+        );
+        assert_eq!(
+            bulk.summary(&prod()),
+            "Delete 3 entities on prod-weu: queue orders and its 1,284 messages; topic events, \
+             its 3 subscriptions and their 1,204 messages; subscription \
+             events/Subscriptions/billing and its messages (count unknown)"
+        );
+        assert_eq!(bulk.mutation, Mutation::EntityChange);
+        assert_eq!(bulk.verb(), "delete-entity");
+        let one = Operation::delete_entities(vec![DeleteTarget {
+            entity: q("orders"),
+            messages: CountEstimate::Exact(1284),
+            subscriptions: None,
+        }]);
+        assert_eq!(
+            one.summary(&prod()),
+            "Delete queue orders and its 1,284 messages on prod-weu"
+        );
+        let cases = [
+            (
+                Operation::create_entity(&q("orders"), None),
+                "Create queue orders on dev",
+                vec!["orders"],
+            ),
+            (
+                Operation::create_entity(&sub, Some("eu")),
+                "Create subscription events/Subscriptions/billing with rule eu on dev",
+                vec!["events/Subscriptions/billing"],
+            ),
+            (
+                Operation::update_entity(&q("orders")),
+                "Update queue orders on dev",
+                vec!["orders"],
+            ),
+            (
+                Operation::set_status(&q("orders"), EntityStatus::SendDisabled),
+                "Set queue orders to SendDisabled on dev",
+                vec!["orders"],
+            ),
+            (
+                Operation::duplicate(&q("a"), &q("b")),
+                "Duplicate queue a as b on dev (settings and policies, with new keys; messages are not copied)",
+                vec!["b"],
+            ),
+            (
+                Operation::rename(&EntityRef::topic("a"), &EntityRef::topic("b")),
+                "Rename topic a to b with its subscriptions and rules (create b, then delete a) on dev",
+                vec!["a", "b"],
+            ),
+            (
+                Operation::add_rule(&sub, "eu"),
+                "Add rule eu to events/Subscriptions/billing on dev",
+                vec!["events/Subscriptions/billing"],
+            ),
+            (
+                Operation::remove_rule(&sub, "eu"),
+                "Remove rule eu from events/Subscriptions/billing on dev",
+                vec!["events/Subscriptions/billing"],
+            ),
+            (
+                Operation::add_policy(
+                    &q("orders"),
+                    "app",
+                    &[AccessRight::Listen, AccessRight::Send],
+                ),
+                "Add policy app (listen, send) to orders on dev",
+                vec!["orders"],
+            ),
+            (
+                Operation::remove_policy(&q("orders"), "app"),
+                "Remove policy app from orders on dev",
+                vec!["orders"],
+            ),
+            (
+                Operation::regenerate_key(&q("orders"), "app", KeySlot::Primary),
+                "Regenerate the primary key of policy app on orders on dev",
+                vec!["orders"],
+            ),
+        ];
+        for (op, text, entities) in cases {
+            assert_eq!(op.summary(&dev()), text);
+            assert_eq!(op.entities(), entities, "{text}");
+            assert_eq!(op.mutation, Mutation::EntityChange, "{text}");
+            assert!(!op.reversible);
+        }
+    }
+
+    #[tokio::test]
+    async fn on_production_a_rename_confirms_source_and_target() {
+        use crate::mgmt::EntityRef;
+        let policy = Arc::new(TypedFor {
+            allow: vec!["a".into()],
+            seen: Default::default(),
+        });
+        let g = Gate::new(
+            policy.clone(),
+            Arc::new(MemoryAudit::new()),
+            Actor {
+                origin: Origin::Cli,
+                profile: prod(),
+            },
+        );
+        let op = Operation::rename(&EntityRef::queue("a"), &EntityRef::queue("b"));
+        assert!(g.run(&op, |_| async { Ok(()) }).await.is_err());
+        assert_eq!(policy.seen.lock().unwrap().clone(), ["a", "b"]);
     }
 
     #[test]
