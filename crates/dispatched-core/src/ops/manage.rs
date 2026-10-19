@@ -266,6 +266,50 @@ impl Operator {
         .await
     }
 
+    /// Change only the given settings of an entity. The description is read after the
+    /// confirmation, right before it is written back, so what changed meanwhile in other
+    /// settings is kept. Settings the kind lacks, ones fixed at creation and an empty change
+    /// are refused before the gate.
+    pub async fn update_settings(
+        &self,
+        entity: EntityRef,
+        change: crate::mgmt::SettingsChange,
+    ) -> Result<JobReport> {
+        if change.is_empty() {
+            return Err(Error::Invalid("nothing to change".into()));
+        }
+        if let Some(i) = change.issues(entity.kind(), false).into_iter().next() {
+            return Err(Error::Invalid(format!("{}: {}", i.field, i.message)));
+        }
+        let op = Operation::update_entity(&entity);
+        gated(&self.gate, &op, || async {
+            let m = self.mgmt();
+            let r = async {
+                match &entity {
+                    EntityRef::Queue { name } => {
+                        let mut d = m.get_queue_description(name).await?;
+                        change.apply_queue(&mut d.settings, false)?;
+                        m.update_queue(name, &d).await
+                    }
+                    EntityRef::Topic { name } => {
+                        let mut d = m.get_topic_description(name).await?;
+                        change.apply_topic(&mut d.settings, false)?;
+                        m.update_topic(name, &d).await
+                    }
+                    EntityRef::Subscription { topic, name } => {
+                        let mut d = m.get_subscription(topic, name).await?;
+                        change.apply_subscription(&mut d.settings, false)?;
+                        m.update_subscription(topic, name, &d).await
+                    }
+                }
+            }
+            .await
+            .map(|()| None);
+            Ok(single_job(JobKind::UpdateEntities, &entity, outcome(r)))
+        })
+        .await
+    }
+
     /// Delete entities with everything they hold. Each is counted first (a missing one
     /// stops the command before the confirmation), and the confirmation names each with its
     /// messages; on production every one must be confirmed.
@@ -1456,6 +1500,68 @@ mod tests {
             Outcome::PartlyFailed,
             "the copy was made, the delete was not"
         );
+    }
+
+    #[tokio::test]
+    async fn update_settings_reads_inside_the_gate_and_keeps_other_settings() {
+        let mut server = mockito::Server::new_async().await;
+        let get = server
+            .mock("GET", "/orders")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(include_str!("../../tests/fixtures/queue_entry_full.xml"))
+            .create_async()
+            .await;
+        let put = server
+            .mock("PUT", "/orders")
+            .match_query(Matcher::Any)
+            .match_header("if-match", "*")
+            .match_body(Matcher::AllOf(vec![
+                Matcher::Regex("<MaxDeliveryCount>3</MaxDeliveryCount>".into()),
+                Matcher::Regex("<FutureFlag>true</FutureFlag>".into()),
+            ]))
+            .with_status(200)
+            .create_async()
+            .await;
+        let (gate, audit) = fake_gate();
+        let r = operator(&server, gate)
+            .update_settings(
+                EntityRef::queue("orders"),
+                crate::mgmt::SettingsChange {
+                    max_delivery_count: Some(3),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        get.assert_async().await;
+        put.assert_async().await;
+        assert_eq!(r.succeeded(), 1, "{:?}", r.items);
+        assert_eq!(audit.entries().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn update_settings_refuses_fixed_and_foreign_settings_before_the_gate() {
+        let server = mockito::Server::new_async().await;
+        let (gate, audit) = fake_gate();
+        let op = operator(&server, gate);
+        for change in [
+            crate::mgmt::SettingsChange {
+                requires_session: Some(true),
+                ..Default::default()
+            },
+            crate::mgmt::SettingsChange {
+                support_ordering: Some(true),
+                ..Default::default()
+            },
+            crate::mgmt::SettingsChange::default(),
+        ] {
+            assert!(matches!(
+                op.update_settings(EntityRef::queue("orders"), change).await,
+                Err(Error::Invalid(_))
+            ));
+        }
+        assert!(audit.entries().is_empty());
     }
 
     #[tokio::test]

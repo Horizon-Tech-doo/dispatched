@@ -11,9 +11,7 @@ use crate::state::AppState;
 use dispatched_core::EntityKind;
 use dispatched_core::jobs::JobKind;
 use dispatched_core::mgmt::incumbent::{ImportEntity, export_entities, parse_entities};
-use dispatched_core::mgmt::{
-    AccessRight, Description, EntityRef, EntityStatus, KeySlot, RuleSpec, SettingsChange,
-};
+use dispatched_core::mgmt::{AccessRight, Description, EntityRef, EntityStatus, KeySlot, RuleSpec};
 use dispatched_core::{EntitySpec, ExportFormat};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -37,16 +35,6 @@ impl TryFrom<&EntityRefForm> for EntityRef {
 /// How an entity reads in a title: "queue orders", "subscription events/Subscriptions/all".
 fn named(e: &EntityRef) -> String {
     format!("{} {}", e.kind().as_str(), e.path())
-}
-
-/// `d` with `changes` put on its settings by `apply`; everything else is left as read.
-pub fn updated<T>(
-    mut d: Description<T>,
-    changes: &SettingsChange,
-    apply: impl FnOnce(&mut T, &SettingsChange) -> dispatched_core::Result<()>,
-) -> dispatched_core::Result<Description<T>> {
-    apply(&mut d.settings, changes)?;
-    Ok(d)
 }
 
 /// A job that changes one or more entities.
@@ -126,8 +114,8 @@ pub async fn entity_create(
     .await
 }
 
-/// Only the given settings change, on the description as it is now (read when the update is
-/// submitted): what someone else changed meanwhile in other settings is kept.
+/// Only the given settings change. The core reads the description after the confirmation,
+/// so what someone else changed meanwhile in other settings is kept.
 pub async fn entity_update(
     state: &AppState,
     ev: Arc<dyn Events>,
@@ -141,31 +129,8 @@ pub async fn entity_update(
     if change.is_empty() {
         return Err(CommandError::new("invalid", "Nothing to change."));
     }
-    let active = state.active_for(profile_id).await?;
-    let m = active.explorer.management_client();
-    let spec = match &target {
-        EntityRef::Queue { name } => EntitySpec::Queue(
-            name.clone(),
-            updated(m.get_queue_description(name).await?, &change, |s, c| {
-                c.apply_queue(s, false)
-            })?,
-        ),
-        EntityRef::Topic { name } => EntitySpec::Topic(
-            name.clone(),
-            updated(m.get_topic_description(name).await?, &change, |s, c| {
-                c.apply_topic(s, false)
-            })?,
-        ),
-        EntityRef::Subscription { topic, name } => EntitySpec::Subscription {
-            topic: topic.clone(),
-            name: name.clone(),
-            d: updated(m.get_subscription(topic, name).await?, &change, |s, c| {
-                c.apply_subscription(s, false)
-            })?,
-            rule: None,
-        },
-    };
     let title = format!("Update {}", named(&target));
+    let t = target.clone();
     run(
         state,
         ev,
@@ -173,7 +138,7 @@ pub async fn entity_update(
         JobKind::UpdateEntities,
         &target,
         title,
-        move |op| Box::pin(async move { op.update_entity(spec).await }),
+        move |op| Box::pin(async move { op.update_settings(t, change).await }),
     )
     .await
 }
@@ -589,28 +554,10 @@ mod tests {
     use crate::events::Recorder;
     use crate::ops::test_util::state;
     use dispatched_core::mgmt::incumbent::parse_entities;
-    use dispatched_core::mgmt::{Description, QueueSettings};
     use std::sync::Arc;
 
     const FILE: &str =
         include_str!("../../../../crates/dispatched-core/tests/fixtures/incumbent_entities.xml");
-
-    #[test]
-    fn update_applies_only_changed_fields_to_a_fresh_description() {
-        // Opened with max size 1024; someone set it to 2048 meanwhile.
-        let fresh = Description::new(QueueSettings {
-            max_size_in_megabytes: Some(2048),
-            max_delivery_count: Some(10),
-            ..Default::default()
-        });
-        let raw_before = fresh.raw.clone();
-        let changes: SettingsChange =
-            serde_json::from_value(serde_json::json!({"max_delivery_count": 3})).unwrap();
-        let d = updated(fresh, &changes, |s, c| c.apply_queue(s, false)).unwrap();
-        assert_eq!(d.settings.max_size_in_megabytes, Some(2048));
-        assert_eq!(d.settings.max_delivery_count, Some(3));
-        assert_eq!(d.raw, raw_before);
-    }
 
     #[tokio::test]
     async fn empty_update_is_refused_before_a_job() {
