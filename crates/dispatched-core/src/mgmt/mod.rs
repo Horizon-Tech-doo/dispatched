@@ -1,6 +1,7 @@
 //! Service Bus management API (ATOM over HTTPS; plain HTTP on the emulator).
 
 pub mod atom_write;
+pub mod change;
 mod details;
 pub mod incumbent;
 pub mod model;
@@ -12,6 +13,7 @@ pub(crate) mod xml;
 pub use atom_write::{
     queue_entry, rule_entry, subscription_entry, subscription_entry_with_rule, topic_entry,
 };
+pub use change::{FieldIssue, IssueReason, SettingsChange};
 pub use details::{EntityDetails, EntityKind, EntityProperty};
 pub use model::{
     AccessPolicy, AccessRight, Description, EntityRef, EntityStatus, QueueSettings, RuleSpec,

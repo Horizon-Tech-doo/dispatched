@@ -447,6 +447,36 @@ pub fn parse_when(text: &str, now: OffsetDateTime) -> Result<OffsetDateTime> {
     OffsetDateTime::parse(t, &Rfc3339).map_err(|_| bad())
 }
 
+/// A duration as the shortest text [`parse_duration`] reads back exactly: days, hours, minutes
+/// and seconds, largest first (`1d1h1m1s`, `1m30s`), seconds with a fraction below one
+/// (`1.5s`); `max` for `TimeSpan.MaxValue`.
+pub fn duration_text(d: std::time::Duration) -> String {
+    if d == crate::mgmt::model::TimeSpan::MAX {
+        return "max".into();
+    }
+    let total = d.as_secs();
+    let (days, hours, minutes, secs) = (
+        total / 86_400,
+        total % 86_400 / 3_600,
+        total % 3_600 / 60,
+        total % 60,
+    );
+    let mut out = String::new();
+    for (n, unit) in [(days, 'd'), (hours, 'h'), (minutes, 'm')] {
+        if n > 0 {
+            out.push_str(&format!("{n}{unit}"));
+        }
+    }
+    let nanos = d.subsec_nanos();
+    if nanos > 0 {
+        let frac = format!("{nanos:09}");
+        out.push_str(&format!("{secs}.{}s", frac.trim_end_matches('0')));
+    } else if secs > 0 || out.is_empty() {
+        out.push_str(&format!("{secs}s"));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -635,5 +665,33 @@ mod tests {
             duration_from_ticks(15_000_000),
             time::Duration::milliseconds(1500)
         );
+    }
+}
+
+#[cfg(test)]
+mod duration_text_tests {
+    use super::*;
+    use crate::mgmt::change::parse_setting_duration;
+    use crate::mgmt::model::TimeSpan;
+    use std::time::Duration;
+
+    #[test]
+    fn duration_text_round_trips() {
+        let cases = [
+            (Duration::from_secs(1), "1s"),
+            (Duration::from_secs(45), "45s"),
+            (Duration::from_secs(90), "1m30s"),
+            (Duration::from_secs(5400), "1h30m"),
+            (Duration::from_secs(86_400 + 3600 + 60 + 1), "1d1h1m1s"),
+            (Duration::from_secs(14 * 86_400), "14d"),
+            (Duration::from_millis(1500), "1.5s"),
+            (Duration::from_millis(250), "0.25s"),
+            (Duration::from_nanos(1), "0.000000001s"),
+            (TimeSpan::MAX, "max"),
+        ];
+        for (d, text) in cases {
+            assert_eq!(duration_text(d), text);
+            assert_eq!(parse_setting_duration(text).unwrap(), d, "{text}");
+        }
     }
 }

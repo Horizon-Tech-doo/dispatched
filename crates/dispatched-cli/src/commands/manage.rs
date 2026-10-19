@@ -17,8 +17,8 @@ use dispatched_core::mgmt::incumbent::{ImportEntity, export_entities, parse_enti
 use dispatched_core::mgmt::policies::views;
 use dispatched_core::mgmt::{
     AccessPolicy, AccessRight, CorrelationProperty, Description, EntityKind, EntityRef,
-    EntityStatus, KeySlot, PolicyView, QueueSettings, RuleFilter, RuleSpec, SubscriptionSettings,
-    TimeSpan, TopicSettings,
+    EntityStatus, IssueReason, KeySlot, PolicyView, QueueSettings, RuleFilter, RuleSpec,
+    SettingsChange, SubscriptionSettings, TimeSpan, TopicSettings,
 };
 use dispatched_core::{EntityPath, EntitySpec, Explorer, ExportFormat, Mutation};
 use secrecy::ExposeSecret;
@@ -374,14 +374,6 @@ fn opt_duration(flag: &str, text: &Option<String>) -> anyhow::Result<Option<Dura
     text.as_deref().map(|t| duration(flag, t)).transpose()
 }
 
-/// A name flag where `""` means "none".
-fn name_or_clear(v: &Option<String>) -> Option<Option<String>> {
-    v.as_ref().map(|s| {
-        let s = s.trim();
-        (!s.is_empty()).then(|| s.to_string())
-    })
-}
-
 impl SettingsArgs {
     /// `Some(true)` for `--batched`, `Some(false)` for `--no-batched`.
     fn batched(&self) -> Option<bool> {
@@ -392,63 +384,50 @@ impl SettingsArgs {
         }
     }
 
-    /// The flags given that `kind` does not have, as `--flag` names.
-    fn not_for(&self, kind: EntityKind) -> Vec<&'static str> {
-        let given = [
-            ("--lock-duration", self.lock_duration.is_some()),
-            ("--max-size", self.max_size.is_some()),
-            ("--duplicate-detection", self.duplicate_detection.is_some()),
-            ("--max-delivery-count", self.max_delivery_count.is_some()),
-            ("--forward-to", self.forward_to.is_some()),
-            ("--forward-dlq-to", self.forward_dlq_to.is_some()),
-            ("--sessions", self.sessions.is_some()),
-            ("--partitioning", self.partitioning.is_some()),
-            (
-                "--dead-letter-on-expiration",
-                self.dead_letter_on_expiration.is_some(),
-            ),
-        ];
-        let missing: &[&str] = match kind {
-            EntityKind::Queue => &[],
-            EntityKind::Topic => &[
-                "--lock-duration",
-                "--max-delivery-count",
-                "--forward-to",
-                "--forward-dlq-to",
-                "--sessions",
-                "--dead-letter-on-expiration",
-            ],
-            EntityKind::Subscription => &["--max-size", "--duplicate-detection", "--partitioning"],
-        };
-        given
-            .into_iter()
-            .filter(|(flag, set)| *set && missing.contains(flag))
-            .map(|(flag, _)| flag)
-            .collect()
+    /// The given flags as a settings change.
+    pub fn change(&self) -> anyhow::Result<SettingsChange> {
+        Ok(SettingsChange {
+            lock_duration: opt_duration("lock-duration", &self.lock_duration)?,
+            max_size_in_megabytes: self.max_size,
+            default_message_time_to_live: opt_duration("ttl", &self.ttl)?,
+            auto_delete_on_idle: opt_duration("auto-delete-on-idle", &self.auto_delete_on_idle)?,
+            duplicate_detection_history_time_window: opt_duration(
+                "duplicate-detection",
+                &self.duplicate_detection,
+            )?,
+            max_delivery_count: self.max_delivery_count,
+            forward_to: self.forward_to.clone(),
+            forward_dead_lettered_messages_to: self.forward_dlq_to.clone(),
+            requires_session: self.sessions,
+            enable_partitioning: self.partitioning,
+            enable_batched_operations: self.batched(),
+            dead_lettering_on_message_expiration: self.dead_letter_on_expiration,
+            user_metadata: self.metadata.clone(),
+            ..Default::default()
+        })
     }
 
     /// Refuse flags `kind` does not have and, on update, the ones fixed at creation.
-    fn check(&self, kind: EntityKind, create: bool) -> anyhow::Result<()> {
-        let wrong = self.not_for(kind);
+    fn check(&self, change: &SettingsChange, kind: EntityKind, create: bool) -> anyhow::Result<()> {
+        let issues = change.issues(kind, create);
+        let flags = |r: IssueReason| -> Vec<&str> {
+            issues
+                .iter()
+                .filter(|i| i.reason == r)
+                .map(|i| flag_of(i.field))
+                .collect()
+        };
+        let wrong = flags(IssueReason::NotForKind);
         if !wrong.is_empty() {
             anyhow::bail!("{} does not apply to a {}", wrong.join(", "), kind.as_str());
         }
-        if !create {
-            let fixed: Vec<&str> = [
-                ("--sessions", self.sessions.is_some()),
-                ("--partitioning", self.partitioning.is_some()),
-            ]
-            .into_iter()
-            .filter(|(_, set)| *set)
-            .map(|(f, _)| f)
-            .collect();
-            if !fixed.is_empty() {
-                anyhow::bail!(
-                    "{} cannot be changed after the entity is created; create a new one (`entity \
-                     duplicate` copies the other settings)",
-                    fixed.join(", ")
-                );
-            }
+        let fixed = flags(IssueReason::FixedAtCreation);
+        if !fixed.is_empty() {
+            anyhow::bail!(
+                "{} cannot be changed after the entity is created; create a new one (`entity \
+                 duplicate` copies the other settings)",
+                fixed.join(", ")
+            );
         }
         Ok(())
     }
@@ -472,74 +451,16 @@ impl SettingsArgs {
 
     /// Put the given flags on a queue's settings (`create`: a new queue).
     pub fn apply_queue(&self, s: &mut QueueSettings, create: bool) -> anyhow::Result<()> {
-        self.check(EntityKind::Queue, create)?;
-        set(
-            &mut s.lock_duration,
-            opt_duration("lock-duration", &self.lock_duration)?,
-        );
-        set(&mut s.max_size_in_megabytes, self.max_size);
-        set(
-            &mut s.default_message_time_to_live,
-            opt_duration("ttl", &self.ttl)?,
-        );
-        set(
-            &mut s.auto_delete_on_idle,
-            opt_duration("auto-delete-on-idle", &self.auto_delete_on_idle)?,
-        );
-        if let Some(w) = opt_duration("duplicate-detection", &self.duplicate_detection)? {
-            duplicate_window(
-                &mut s.requires_duplicate_detection,
-                &mut s.duplicate_detection_history_time_window,
-                w,
-                create,
-            )?;
-        }
-        set(&mut s.max_delivery_count, self.max_delivery_count);
-        if let Some(v) = name_or_clear(&self.forward_to) {
-            s.forward_to = v;
-        }
-        if let Some(v) = name_or_clear(&self.forward_dlq_to) {
-            s.forward_dead_lettered_messages_to = v;
-        }
-        set(&mut s.requires_session, self.sessions);
-        set(&mut s.enable_partitioning, self.partitioning);
-        set(&mut s.enable_batched_operations, self.batched());
-        set(
-            &mut s.dead_lettering_on_message_expiration,
-            self.dead_letter_on_expiration,
-        );
-        if let Some(v) = metadata(&self.metadata) {
-            s.user_metadata = v;
-        }
-        Ok(())
+        let change = self.change()?;
+        self.check(&change, EntityKind::Queue, create)?;
+        Ok(change.apply_queue(s, create)?)
     }
 
     /// Put the given flags on a topic's settings.
     pub fn apply_topic(&self, s: &mut TopicSettings, create: bool) -> anyhow::Result<()> {
-        self.check(EntityKind::Topic, create)?;
-        set(&mut s.max_size_in_megabytes, self.max_size);
-        set(
-            &mut s.default_message_time_to_live,
-            opt_duration("ttl", &self.ttl)?,
-        );
-        set(
-            &mut s.auto_delete_on_idle,
-            opt_duration("auto-delete-on-idle", &self.auto_delete_on_idle)?,
-        );
-        if let Some(w) = opt_duration("duplicate-detection", &self.duplicate_detection)? {
-            duplicate_window(
-                &mut s.requires_duplicate_detection,
-                &mut s.duplicate_detection_history_time_window,
-                w,
-                create,
-            )?;
-        }
-        set(&mut s.enable_partitioning, self.partitioning);
-        set(&mut s.enable_batched_operations, self.batched());
-        if let Some(v) = metadata(&self.metadata) {
-            s.user_metadata = v;
-        }
-        Ok(())
+        let change = self.change()?;
+        self.check(&change, EntityKind::Topic, create)?;
+        Ok(change.apply_topic(s, create)?)
     }
 
     /// Put the given flags on a subscription's settings.
@@ -548,69 +469,30 @@ impl SettingsArgs {
         s: &mut SubscriptionSettings,
         create: bool,
     ) -> anyhow::Result<()> {
-        self.check(EntityKind::Subscription, create)?;
-        set(
-            &mut s.lock_duration,
-            opt_duration("lock-duration", &self.lock_duration)?,
-        );
-        set(
-            &mut s.default_message_time_to_live,
-            opt_duration("ttl", &self.ttl)?,
-        );
-        set(
-            &mut s.auto_delete_on_idle,
-            opt_duration("auto-delete-on-idle", &self.auto_delete_on_idle)?,
-        );
-        set(&mut s.max_delivery_count, self.max_delivery_count);
-        if let Some(v) = name_or_clear(&self.forward_to) {
-            s.forward_to = v;
-        }
-        if let Some(v) = name_or_clear(&self.forward_dlq_to) {
-            s.forward_dead_lettered_messages_to = v;
-        }
-        set(&mut s.requires_session, self.sessions);
-        set(&mut s.enable_batched_operations, self.batched());
-        set(
-            &mut s.dead_lettering_on_message_expiration,
-            self.dead_letter_on_expiration,
-        );
-        if let Some(v) = metadata(&self.metadata) {
-            s.user_metadata = v;
-        }
-        Ok(())
+        let change = self.change()?;
+        self.check(&change, EntityKind::Subscription, create)?;
+        Ok(change.apply_subscription(s, create)?)
     }
 }
 
-/// Set `field` when the flag was given.
-fn set<T>(field: &mut Option<T>, flag: Option<T>) {
-    if flag.is_some() {
-        *field = flag;
+/// A settings field's flag.
+fn flag_of(field: &str) -> &'static str {
+    match field {
+        "lock_duration" => "--lock-duration",
+        "max_size_in_megabytes" => "--max-size",
+        "default_message_time_to_live" => "--ttl",
+        "auto_delete_on_idle" => "--auto-delete-on-idle",
+        "duplicate_detection_history_time_window" => "--duplicate-detection",
+        "max_delivery_count" => "--max-delivery-count",
+        "forward_to" => "--forward-to",
+        "forward_dead_lettered_messages_to" => "--forward-dlq-to",
+        "requires_session" => "--sessions",
+        "enable_partitioning" => "--partitioning",
+        "enable_batched_operations" => "--batched",
+        "dead_lettering_on_message_expiration" => "--dead-letter-on-expiration",
+        "user_metadata" => "--metadata",
+        _ => "a setting",
     }
-}
-
-/// `--metadata`: `""` clears.
-fn metadata(v: &Option<String>) -> Option<Option<String>> {
-    v.as_ref().map(|s| (!s.is_empty()).then(|| s.clone()))
-}
-
-/// `--duplicate-detection`: on create, detection on with this window; on update, the window
-/// of an entity that has detection (it cannot be turned on later).
-fn duplicate_window(
-    requires: &mut Option<bool>,
-    window: &mut Option<Duration>,
-    w: Duration,
-    create: bool,
-) -> anyhow::Result<()> {
-    if create {
-        *requires = Some(true);
-    } else if *requires != Some(true) {
-        anyhow::bail!(
-            "duplicate detection is off on this entity and can only be turned on when it is \
-             created"
-        );
-    }
-    *window = Some(w);
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------------------------

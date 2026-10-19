@@ -554,6 +554,33 @@ impl Operator {
         .await
     }
 
+    /// Replace the filter and action of an existing rule, read-modify-write so the values of
+    /// unchanged correlation properties keep their types. The filter is checked before the
+    /// confirmation.
+    pub async fn update_rule(&self, sub: EntityRef, rule: RuleSpec) -> Result<JobReport> {
+        let EntityRef::Subscription { topic, name } = &sub else {
+            return Err(Error::Invalid(format!(
+                "{} is not a subscription; rules belong to subscriptions",
+                sub.path()
+            )));
+        };
+        validate_filter(&rule.filter)?;
+        let op = Operation::update_rule(&sub, &rule.name);
+        gated(&self.gate, &op, || async {
+            let m = self.mgmt();
+            let r = async {
+                let mut d = m.get_rule(topic, name, &rule.name).await?;
+                d.settings.filter = rule.filter.clone();
+                d.settings.action = rule.action.clone();
+                m.update_rule(topic, name, &d).await
+            }
+            .await
+            .map(|()| Some(format!("rule {} updated", rule.name)));
+            Ok(single_job(JobKind::UpdateEntities, &sub, outcome(r)))
+        })
+        .await
+    }
+
     /// Remove rule `rule` from a subscription.
     pub async fn remove_rule(&self, sub: EntityRef, rule: String) -> Result<JobReport> {
         let EntityRef::Subscription { topic, name } = &sub else {
@@ -1429,6 +1456,132 @@ mod tests {
             Outcome::PartlyFailed,
             "the copy was made, the delete was not"
         );
+    }
+
+    #[tokio::test]
+    async fn update_rule_is_gated_and_reads_back() {
+        let mut server = mockito::Server::new_async().await;
+        let _get = server
+            .mock("GET", "/events/Subscriptions/billing/Rules/priority")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(include_str!("../../tests/fixtures/rule_entry.xml"))
+            .create_async()
+            .await;
+        let put = server
+            .mock("PUT", "/events/Subscriptions/billing/Rules/priority")
+            .match_query(Matcher::Any)
+            .match_header("if-match", "*")
+            .match_body(Matcher::Regex(
+                "<SqlExpression>region = 'us'</SqlExpression>".into(),
+            ))
+            .with_status(200)
+            .create_async()
+            .await;
+        let (gate, audit) = fake_gate();
+        let r = operator(&server, gate)
+            .update_rule(
+                EntityRef::subscription("events", "billing"),
+                RuleSpec {
+                    name: "priority".into(),
+                    filter: RuleFilter::Sql {
+                        expression: "region = 'us'".into(),
+                    },
+                    action: None,
+                },
+            )
+            .await
+            .unwrap();
+        put.assert_async().await;
+        assert_eq!(r.succeeded(), 1, "{:?}", r.items);
+        assert_eq!(
+            audit.entries()[0].summary,
+            "Update rule priority of events/Subscriptions/billing on dev"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_rule_keeps_unchanged_property_types() {
+        let mut server = mockito::Server::new_async().await;
+        let _get = server
+            .mock("GET", "/events/Subscriptions/billing/Rules/priority")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(include_str!("../../tests/fixtures/rule_entry.xml"))
+            .create_async()
+            .await;
+        let put = server
+            .mock("PUT", "/events/Subscriptions/billing/Rules/priority")
+            .match_query(Matcher::Any)
+            .match_body(Matcher::Regex(
+                "i:type=\"d6p1:int\" xmlns:d6p1=\"[^\"]+\">2</Value>".into(),
+            ))
+            .with_status(200)
+            .create_async()
+            .await;
+        let (gate, _audit) = fake_gate();
+        let current = crate::mgmt::RuleFilter::Correlation {
+            correlation_id: Some("batch-8".into()),
+            message_id: None,
+            to: None,
+            reply_to: None,
+            subject: Some("priority".into()),
+            session_id: None,
+            reply_to_session_id: None,
+            content_type: None,
+            properties: vec![
+                crate::mgmt::CorrelationProperty {
+                    name: "region".into(),
+                    value: "eu".into(),
+                },
+                crate::mgmt::CorrelationProperty {
+                    name: "tier".into(),
+                    value: "2".into(),
+                },
+            ],
+        };
+        operator(&server, gate)
+            .update_rule(
+                EntityRef::subscription("events", "billing"),
+                RuleSpec {
+                    name: "priority".into(),
+                    filter: current,
+                    action: None,
+                },
+            )
+            .await
+            .unwrap();
+        put.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn update_rule_refuses_an_empty_correlation_filter_before_the_gate() {
+        let server = mockito::Server::new_async().await;
+        let (gate, audit) = fake_gate();
+        let empty = RuleSpec {
+            name: "c".into(),
+            filter: RuleFilter::Correlation {
+                correlation_id: None,
+                message_id: None,
+                to: None,
+                reply_to: None,
+                subject: None,
+                session_id: None,
+                reply_to_session_id: None,
+                content_type: None,
+                properties: vec![],
+            },
+            action: None,
+        };
+        let e = operator(&server, gate)
+            .update_rule(EntityRef::subscription("events", "billing"), empty)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(e, Error::Invalid(ref m) if m.contains("matches no message")),
+            "{e}"
+        );
+        assert!(audit.entries().is_empty());
     }
 
     #[tokio::test]
