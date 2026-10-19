@@ -383,12 +383,24 @@ impl From<&ItemResult> for ItemView {
     }
 }
 
-/// A received message for the job's live list: the grid's summary, sequence number as text.
-#[derive(Debug, Clone, Serialize)]
-pub struct ReceivedView {
-    pub sequence_number: String,
-    #[serde(flatten)]
-    pub summary: MessageSummary,
+/// A received message for the job's live list: the grid's summary, with its sequence number as
+/// text (serialised through [`with_text_sequence`], so the field appears once).
+#[derive(Debug, Clone)]
+pub struct ReceivedView(pub MessageSummary);
+
+/// `summary` with `sequence_number` replaced by its decimal text.
+pub fn with_text_sequence(mut summary: serde_json::Value) -> serde_json::Value {
+    if let Some(seq) = summary.get("sequence_number").and_then(|v| v.as_i64()) {
+        summary["sequence_number"] = serde_json::Value::String(seq.to_string());
+    }
+    summary
+}
+
+impl Serialize for ReceivedView {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let v = serde_json::to_value(&self.0).map_err(serde::ser::Error::custom)?;
+        with_text_sequence(v).serialize(s)
+    }
 }
 
 // `MessageSummary` is not `PartialEq`; compare what is sent.
@@ -400,10 +412,7 @@ impl PartialEq for ReceivedView {
 
 impl From<MessageSummary> for ReceivedView {
     fn from(summary: MessageSummary) -> Self {
-        Self {
-            sequence_number: summary.sequence_number.to_string(),
-            summary,
-        }
+        Self(summary)
     }
 }
 
@@ -616,6 +625,16 @@ pub fn decode_state(b64: &str) -> Result<Vec<u8>, CommandError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn received_view_sends_the_sequence_number_once_as_text() {
+        let summary = serde_json::json!({"sequence_number": 9_007_199_254_740_993_i64, "subject": "x"});
+        let v = with_text_sequence(summary);
+        assert_eq!(v["sequence_number"], "9007199254740993");
+        assert_eq!(v["subject"], "x");
+        let text = v.to_string();
+        assert_eq!(text.matches("sequence_number").count(), 1, "{text}");
+    }
 
     #[test]
     fn sequences_accept_strings_and_numbers() {
