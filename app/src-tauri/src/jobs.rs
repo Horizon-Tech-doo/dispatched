@@ -15,6 +15,8 @@ struct Entry {
     output: Option<PathBuf>,
     /// Stopped because its connection closed (disconnect, another connect, sign-out), not by the user.
     stopped_by_close: bool,
+    /// An operate job's report, once it finished.
+    report: Option<std::sync::Arc<crate::ops::operate::StoredReport>>,
 }
 
 #[derive(Default)]
@@ -24,7 +26,26 @@ pub struct Jobs {
     /// Exports write only to these: the webview names a pick, never a path, and the dialog has
     /// asked "replace?" for each. At most one is unspent, and only for [`PICK_TTL`].
     picks: Mutex<HashMap<String, (PathBuf, Instant)>>,
+    /// Confirmations the jobs wait for: cancelling a job, or closing its connection, answers
+    /// them "no".
+    confirms: std::sync::Arc<crate::safety::Confirms>,
+    /// Purge plans counted for a confirmation, by plan id, with the profile they were counted
+    /// on and when. Each runs once.
+    plans: Mutex<HashMap<String, PlannedPurge>>,
+    /// Files the native open dialog returned, by one-time pick id: bodies, templates and import
+    /// files are read only from these, never from a path the webview names.
+    opened: Mutex<HashMap<String, (Vec<PathBuf>, Instant)>>,
 }
+
+/// Purge plans waiting to run.
+pub struct PlannedPurge {
+    pub profile_id: String,
+    pub plans: Vec<dispatched_core::ops::PurgePlan>,
+    pub at: Instant,
+}
+
+/// How long counted purge plans stay valid: counts go stale.
+const PLAN_TTL: Duration = Duration::from_secs(10 * 60);
 
 impl Jobs {
     /// Remember a path the save dialog returned. Returns its pick id. It replaces any unspent
@@ -58,6 +79,26 @@ impl Jobs {
             .insert(id.to_string(), (path, Instant::now()));
     }
 
+    /// Remember files the open dialog returned. Returns their pick id.
+    pub fn open_pick(&self, paths: Vec<PathBuf>) -> String {
+        let id = format!("open-{}", uuid::Uuid::new_v4().simple());
+        let mut all = self.opened.lock().unwrap();
+        all.retain(|_, (_, at)| at.elapsed() <= PICK_TTL);
+        all.insert(id.clone(), (paths, Instant::now()));
+        id
+    }
+
+    /// The files of open pick `id`, once, if still fresh.
+    pub fn take_open(&self, id: &str) -> Option<Vec<PathBuf>> {
+        let (paths, at) = self.opened.lock().unwrap().remove(id)?;
+        (at.elapsed() <= PICK_TTL).then_some(paths)
+    }
+
+    /// The confirmations the jobs wait for.
+    pub fn confirms(&self) -> std::sync::Arc<crate::safety::Confirms> {
+        self.confirms.clone()
+    }
+
     /// A new job id and its cancel token.
     pub fn start(&self) -> (String, CancellationToken) {
         let id = format!("job-{}", uuid::Uuid::new_v4().simple());
@@ -66,8 +107,7 @@ impl Jobs {
             id.clone(),
             Entry {
                 cancel: Some(token.clone()),
-                output: None,
-                stopped_by_close: false,
+                ..Entry::default()
             },
         );
         (id, token)
@@ -75,7 +115,8 @@ impl Jobs {
 
     /// Ask a running job to stop. False when there is no such running job.
     pub fn cancel(&self, id: &str) -> bool {
-        match self
+        // The token first, so a question asked after this sees it; then the waiting ones.
+        let found = match self
             .inner
             .lock()
             .unwrap()
@@ -87,7 +128,9 @@ impl Jobs {
                 true
             }
             None => false,
-        }
+        };
+        self.confirms.cancel_job(id);
+        found
     }
 
     /// Ask every running job to stop. Returns how many.
@@ -112,6 +155,8 @@ impl Jobs {
                 n += 1;
             }
         }
+        drop(inner);
+        self.confirms.cancel_all();
         n
     }
 
@@ -154,6 +199,44 @@ impl Jobs {
             e.cancel = None;
             e.output = output;
         }
+    }
+
+    /// Keep a finished operate job's report.
+    pub fn set_report(&self, id: &str, report: std::sync::Arc<crate::ops::operate::StoredReport>) {
+        if let Some(e) = self.inner.lock().unwrap().get_mut(id) {
+            e.report = Some(report);
+        }
+    }
+
+    /// A finished operate job's report.
+    pub fn report(&self, id: &str) -> Option<std::sync::Arc<crate::ops::operate::StoredReport>> {
+        self.inner
+            .lock()
+            .unwrap()
+            .get(id)
+            .and_then(|e| e.report.clone())
+    }
+
+    /// Remember purge plans until they run. Returns their plan id.
+    pub fn plan(&self, profile_id: &str, plans: Vec<dispatched_core::ops::PurgePlan>) -> String {
+        let id = format!("plan-{}", uuid::Uuid::new_v4().simple());
+        let mut all = self.plans.lock().unwrap();
+        all.retain(|_, p| p.at.elapsed() <= PLAN_TTL);
+        all.insert(
+            id.clone(),
+            PlannedPurge {
+                profile_id: profile_id.to_string(),
+                plans,
+                at: Instant::now(),
+            },
+        );
+        id
+    }
+
+    /// The plans of `id`, once, if still fresh.
+    pub fn take_plan(&self, id: &str) -> Option<PlannedPurge> {
+        let p = self.plans.lock().unwrap().remove(id)?;
+        (p.at.elapsed() <= PLAN_TTL).then_some(p)
     }
 
     /// The file a finished job wrote.

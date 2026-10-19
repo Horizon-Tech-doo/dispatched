@@ -2,11 +2,13 @@ import { useQueryClient } from "@tanstack/react-query";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type Dispatch, type ReactNode } from "react";
 import { commands, type ExportFormat, type FilterSpec, type PeekView } from "@/engine";
 import { useTheme } from "@/ui";
-import { startEventCapture } from "./drawer/activity";
+import { recordStore, startEventCapture } from "./drawer/activity";
+import { createExternalChanges } from "./drawer/externalChanges";
 import { useConnectionController, type ConnectionController } from "./connection";
 import { clearViewStates } from "./messages/viewStore";
 import { connectionStringScope, displayName } from "./entityId";
 import { installStore } from "./sheets/installState";
+import type { OperationSeed } from "./operate/seed";
 import { usePrefs, useProfileShell, type Prefs, type ProfileShell, type ShellAction } from "./state";
 
 export type SheetState =
@@ -18,6 +20,12 @@ export type SheetState =
   /** Export messages of one view: `selected` are the grid's selected sequence numbers (or one message's), `total` the
    *  view's listed count (null when unknown). `scope` and `format` start the sheet on those choices (a retry). */
   | { kind: "export"; entity: string; view: PeekView; filter: FilterSpec; selected: number[]; total: number | null; scope?: "all" | "selected"; format?: ExportFormat }
+  /** An operation (send, delete, move, purge, …), with what it starts from. */
+  | ({ kind: "operation" } & OperationSeed)
+  /** A finished job's report. */
+  | { kind: "report"; jobId: string }
+  /** A running job whose sheet is gone, to answer the confirmation it waits for. */
+  | { kind: "job"; jobId: string }
   | null;
 
 /** A short line in the status bar about what the user just did (a copy). `details` offers the activity log, where a failed
@@ -128,6 +136,24 @@ export function ShellProvider({ children }: { children: ReactNode }) {
     }
   }, []);
   const qc = useQueryClient();
+  // The shared activity log: what it holds now, then (while connected) the changes the CLI and agents make.
+  useEffect(() => {
+    let live = true;
+    commands.activityList({ limit: 500 }).then(
+      (rs) => live && recordStore.merge([...rs].reverse()),
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  }, []);
+  const followed = useRef<{ id: string; name: string } | null>(null);
+  followed.current = conn.status === "connected" && conn.view ? { id: conn.view.profile_id, name: conn.view.profile_name } : null;
+  useEffect(() => {
+    const x = createExternalChanges({ qc, profile: () => followed.current });
+    void x.poll();
+    return x.start();
+  }, [qc]);
   const refresh = useCallback(() => {
     void qc.invalidateQueries({ queryKey: ["entities"] });
     void qc.invalidateQueries({ queryKey: ["subscriptions"] });

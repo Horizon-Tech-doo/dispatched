@@ -2,12 +2,17 @@
 //! state and handle, so everything here is testable without a window.
 
 pub mod account;
+pub mod activity;
 pub mod browse;
 pub mod connection;
 pub mod dashboard;
 pub mod discovery;
+#[cfg(test)]
+mod emulator_m2b;
 pub mod entity;
 pub mod export;
+pub mod operate;
+pub mod operate_types;
 pub mod profiles;
 pub mod settings;
 pub mod tree;

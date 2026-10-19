@@ -402,13 +402,25 @@ impl ExplorerPlane<'_> {
         spec: &ReceiverSpec,
         wait: Duration,
     ) -> Result<Option<AmqpReceiver>> {
+        if spec.session == SessionChoice::NextAvailable {
+            // Wait in slices, taking the connection for one slice at a time, so other reads on
+            // this explorer are not held up for the whole accept wait.
+            return accept_in_slices(wait, |slice| async move {
+                let mut guard = self.0.connection().await?;
+                let result = guard
+                    .as_mut()
+                    .expect("opened")
+                    .try_accept_next(spec, slice)
+                    .await;
+                drop_if_broken(&self.0.ns, &mut guard, result).await
+            })
+            .await;
+        }
         let mut guard = self.0.connection().await?;
-        let conn = guard.as_mut().expect("opened");
-        let result = match spec.session {
-            SessionChoice::NextAvailable => conn.try_accept_next(spec, wait).await,
-            _ => conn.open_receiver(spec).await.map(Some),
-        };
-        drop_if_broken(&self.0.ns, &mut guard, result).await
+        let result = guard.as_mut().expect("opened").open_receiver(spec).await;
+        drop_if_broken(&self.0.ns, &mut guard, result)
+            .await
+            .map(Some)
     }
 
     /// The management description's `requires_session` and counts of `entity`; `None` when
@@ -548,6 +560,29 @@ impl MessagingBackend for ExplorerPlane<'_> {
         .await;
         let listing = sessions::combine(broker, tally)?;
         Ok(listing.sessions.into_iter().map(|s| s.id).collect())
+    }
+}
+
+/// The longest a next-available accept holds the connection in one go.
+const ACCEPT_SLICE: Duration = Duration::from_secs(1);
+
+/// Try `attempt(slice)` in slices of at most [`ACCEPT_SLICE`] until it returns a session or an
+/// error, or `wait` has passed (`Ok(None)`). It always tries once, with a zero slice when `wait`
+/// is zero. Each attempt takes and releases the connection itself.
+async fn accept_in_slices<T, F, Fut>(wait: Duration, mut attempt: F) -> Result<Option<T>>
+where
+    F: FnMut(Duration) -> Fut,
+    Fut: std::future::Future<Output = Result<Option<T>>>,
+{
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if let Some(found) = attempt(left.min(ACCEPT_SLICE)).await? {
+            return Ok(Some(found));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(None);
+        }
     }
 }
 
@@ -801,6 +836,57 @@ fn peek_target(kind: EntityKind, path: &str) -> Result<EntityPath> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn accept_in_slices_releases_the_connection_between_attempts() {
+        let conn = Arc::new(tokio::sync::Mutex::new(()));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let accept = {
+            let (conn, attempts) = (conn.clone(), attempts.clone());
+            accept_in_slices(Duration::from_secs(3), move |slice| {
+                let (conn, attempts) = (conn.clone(), attempts.clone());
+                async move {
+                    let _held = conn.lock().await;
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(slice).await;
+                    Ok::<Option<u8>, Error>(None)
+                }
+            })
+        };
+        let other = async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let start = tokio::time::Instant::now();
+            let _g = conn.lock().await;
+            start.elapsed()
+        };
+        let (accepted, waited) = tokio::join!(accept, other);
+        assert_eq!(accepted.unwrap(), None);
+        assert!(
+            waited <= ACCEPT_SLICE,
+            "a peek waited {waited:?} for the connection"
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn accept_in_slices_returns_the_first_session_and_tries_once_at_zero_wait() {
+        let calls = AtomicUsize::new(0);
+        let got = accept_in_slices(Duration::from_secs(10), |_| {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            async move { Ok::<_, Error>((n == 1).then_some(7u8)) }
+        })
+        .await;
+        assert_eq!(got.unwrap(), Some(7));
+        let once = AtomicUsize::new(0);
+        let none = accept_in_slices(Duration::ZERO, |slice| {
+            once.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(slice, Duration::ZERO);
+            async { Ok::<Option<u8>, Error>(None) }
+        })
+        .await;
+        assert_eq!(none.unwrap(), None);
+        assert_eq!(once.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn peek_target_follows_the_known_kind() {

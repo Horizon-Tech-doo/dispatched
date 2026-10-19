@@ -4,7 +4,7 @@
 use super::failed;
 use super::send::distinct;
 use crate::diagnostics::error_kind;
-use crate::jobs::{ItemOutcome, ItemResult, NotReached};
+use crate::jobs::{ItemOutcome, ItemResult, JobRun, NotReached};
 use crate::messaging::backend::{LockReceiver, MessagingBackend};
 use crate::messaging::sender::{chunks, copy_error};
 use crate::messaging::{
@@ -75,6 +75,27 @@ pub(crate) trait OnFound: Send {
         rx: Option<&mut dyn LockReceiver>,
         found: Found,
     ) -> ItemResult;
+}
+
+/// An [`OnFound`] that records each result in the job as soon as `on` returns it, so the
+/// progress sink sees items while the search runs. [`super::record`] then adds the rest.
+pub(crate) struct Live<'o, 'j, 'a> {
+    pub on: &'o mut dyn OnFound,
+    pub job: &'j mut JobRun<'a>,
+}
+
+#[async_trait]
+impl OnFound for Live<'_, '_, '_> {
+    async fn on_found(
+        &mut self,
+        plane: &mut dyn MessagingBackend,
+        rx: Option<&mut dyn LockReceiver>,
+        found: Found,
+    ) -> ItemResult {
+        let r = self.on.on_found(plane, rx, found).await;
+        self.job.item(r.clone());
+        r
+    }
 }
 
 /// The local clock read as the wall clock: anchored once, then monotonic (tokio time, so

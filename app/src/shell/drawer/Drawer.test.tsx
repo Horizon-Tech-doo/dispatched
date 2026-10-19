@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { commands, setTransport } from "@/engine";
 import { renderShell } from "../test-utils";
 import { ACTIVITY_CAP, activityStore, createJobStore, jobStore } from "./activity";
-import { finished, progress, started } from "./jobEvents";
+import { finished, itemEvent, progress, report, started } from "./jobEvents";
 
 /** The workbench with the drawer on its Jobs tab. */
 async function jobsTab() {
@@ -16,6 +16,42 @@ async function jobsTab() {
 }
 
 describe("Drawer", () => {
+  it('drawer shows "2 of 3 deleted, 1 failed" and opens the report', async () => {
+    const jobs = await jobsTab();
+    act(() => jobStore.apply(started("j1", "Delete 3 from orders", null, null, "delete")));
+    act(() => jobStore.apply(itemEvent("j1", { outcome: "succeeded" })));
+    const row = within(jobs).getByRole("listitem");
+    expect(within(row).getByText("1 done")).toBeInTheDocument();
+    expect(within(row).getByRole("button", { name: "Cancel Delete 3 from orders" })).toBeInTheDocument();
+    act(() => jobStore.apply(finished("j1", { report: report({ outcome: "partly-failed", items: 3, succeeded: 2, failed: 1, incomplete: 1, summary_line: "Deleted 2 of 3 messages from orders; 1 failed (sequence 7: lock lost)" }) })));
+    expect(within(row).getByText("2 of 3 deleted, 1 failed")).toBeInTheDocument();
+    // Partly failed is not the error form: the counts carry it, with the alert mark on the failed part.
+    expect(within(row).queryByText(/failed$/i, { selector: ".font-semibold" })).toBeNull();
+    await userEvent.click(within(row).getByRole("button", { name: "View report: Delete 3 from orders" }));
+    const sheet = await screen.findByRole("dialog", { name: "Delete 3 from orders" });
+    expect(within(sheet).getByText("Deleted 2 of 3 messages from orders; 1 failed (sequence 7: lock lost)")).toBeInTheDocument();
+  });
+
+  it("an operate job that was not confirmed says nothing changed, without an alert", async () => {
+    const jobs = await jobsTab();
+    act(() => jobStore.apply(started("j1", "Delete 3 from orders", null, null, "delete")));
+    act(() => jobStore.apply(finished("j1", { error: { kind: "denied", message: "denied: not confirmed" } })));
+    const row = within(jobs).getByRole("listitem");
+    expect(within(row).getByText("Not confirmed. Nothing was changed.")).toBeInTheDocument();
+    expect(row.querySelector("svg")).toBeNull();
+    expect(within(row).queryByRole("button", { name: /View report/ })).toBeNull();
+  });
+
+  it("an operate job stopped by a closing connection keeps its report", async () => {
+    const jobs = await jobsTab();
+    act(() => jobStore.apply(started("j1", "Move 3 from orders to billing", null, null, "move")));
+    act(() => jobStore.apply(finished("j1", { error: { kind: "stopped", message: "Stopped: the connection closed." }, report: report({ kind: "move", outcome: "cancelled", cancelled: true, items: 1, succeeded: 1 }) })));
+    const row = within(jobs).getByRole("listitem");
+    expect(within(row).getByText("Stopped: the connection closed after 1 moved.")).toBeInTheDocument();
+    expect(within(row).getByRole("button", { name: /View report/ })).toBeInTheDocument();
+    expect(row.querySelector("svg")).toBeNull();
+  });
+
   it("logs engine calls with durations and keeps jobs empty with an explanation", async () => {
     renderShell("default", { last_profile: "p-logistics" });
     const drawer = await screen.findByRole("region", { name: "Jobs and activity" });

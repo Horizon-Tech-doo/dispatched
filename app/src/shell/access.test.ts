@@ -7,10 +7,16 @@ describe("rightsOf", () => {
     expect(rightsOf("This identity can't list the namespace (needs Manage,EntityRead).", "Listen")).toEqual(["Manage"]);
     expect(rightsOf("forbidden: 401", "Manage")).toEqual(["Manage"]);
   });
-  it("maps EntityRead alone to Manage, and ignores a right it has no advice for", () => {
+  it("maps EntityRead alone to Manage, and names Send (M2b operations send)", () => {
     expect(rightsOf("access denied (needs EntityRead): x", "Listen")).toEqual(["Manage"]);
-    expect(rightsOf("access denied (needs Send): x", "Listen")).toEqual(["Listen"]);
-    expect(rightsOf("access denied (needs Send,Listen): x", "Manage")).toEqual(["Listen"]);
+    expect(rightsOf("access denied (needs Send): x", "Listen")).toEqual(["Send"]);
+    expect(rightsOf("access denied (needs Send,Listen): x", "Manage")).toEqual(["Send", "Listen"]);
+    expect(rightsOf("access denied (needs Bogus): x", "Manage")).toEqual(["Manage"]);
+  });
+
+  it("advises the Send right in the connection's own terms", () => {
+    expect(accessAdvice(["Send"], "connection-string")).toBe("This key has no Send right. Use a key whose policy includes Send (or Manage).");
+    expect(accessAdvice(["Send"], "entra")).toMatch(/Azure Service Bus Data Sender role/);
   });
 });
 

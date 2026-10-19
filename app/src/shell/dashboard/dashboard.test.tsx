@@ -296,10 +296,12 @@ describe("dashboard", () => {
     expect(screen.getByText("2 pinned entities · Counts are unavailable while the namespace can't be listed.")).toBeInTheDocument();
     // No banner of its own: the tree carries the explanation and the way to fix it.
     expect(within(screen.getByRole("main")).queryByText("Showing pinned entities only")).toBeNull();
-    // `orders` may be a topic: one "Kind unknown" glyph, in the grid and in the tree's pinned group; a subscription is known.
+    // `orders` may be a topic: a "Kind unknown" glyph in the grid; a subscription is known. The tree asks the namespace
+    // (M2b, `resolve_kind`) and shows what it is.
     expect(within(row).getByTitle("Kind unknown")).toBeInTheDocument();
     expect(within(within(grid).getByRole("row", { name: /tracking-sync/ })).queryByTitle("Kind unknown")).toBeNull();
-    expect(within(within(screen.getByRole("tree", { name: /^Namespace(,| \(|$)/ })).getByRole("treeitem", { name: /^orders/ })).getByTitle("Kind unknown")).toBeInTheDocument();
+    const treeRow = within(screen.getByRole("tree", { name: /^Namespace(,| \(|$)/ })).getByRole("treeitem", { name: /^orders/ });
+    await waitFor(() => expect(treeRow.querySelector('svg[data-kind="topic"]')).not.toBeNull());
     expect(within(row).getAllByText("?").length).toBeGreaterThan(0);
     // Nothing to filter by dead letters when no count is known.
     expect(screen.queryByRole("radio", { name: /With dead letters/ })).toBeNull();

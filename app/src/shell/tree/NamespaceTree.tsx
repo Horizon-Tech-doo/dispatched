@@ -1,6 +1,7 @@
 import { CircleAlert, SlidersHorizontal } from "lucide-react";
-import { useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { useEntities, useProfiles, useSubscriptionsFor } from "@/engine";
+import { Fragment, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useQueries } from "@tanstack/react-query";
+import { commands, useEntities, useProfiles, useSubscriptionsFor, type EntityKindName } from "@/engine";
 import {
   Button, ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger,
   CountBadge, EmptyState, EntityGlyph, Hint, IconButton, Input, LabelSwatch, Problem, Skeleton, SkeletonRows, Tree, cn, formatCount, formatNumber, rowHeight,
@@ -16,14 +17,17 @@ import { marksTier, type MarksTier } from "./marksLayout";
 import { accessAdvice, useAuthKind } from "../access";
 import { describeListError } from "./listError";
 import { buildNodes, type NsNode, type SubsState } from "./model";
+import { operateCommands, requiresSession } from "../palette/commands";
 import type { EntityCounts } from "@/engine";
 
 const errorKind = (e: Error) => (e as { kind?: string }).kind ?? "";
 
 const glyphOf = { namespace: "namespace", queue: "queue", topic: "topic", subscription: "subscription" } as const;
 
-/** A pinned entity is known by name only: unless it is a subscription (the id says so), its kind is not known. */
-const glyphKind = (n: NsNode) => (n.kind === "known" && n.entity?.kind !== "subscription" ? "unknown" : (n.entity?.kind ?? glyphOf[n.kind as keyof typeof glyphOf]));
+/** A pinned entity is known by name only: unless it is a subscription (the id says so), its kind is what the namespace
+ *  says when asked (`resolve_kind`), or unknown. */
+const glyphKind = (n: TreeRow) =>
+  n.kind === "known" && n.entity?.kind !== "subscription" ? (n.resolved ?? "unknown") : (n.entity?.kind ?? glyphOf[n.kind as keyof typeof glyphOf]);
 
 /** Unlaid-out panes measure 0x0; the tree renders a screenful until it is measured. */
 const FLOOR = { width: 280, height: 640 };
@@ -37,7 +41,7 @@ const showsValue = (k: CountKind, c: EntityCounts | null | undefined) => (k === 
 const capital = (w: string) => w[0].toUpperCase() + w.slice(1);
 
 /** A row in the tree: the node and what the connection's rules say about it. */
-type TreeRow = NsNode & { highlight: Highlight | null };
+type TreeRow = NsNode & { highlight: Highlight | null; resolved?: EntityKindName | null };
 
 /** How wide, in characters, each count's slot is: as wide as its widest value among the loaded entities, so a count's
  *  place in the row tells which count it is. */
@@ -145,7 +149,7 @@ function Row({ n, production, onRetry, marks }: { n: TreeRow; production: boolea
       const nameMin = marks.optional && marks.fixed ? "min-w-[6ch]" : "min-w-[2ch]";
       return (
         <>
-          <EntityGlyph kind={glyphKind(n)} className="shrink-0 text-icon" />
+          <EntityGlyph kind={glyphKind(n)} data-kind={glyphKind(n)} className="shrink-0 text-icon" />
           {n.kind === "known" && n.topic ? (
             // Name first, topic after it as secondary text: the topic gives way first when the row is narrow, then the name.
             <>
@@ -201,7 +205,23 @@ export function NamespaceTree() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [listing, subsKey, shell.expanded, filter, host],
   );
-  const byId = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
+  // Pinned and `EntityPath` entities are known by name only: ask once per connection what each is.
+  const knownIds = useMemo(() => listing?.known.filter((k) => !k.subscription).map((k) => k.entity) ?? [], [listing]);
+  const resolvedQueries = useQueries({
+    queries: knownIds.map((id) => ({
+      queryKey: ["resolve-kind", profileId, id],
+      queryFn: () => commands.resolveKind(profileId!, id),
+      enabled: profileId !== null,
+      staleTime: Infinity,
+      gcTime: Infinity,
+      retry: false,
+    })),
+  });
+  const resolvedKey = resolvedQueries.map((q) => q.data ?? "").join("|");
+  const resolvedOf = useMemo(() => {
+    const kinds = resolvedKey.split("|");
+    return new Map(knownIds.map((id, i) => [id, (kinds[i] || null) as EntityKindName | null]));
+  }, [knownIds, resolvedKey]);
   const chosen = shell.explorer.counts;
   // The rows with what the rules say about them and how a screen reader names them.
   const rows = useMemo<TreeRow[]>(
@@ -210,9 +230,12 @@ export function NamespaceTree() {
         const entityRow = n.kind === "queue" || n.kind === "topic" || n.kind === "subscription" || n.kind === "known";
         const highlight = entityRow ? highlightOf(n.label, n.counts, rules) : null;
         const said = entityRow ? rowLabel(n, chosen, highlight) : {};
-        return { ...n, highlight, ariaLabel: said.label, ariaDescription: said.description };
+        const resolved = n.kind === "known" && n.entity && n.entity.kind !== "subscription" ? (resolvedOf.get(n.entity.id) ?? null) : undefined;
+        // A pinned entity the namespace says is a topic opens as one.
+        const entity = resolved && n.entity && resolved !== "subscription" ? { ...n.entity, kind: resolved } : n.entity;
+        return { ...n, entity, resolved, highlight, ariaLabel: said.label, ariaDescription: said.description };
       }),
-    [nodes, rules, chosen],
+    [nodes, rules, chosen, resolvedOf],
   );
   // The loaded entities' counts, for the width of each count's slot (not only the rows in view or unfiltered).
   const widths = useMemo(
@@ -239,8 +262,9 @@ export function NamespaceTree() {
 
   const retryTopic = (topic: string) => void subQueries[expandedTopics.indexOf(topic)]?.refetch();
 
+  const rowById = useMemo(() => new Map(rows.map((n) => [n.id, n])), [rows]);
   function activate(id: string) {
-    const n = byId.get(id);
+    const n = rowById.get(id);
     if (!n) return;
     if (n.kind === "namespace") dispatch({ type: "open", tab: { id: DASHBOARD_ID, kind: "dashboard" } });
     else if (n.entity) dispatch({ type: "open", tab: n.entity });
@@ -249,8 +273,9 @@ export function NamespaceTree() {
   }
 
   const copy = (text: string, said: string) => void copyText(text, said);
-  const menuNode = menuId ? byId.get(menuId) : undefined;
+  const menuNode = menuId ? rowById.get(menuId) : undefined;
   const menuEntity = menuNode?.entity;
+  const menuSessions = menuEntity && listing ? requiresSession({ listing, subs: Object.fromEntries(Object.entries(subs).map(([t, v]) => [t, v.data])) }, menuEntity.id) : null;
   const menuDlqUrl = menuEntity && fullHost ? deadLetterUrl(fullHost, menuEntity.id, menuEntity.kind) : null;
 
   const summary = listing && !listing.limited ? `${formatNumber(listing.queues.length)} queues, ${formatNumber(listing.topics.length)} topics` : "";
@@ -361,6 +386,22 @@ export function NamespaceTree() {
                 Copy connection string
               </ContextMenuItem>
               <ContextMenuSeparator />
+              {menuEntity &&
+                // The palette's own operation commands, in three groups: put messages, work on them, remove them.
+                [["op:send", "op:import"], ["op:receive", "op:resubmit", "op:move", "op:cancel-scheduled", "op:session-state"], ["op:delete", "op:purge"]].map((ids, i) => {
+                  const cmds = operateCommands(menuEntity, { openSheet, selection: null, sessions: menuSessions }).filter((c) => ids.includes(c.id));
+                  if (!cmds.length) return null;
+                  return (
+                    <Fragment key={i}>
+                      {cmds.map((c) => (
+                        <ContextMenuItem key={c.id} onSelect={c.run}>
+                          {c.label}
+                        </ContextMenuItem>
+                      ))}
+                      <ContextMenuSeparator />
+                    </Fragment>
+                  );
+                })}
               <ContextMenuItem onSelect={() => void entities.refetch()}>Refresh</ContextMenuItem>
             </ContextMenuContent>
           </ContextMenu>

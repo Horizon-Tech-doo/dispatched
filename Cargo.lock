@@ -1159,6 +1159,7 @@ version = "0.0.1"
 dependencies = [
  "arboard",
  "async-trait",
+ "base64 0.22.1",
  "dispatched-core",
  "horizon-azure-kit",
  "open",

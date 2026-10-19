@@ -149,15 +149,63 @@ export interface EntityListing { queues: QueueInfo[]; topics: TopicInfo[]; limit
 export interface ActivityError { kind: string; message: string }
 export interface ActivityEntry { at: string; action: string; duration_ms: number; error: ActivityError | null }
 
+/** What a job does: an export, a core operate kind, or a session-state change. */
+export type JobKind =
+  | "export" | "send" | "import" | "cancel-scheduled" | "receive" | "settle-deferred" | "delete" | "move" | "resubmit" | "purge" | "session-state";
+
+export type ItemOutcome = "succeeded" | "failed" | "skipped" | "missing" | "not-reached";
+/** One message's result in an operate job. Sequence numbers are strings: they can exceed 2^53. */
+export interface ItemView {
+  sequence_number: string | null;
+  message_id: string | null;
+  session_id: string | null;
+  entity: string;
+  new_sequence_number: string | null;
+  outcome: ItemOutcome;
+  reason: string | null;
+}
+/** A message a receive took: a `MessageSummary`, with its sequence number as a string. */
+export type ReceivedView = Omit<MessageSummary, "sequence_number"> & { sequence_number: string };
+
+export type ReportOutcome = "succeeded" | "partly-failed" | "failed" | "cancelled";
+/** How an operate job went. `incomplete` counts everything not done: failed, missing, not reached and unexpected skips. */
+export interface ReportSummary {
+  op_id: string | null;
+  kind: string;
+  entity: string;
+  target: string | null;
+  outcome: ReportOutcome;
+  cancelled: boolean;
+  items: number;
+  succeeded: number;
+  failed: number;
+  skipped: number;
+  missing: number;
+  incomplete: number;
+  notes: string[];
+  summary_line: string;
+}
+/** One page of a finished job's items (`onlyProblems`: everything but the successes). */
+export interface ReportPage { summary: ReportSummary; offset: number; total: number; items: ItemView[] }
+
 export type JobEvent =
   /** `title` says what the job is (`Export orders (dead-letter queue)`); `file_name` is the file it writes. */
-  | { type: "started"; id: string; title: string; total: number | null; file_name: string | null }
+  | { type: "started"; id: string; kind: JobKind; title: string; total: number | null; file_name: string | null }
   /** `scanned` is the messages examined so far: past `done` when a filter skips messages. */
   | { type: "progress"; id: string; done: number; total: number | null; scanned: number }
+  /** One message's result, as soon as it is known (operate jobs). */
+  | { type: "item"; id: string; item: ItemView }
+  /** A remark for the report (operate jobs). */
+  | { type: "note"; id: string; text: string }
+  /** A message a receive took. */
+  | { type: "received"; id: string; message: ReceivedView }
   | {
       type: "finished";
       id: string;
+      /** `cancelled`: the user cancelled; `stopped`: the connection closed. Neither is a failure. */
       error: ActivityError | null;
+      /** Operate jobs: how the job went (on an error, the items so far); null for exports and jobs that never ran. */
+      report: ReportSummary | null;
       /** What was done, e.g. `Exported 1,284 messages to orders-dead-letter-20261016-0941.json`; null on failure. */
       summary: string | null;
       /** The file written, in full; null on failure. */
@@ -169,6 +217,126 @@ export type JobEvent =
       /** The file written, by name; null on failure. */
       file_name: string | null;
     };
+
+/** A job asks to be confirmed. `summary` is the core's exact sentence; on production the typed text must equal
+ *  `target`. `step` is 1, 2, … within one job (a production move asks for the source, then the target). */
+export interface ConfirmRequest {
+  id: string;
+  job_id: string;
+  verb: string;
+  target: string;
+  summary: string;
+  item_count: string | null;
+  reversible: boolean;
+  production: boolean;
+  step: number;
+}
+export type ConfirmAnswer = { type: "allow" } | { type: "typed"; text: string } | { type: "deny" };
+
+export type ActivityOrigin = "gui" | "cli" | "mcp";
+export type ActivityOutcome = "pending" | "succeeded" | "partly-failed" | "failed" | "cancelled" | "denied";
+/** An entry of the shared activity log (`activity.db`): every change made by the app, the CLI or an agent. */
+export interface ActivityRecord {
+  id: number;
+  op_id: string;
+  at: string;
+  origin: ActivityOrigin;
+  /** Profile name. */
+  profile: string;
+  entity: string | null;
+  action: string;
+  kind: string;
+  phase: "started" | "finished";
+  outcome: ActivityOutcome;
+  count: number | null;
+  succeeded: number | null;
+  failed: number | null;
+  skipped: number | null;
+  summary: string;
+  error: string | null;
+  note: string | null;
+}
+export interface ActivityQuery { limit?: number; origin?: ActivityOrigin; profile?: string; outcome?: ActivityOutcome }
+
+// M2b: operate forms. Every int64 that can exceed 2^53 is a string.
+
+/** Custom property types a form can send: what core `PropType::parse` accepts. */
+export type PropType = "string" | "int" | "long" | "double" | "bool" | "datetime" | "timespan" | "guid";
+export interface PropertyForm { name: string; type: PropType; value: string }
+/** System properties of an outgoing message; a blank field is not set. `time_to_live` is like `90s` or `5m`. */
+export interface OutgoingForm {
+  message_id?: string;
+  session_id?: string;
+  correlation_id?: string;
+  subject?: string;
+  to?: string;
+  reply_to?: string;
+  reply_to_session_id?: string;
+  content_type?: string;
+  partition_key?: string;
+  time_to_live?: string;
+  properties: PropertyForm[];
+}
+export type BodyForm = { type: "text"; text: string } | { type: "files"; pick: string } | { type: "template"; pick: string };
+export type IdsForm = { type: "keep" } | { type: "fixed"; id: string } | { type: "random" } | { type: "increment"; base: string };
+/** `schedule` is RFC 3339. */
+export interface SendForm { target: string; template: OutgoingForm; body: BodyForm; ids: IdsForm; count: number; schedule?: string; batch: boolean }
+export interface ImportForm { target: string; pick: string; new_message_id: boolean; keep_sessions: boolean; keep_dead_letter_properties: boolean }
+
+export type SubQueue = "active" | "dead-letter" | "transfer-dead-letter";
+export type Settlement = { type: "complete" } | { type: "abandon" } | { type: "defer" } | { type: "dead-letter"; reason?: string; description?: string };
+export type ReceiveAction = { type: "settle"; how: Settlement } | { type: "delete" };
+/** `max` is 1 to 5,000. */
+export interface ReceiveForm { entity: string; sub_queue: SubQueue; session?: string; max: number; wait_seconds: number; action: ReceiveAction }
+
+export type Selection = { type: "sequences"; sequences: string[] } | { type: "matching"; filter: FilterSpec; limit: number };
+export interface SelectForm { entity: string; view: PeekView; selection: Selection }
+/** Edits a resubmit applies. An empty string clears a field; an absent one leaves it alone. */
+export interface EditsForm {
+  body?: string;
+  set: PropertyForm[];
+  remove: string[];
+  message_id?: string;
+  session_id?: string;
+  correlation_id?: string;
+  subject?: string;
+  content_type?: string;
+  to?: string;
+  reply_to?: string;
+}
+export interface ResubmitForm {
+  source: SelectForm;
+  target?: string;
+  edits: EditsForm;
+  new_message_id: boolean;
+  remove_original: boolean;
+  keep_dead_letter_properties: boolean;
+  drop_uncopyable_properties: boolean;
+}
+
+export type PurgeScope = "active" | "dead-letter" | "transfer-dead-letter" | "all";
+/** Counts are already words ("about 1,284 messages"). A plan with `unknown` is refused by the engine. */
+export interface PurgePlanView {
+  entity: string;
+  scope: PurgeScope;
+  lines: { sub_queue: SubQueue; count: string }[];
+  deferred: string | null;
+  total: string;
+  unknown: boolean;
+  requires_session: boolean | null;
+}
+/** Plans wait under `plan_id` for `opPurge`, once, for 10 minutes. */
+export interface PurgePlans { plan_id: string; plans: PurgePlanView[] }
+
+export interface ReasonGroup { reason: string | null; description: string | null; count: number; first_sequence: string; last_sequence: string }
+export interface DlqSummaryView { groups: ReasonGroup[]; scanned: number; truncated: boolean }
+
+/** A session's state: base64 always, text when it is UTF-8. */
+export interface SessionStateView { base64: string; text: string | null; len: number }
+
+export type OpenPurpose = "body" | "template" | "import";
+/** Files the open dialog returned, kept in the engine under `pick`; `names` are for display. */
+export interface OpenedFiles { pick: string; names: string[] }
 
 export interface AppInfo { version: string; startup_error: string | null }
 

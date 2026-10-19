@@ -10,6 +10,10 @@ use std::time::Instant;
 pub const ACTIVITY: &str = "activity";
 pub const JOB: &str = "job";
 pub const SIGN_IN_PROMPT: &str = "sign-in-prompt";
+/// A mutating operation asks to be confirmed ([`crate::safety::ConfirmEvent`]).
+pub const CONFIRM: &str = "confirm";
+/// An entry written to the shared activity log (core `ActivityEntry`, with its row id).
+pub const ACTIVITY_RECORD: &str = "activity-record";
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ActivityError {
@@ -31,6 +35,8 @@ pub struct ActivityEntry {
 pub enum JobEvent {
     Started {
         id: String,
+        /// `export`, or the core job kind: `send`, `receive`, `delete`, `move`, `purge`, ...
+        kind: String,
         /// What the job is, without where its file goes: `Export orders (dead-letter queue)`.
         title: String,
         total: Option<u64>,
@@ -44,9 +50,23 @@ pub enum JobEvent {
         /// Messages examined so far. Past `done` when a filter skips messages.
         scanned: u64,
     },
+    /// One message's result, as soon as it is known (operate jobs).
+    Item {
+        id: String,
+        item: Box<crate::ops::operate_types::ItemView>,
+    },
+    /// A remark for the report (operate jobs).
+    Note { id: String, text: String },
+    /// A message a receive took.
+    Received {
+        id: String,
+        message: Box<crate::ops::operate_types::ReceivedView>,
+    },
     Finished {
         id: String,
         error: Option<ActivityError>,
+        /// Operate jobs: how the job went. `None` for exports and for jobs that never started.
+        report: Option<Box<crate::ops::operate_types::ReportSummary>>,
         /// What was done, e.g. `Exported 1,284 messages to orders-dead-letter-20261016-0941.json`:
         /// the activity log's line. The UI composes its own from the fields below.
         summary: Option<String>,
@@ -74,6 +94,8 @@ pub trait Events: Send + Sync {
     fn activity(&self, e: ActivityEntry);
     fn job(&self, e: JobEvent);
     fn sign_in_prompt(&self, p: SignInPrompt);
+    fn confirm(&self, e: crate::safety::ConfirmEvent);
+    fn activity_record(&self, e: dispatched_core::activity::ActivityEntry);
 }
 
 /// Emits to every window.
@@ -92,6 +114,14 @@ impl Events for TauriEvents {
         use tauri::Emitter as _;
         let _ = self.0.emit(SIGN_IN_PROMPT, p);
     }
+    fn confirm(&self, e: crate::safety::ConfirmEvent) {
+        use tauri::Emitter as _;
+        let _ = self.0.emit(CONFIRM, e);
+    }
+    fn activity_record(&self, e: dispatched_core::activity::ActivityEntry) {
+        use tauri::Emitter as _;
+        let _ = self.0.emit(ACTIVITY_RECORD, e);
+    }
 }
 
 /// Collects events (tests).
@@ -101,6 +131,8 @@ pub struct Recorder {
     pub activity: std::sync::Mutex<Vec<ActivityEntry>>,
     pub jobs: std::sync::Mutex<Vec<JobEvent>>,
     pub prompts: std::sync::Mutex<Vec<SignInPrompt>>,
+    pub confirms: std::sync::Mutex<Vec<crate::safety::ConfirmEvent>>,
+    pub records: std::sync::Mutex<Vec<dispatched_core::activity::ActivityEntry>>,
 }
 
 #[cfg(test)]
@@ -113,6 +145,12 @@ impl Events for Recorder {
     }
     fn sign_in_prompt(&self, p: SignInPrompt) {
         self.prompts.lock().unwrap().push(p);
+    }
+    fn confirm(&self, e: crate::safety::ConfirmEvent) {
+        self.confirms.lock().unwrap().push(e);
+    }
+    fn activity_record(&self, e: dispatched_core::activity::ActivityEntry) {
+        self.records.lock().unwrap().push(e);
     }
 }
 
@@ -272,13 +310,14 @@ mod tests {
         );
         let s = JobEvent::Started {
             id: "j1".into(),
+            kind: "export".into(),
             title: "Export orders (dead-letter queue)".into(),
             total: None,
             file_name: Some("out.json".into()),
         };
         assert_eq!(
             serde_json::to_value(&s).unwrap(),
-            serde_json::json!({"type":"started","id":"j1","title":"Export orders (dead-letter queue)","total":null,"file_name":"out.json"})
+            serde_json::json!({"type":"started","id":"j1","kind":"export","title":"Export orders (dead-letter queue)","total":null,"file_name":"out.json"})
         );
         let j = JobEvent::Progress {
             id: "j1".into(),
@@ -293,6 +332,7 @@ mod tests {
         let f = JobEvent::Finished {
             id: "j1".into(),
             error: None,
+            report: None,
             summary: Some("Exported 5 messages to out.json".into()),
             output: Some("/tmp/out.json".into()),
             written: Some(5),
@@ -301,7 +341,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_value(&f).unwrap(),
-            serde_json::json!({"type":"finished","id":"j1","error":null,"summary":"Exported 5 messages to out.json","output":"/tmp/out.json","written":5,"missing":2,"file_name":"out.json"})
+            serde_json::json!({"type":"finished","id":"j1","error":null,"report":null,"summary":"Exported 5 messages to out.json","output":"/tmp/out.json","written":5,"missing":2,"file_name":"out.json"})
         );
         let p = SignInPrompt {
             kind: "device-code",

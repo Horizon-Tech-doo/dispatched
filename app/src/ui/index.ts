@@ -12,6 +12,7 @@ export * from "./components/field";
 export * from "./components/select";
 export * from "./components/segmented";
 export * from "./components/toggle-group";
+export * from "./components/checkbox";
 export * from "./components/label-swatch";
 export * from "./components/badge";
 export * from "./components/kbd";

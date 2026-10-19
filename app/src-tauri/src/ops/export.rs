@@ -430,6 +430,7 @@ pub fn start(
     let (id, cancel) = jobs.start();
     ev.job(JobEvent::Started {
         id: id.clone(),
+        kind: "export".into(),
         title: plan.title.clone(),
         total: plan.total,
         file_name: Some(plan.file_name.clone()),
@@ -457,6 +458,7 @@ pub fn start(
                 ev.job(JobEvent::Finished {
                     id: job_id,
                     error: None,
+                    report: None,
                     summary: Some(s.summary),
                     output: Some(s.path.display().to_string()),
                     written: Some(s.written),
@@ -468,6 +470,7 @@ pub fn start(
                 jobs.finish(&job_id, None);
                 ev.job(JobEvent::Finished {
                     id: job_id,
+                    report: None,
                     error: Some(ActivityError {
                         kind: e.kind.to_string(),
                         message: e.message,
@@ -1201,6 +1204,7 @@ mod tests {
             JobEvent::Finished {
                 id: started.id.clone(),
                 error: None,
+                report: None,
                 summary: Some("Exported 3 messages to out.json".into()),
                 output: Some(target.display().to_string()),
                 written: Some(3),
@@ -1209,7 +1213,7 @@ mod tests {
             }
         );
         assert!(
-            matches!(&ev.jobs.lock().unwrap()[0], JobEvent::Started { id, title, total: Some(5), file_name }
+            matches!(&ev.jobs.lock().unwrap()[0], JobEvent::Started { id, title, total: Some(5), file_name, .. }
             if *id == started.id && title == "Export orders (dead-letter queue)"
                 && file_name.as_deref() == Some("out.json"))
         );

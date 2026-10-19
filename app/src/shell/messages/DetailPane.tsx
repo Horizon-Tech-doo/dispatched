@@ -1,4 +1,4 @@
-import { Columns3, Copy, X } from "lucide-react";
+import { Columns3, Copy, SendHorizontal, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMessageDetail, type MessageDetail, type PeekView } from "@/engine";
 import {
@@ -12,6 +12,8 @@ import { propText } from "./columns";
 import { decodeBody, toExportJson } from "./exportJson";
 
 const DEBOUNCE_MS = 120;
+/** Below this pane width the header's text buttons show their icons alone. */
+const NARROW_BELOW = 460;
 const COPIED_MS = 2000;
 const TRUNCATED = "The body is cut at 4 MiB. Export the message to copy all of it.";
 
@@ -239,6 +241,8 @@ export function DetailPane(p: {
   shownProps?: readonly string[];
   onExport?(sequence: number): void;
   onPeekAgain?(): void;
+  /** Clone & resend: the composer, seeded from this message. */
+  onClone?(d: MessageDetail): void;
 }) {
   // Holding an arrow key walks the grid faster than messages can be read: the pane waits for the focus to rest.
   const [debounced, setDebounced] = useState(p.sequence);
@@ -256,6 +260,18 @@ export function DetailPane(p: {
   const shownProps = useMemo(() => new Set(p.shownProps ?? []), [p.shownProps]);
 
   const [copied, setCopied] = useState("");
+  // A narrow pane shows "Send a copy" as its icon alone, so the 32px header never overflows.
+  const pane = useRef<HTMLElement>(null);
+  const [narrow, setNarrow] = useState(false);
+  useEffect(() => {
+    const el = pane.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const measure = () => setNarrow(el.clientWidth > 0 && el.clientWidth < NARROW_BELOW);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   const clear = useRef<ReturnType<typeof setTimeout>>(undefined);
   useEffect(() => () => clearTimeout(clear.current), []);
   const copy = (what: string, s: string) => {
@@ -281,6 +297,7 @@ export function DetailPane(p: {
 
   return (
     <section
+      ref={pane}
       aria-label={p.sequence != null ? `Message ${p.sequence}` : "Message"}
       className="flex h-full min-h-0 flex-col bg-side"
       onKeyDown={(e) => {
@@ -293,6 +310,20 @@ export function DetailPane(p: {
           <span className="truncate text-muted">{label}</span>
         </h2>
         <span role="status" className="ml-auto shrink-0 text-11 text-muted">{copied}</span>
+        {p.onClone && (
+          <Hint label={unavailable ?? "Send a copy of this message as a new message"}>
+            <Button
+              size="sm"
+              aria-label={narrow ? "Send a copy" : undefined}
+              aria-disabled={unavailable !== null ? true : undefined}
+              className={unavailable !== null ? "opacity-45" : undefined}
+              onClick={() => d && unavailable === null && p.onClone!(d)}
+            >
+              <SendHorizontal aria-hidden="true" />
+              {!narrow && "Send a copy"}
+            </Button>
+          </Hint>
+        )}
         <CopyButton label="Copy JSON" hint="Copy the message as JSON, the way an export writes it" reason={jsonReason} onCopy={() => d && copy("JSON", toExportJson(d))} />
         <IconButton label="Close message" onClick={p.onClose}>
           <X />

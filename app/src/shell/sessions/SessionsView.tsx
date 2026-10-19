@@ -108,6 +108,9 @@ export function SessionsView({ tab, requiresSession }: { tab: EntityTab; require
         <Button disabled={focused === null} onClick={() => focused !== null && peek(focused)}>
           Peek messages
         </Button>
+        <Button disabled={focused === null} onClick={() => focused !== null && openSheet({ kind: "operation", op: "session-state", entity: tab.id, session: focused })}>
+          Session state…
+        </Button>
       </div>
       <div className="min-h-0 flex-1">
         <DataGrid<SessionSummary>

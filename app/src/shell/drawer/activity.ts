@@ -1,5 +1,8 @@
 import { useSyncExternalStore } from "react";
-import { onActivity, onJob, type ActivityEntry, type ActivityError, type ExportFormat, type FilterSpec, type JobEvent, type PeekView } from "@/engine";
+import {
+  onActivity, onActivityRecord, onConfirm, onJob, type ActivityEntry, type ActivityRecord, type ActivityError, type ConfirmRequest, type ExportFormat, type FilterSpec, type ItemOutcome, type JobEvent,
+  type JobKind, type PeekView, type ReportSummary,
+} from "@/engine";
 
 export const ACTIVITY_CAP = 1000;
 
@@ -33,6 +36,29 @@ export function createActivityStore() {
   };
 }
 
+/** The shared log's entries this window knows, by row id: loaded at start, then from this app's events and from
+ *  following the log (the CLI's and agents' changes). */
+export const RECORD_CAP = 2000;
+export function createRecordStore() {
+  const s = createStore<ActivityRecord>();
+  return {
+    /** Adds entries, each once (by row id), oldest first. */
+    merge(records: ActivityRecord[]) {
+      const have = new Map(s.get().map((r) => [r.id, r]));
+      let changed = false;
+      for (const r of records)
+        if (!have.has(r.id)) {
+          have.set(r.id, r);
+          changed = true;
+        }
+      if (changed) s.set([...have.values()].sort((a, b) => a.id - b.id).slice(-RECORD_CAP));
+    },
+    all: s.get,
+    clear: () => s.set([]),
+    subscribe: s.subscribe,
+  };
+}
+
 /** What a retry of an export needs: the sheet opens on it again. Set by the export sheet when the job starts. */
 export interface ExportRetry {
   entity: string;
@@ -45,8 +71,14 @@ export interface ExportRetry {
   total: number | null;
 }
 
+/** Items an operate job has reported so far, by outcome. */
+export type Tally = Record<ItemOutcome, number>;
+const noTally = (): Tally => ({ succeeded: 0, failed: 0, skipped: 0, missing: 0, "not-reached": 0 });
+
 export interface Job {
   id: string;
+  /** `export`, or the operate kind (`delete`, `move`, …). */
+  kind: JobKind;
   /** What the job is: `Export orders (dead-letter queue)`. */
   title: string;
   /** The file it writes, by name. */
@@ -67,34 +99,74 @@ export interface Job {
   missing: number | null;
   /** How to start the same export again. */
   retry: ExportRetry | null;
+  /** Operate jobs: the items reported so far, by outcome. */
+  tally: Tally;
+  /** Operate jobs: remarks for the report, as they arrived. */
+  notes: string[];
+  /** Messages a receive took so far. */
+  received: number;
+  /** Operate jobs: how the job went, once finished (on an error, the items so far); null otherwise. */
+  report: ReportSummary | null;
+  /** The confirmation the job waits for, if any. */
+  confirm: ConfirmRequest | null;
+  /** Entities its items were in (a purge of several entities names each). */
+  entities: string[];
+  /** The job has begun its work (a progress, item, note or received event): every confirmation it needed was given. */
+  progressed: boolean;
 }
 
 export function createJobStore() {
   const s = createStore<Job>();
-  // A retry that arrived before its job's `started` event.
+  // A retry or a confirmation that arrived before its job's `started` event.
   const pendingRetry = new Map<string, ExportRetry>();
+  const pendingConfirm = new Map<string, ConfirmRequest>();
+  const update = (id: string, f: (j: Job) => Job) => {
+    const jobs = s.get();
+    if (jobs.some((j) => j.id === id)) s.set(jobs.map((j) => (j.id === id ? f(j) : j)));
+  };
   return {
     apply(e: JobEvent) {
       const jobs = s.get();
       if (e.type === "started") {
         const job: Job = {
-          id: e.id, title: e.title, fileName: e.file_name, done: 0, total: e.total, scanned: 0, error: null, finished: false,
+          id: e.id, kind: e.kind ?? "export", title: e.title, fileName: e.file_name, done: 0, total: e.total, scanned: 0, error: null, finished: false,
           summary: null, output: null, written: null, missing: null, retry: pendingRetry.get(e.id) ?? null,
+          tally: noTally(), notes: [], received: 0, report: null, confirm: pendingConfirm.get(e.id) ?? null, progressed: false, entities: [],
         };
         pendingRetry.delete(e.id);
+        pendingConfirm.delete(e.id);
         // A job that starts again under the same id replaces the old one.
         return s.set(jobs.some((j) => j.id === e.id) ? jobs.map((j) => (j.id === e.id ? job : j)) : [...jobs, job]);
       }
-      if (!jobs.some((j) => j.id === e.id)) return;
-      s.set(
-        jobs.map((j) =>
-          j.id !== e.id
-            ? j
-            : e.type === "progress"
-              ? { ...j, done: e.done, total: e.total, scanned: e.scanned }
-              : { ...j, finished: true, error: e.error, summary: e.summary, output: e.output, written: e.written, missing: e.missing, fileName: e.file_name ?? j.fileName },
-        ),
-      );
+      switch (e.type) {
+        case "progress":
+          return update(e.id, (j) => ({ ...j, done: e.done, total: e.total, scanned: e.scanned, progressed: true }));
+        case "item":
+          return update(e.id, (j) => ({
+            ...j, tally: { ...j.tally, [e.item.outcome]: j.tally[e.item.outcome] + 1 }, progressed: true,
+            entities: j.entities.includes(e.item.entity) ? j.entities : [...j.entities, e.item.entity],
+          }));
+        case "note":
+          return update(e.id, (j) => ({ ...j, notes: [...j.notes, e.text], progressed: true }));
+        case "received":
+          return update(e.id, (j) => ({ ...j, received: j.received + 1, progressed: true }));
+        case "finished":
+          pendingConfirm.delete(e.id);
+          return update(e.id, (j) => ({
+            ...j, finished: true, error: e.error, summary: e.summary, output: e.output, written: e.written, missing: e.missing, fileName: e.file_name ?? j.fileName,
+            report: e.report ?? null, confirm: null,
+          }));
+      }
+    },
+    /** A job asks to be confirmed (it may not have been announced yet). */
+    confirm(c: ConfirmRequest) {
+      if (s.get().some((j) => j.id === c.job_id)) update(c.job_id, (j) => (j.finished ? j : { ...j, confirm: c }));
+      else pendingConfirm.set(c.job_id, c);
+    },
+    /** The job's waiting confirmation was answered. */
+    answered(jobId: string) {
+      pendingConfirm.delete(jobId);
+      update(jobId, (j) => ({ ...j, confirm: null }));
     },
     /** Remembers how to start a job's export again (the job may not have been announced yet). */
     setRetry(id: string, retry: ExportRetry) {
@@ -106,6 +178,7 @@ export function createJobStore() {
     all: s.get,
     clear: () => {
       pendingRetry.clear();
+      pendingConfirm.clear();
       s.set([]);
     },
     subscribe: s.subscribe,
@@ -114,13 +187,20 @@ export function createJobStore() {
 
 export const activityStore = createActivityStore();
 export const jobStore = createJobStore();
+export const recordStore = createRecordStore();
 
 export const useActivity = () => useSyncExternalStore(activityStore.subscribe, activityStore.all);
 export const useJobs = () => useSyncExternalStore(jobStore.subscribe, jobStore.all);
+export const useRecords = () => useSyncExternalStore(recordStore.subscribe, recordStore.all);
 
 /** Subscribe the stores to the engine's events. Returns an unsubscribe. */
 export async function startEventCapture(): Promise<() => void> {
-  const results = await Promise.allSettled([onActivity((e) => activityStore.add(e)), onJob((e) => jobStore.apply(e))]);
+  const results = await Promise.allSettled([
+    onActivity((e) => activityStore.add(e)),
+    onJob((e) => jobStore.apply(e)),
+    onConfirm((c) => jobStore.confirm(c)),
+    onActivityRecord((r) => recordStore.merge([r])),
+  ]);
   const offs = results.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
   const failed = results.find((r): r is PromiseRejectedResult => r.status === "rejected");
   if (failed) {

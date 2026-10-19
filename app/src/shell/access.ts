@@ -6,7 +6,7 @@ import { useShell } from "./context";
 export type AuthKind = "entra" | "connection-string" | "unknown";
 
 /** A right the engine can say is missing. `Manage` stands for the management rights (`Manage`, `EntityRead`). */
-export type Right = "Listen" | "Manage";
+export type Right = "Listen" | "Send" | "Manage";
 
 /** The rights an engine message names ("access denied (needs Listen): ...", "(needs Manage,EntityRead)").
  *  Both Listen and Manage may be named; with nothing named, the surface's own `fallback` applies. */
@@ -15,6 +15,7 @@ export function rightsOf(message: string, fallback: Right): Right[] {
   const rights = new Set<Right>();
   for (const n of named) {
     if (n === "Listen") rights.add("Listen");
+    else if (n === "Send") rights.add("Send");
     else if (n === "Manage" || n === "EntityRead") rights.add("Manage");
   }
   return rights.size > 0 ? [...rights] : [fallback];
@@ -25,6 +26,13 @@ export function rightsOf(message: string, fallback: Right): Right[] {
  *  `again` is the surface's word for what to do once it's fixed ("peek again"). */
 export function accessAdvice(rights: readonly Right[], auth: AuthKind, again = "try again"): string {
   const manage = rights.includes("Manage");
+  // Sending needs Send: the Data Sender role, or a key whose policy includes Send.
+  if (!manage && rights.includes("Send") && !rights.includes("Listen")) {
+    if (auth === "entra")
+      return `Your account needs the Azure Service Bus Data Sender role on this namespace or entity. Owner and Contributor don't include sending messages. After it's assigned, ${again}.`;
+    if (auth === "connection-string") return "This key has no Send right. Use a key whose policy includes Send (or Manage).";
+    return "Your connection needs the Send right: an Entra role or a key whose policy includes Send.";
+  }
   const right = manage ? "Manage" : "Listen";
   if (auth === "entra")
     return manage

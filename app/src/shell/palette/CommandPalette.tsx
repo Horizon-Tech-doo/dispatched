@@ -5,6 +5,7 @@ import {
 } from "@/ui";
 import { useShell } from "../context";
 import { treeRowOf } from "../tree/model";
+import { viewSelection } from "../messages/selectionStore";
 import { buildCommands, paletteHint, type PaletteCommand } from "./commands";
 
 /** Up to this many topics the palette loads every topic's subscriptions so they can be searched. */
@@ -54,7 +55,9 @@ export function CommandPalette() {
     openSheet,
     refresh,
     toggleDrawer: () => dispatch({ type: "layout", patch: { drawerOpen: !shell.layout.drawerOpen } }),
+    showActivity: () => dispatch({ type: "layout", patch: { drawerOpen: true, drawerTab: "activity" } }),
     setPrefs,
+    selection: shell.activeTab ? viewSelection(shell.activeTab) : null,
   });
   const run = (c: PaletteCommand) => {
     setPaletteOpen(false);

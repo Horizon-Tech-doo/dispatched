@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/ui";
 import { COMPACT_BELOW, Toolbar } from "./Toolbar";
 
-let width = 1000;
+let width = 1300;
 let resize: () => void = () => {};
 
 function stubWidth() {
@@ -40,7 +40,7 @@ describe("Toolbar", () => {
     expect(screen.queryByText("From")).toBeNull();
     expect(screen.getByRole("button", { name: "Columns" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Peek again" })).not.toHaveTextContent("Peek again");
-    width = 1000;
+    width = 1300;
     act(() => resize());
     expect(screen.getByRole("button", { name: "Filter" })).toBe(filter);
     expect(filter).toHaveTextContent("Filter");

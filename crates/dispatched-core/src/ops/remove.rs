@@ -119,7 +119,10 @@ pub(crate) async fn run(
         &seqs,
         &spec.limits,
         cancel,
-        &mut on,
+        &mut super::locate::Live {
+            on: &mut on,
+            job: &mut job,
+        },
     )
     .await?;
     let cancelled = record(&mut job, located);
@@ -160,6 +163,38 @@ mod tests {
         );
         assert_eq!(b.held_locks(), 0);
         assert_eq!(b.open_receivers(), 0);
+    }
+
+    #[tokio::test]
+    async fn items_reach_progress_as_they_settle() {
+        let b = FakeBroker::default();
+        let a = b.add("q", FakeMsg::active("a"));
+        let c = b.add("q", FakeMsg::active("c"));
+        let gone = c + 100;
+        let progress = crate::jobs::RecordingProgress::default();
+        let r = run(
+            &mut b.clone(),
+            &select("q", PeekView::Active, &[gone, a, c]),
+            &[gone, a, c],
+            &progress,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        // Found messages are reported as they are settled; the missing one only at the end.
+        let reported: Vec<_> = progress
+            .events()
+            .into_iter()
+            .filter_map(|e| match e {
+                crate::jobs::JobEvent::Item(i) => i.sequence_number,
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reported, [a, c, gone]);
+        // The report keeps the order given.
+        let order: Vec<_> = r.items.iter().map(|i| i.sequence_number).collect();
+        assert_eq!(order, [Some(gone), Some(a), Some(c)]);
+        assert_eq!((r.succeeded(), r.missing()), (2, 1));
     }
 
     #[tokio::test]

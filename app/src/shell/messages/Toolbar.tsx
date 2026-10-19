@@ -8,9 +8,10 @@ import {
 import { COLUMN_LABEL, propColumn, type ColumnId } from "./columns";
 import { filterSummary } from "./filterText";
 
-/** Below this toolbar width the labels of Filter, Columns, Export and Peek again give way to icons (each keeps its
+/** Below this toolbar width (wide enough for the operation buttons, so the bar does not wrap) the labels of Filter,
+ *  Columns, the operations, Export and Peek again give way to icons (each keeps its
  *  name and gets a tooltip). A width of 0 (not laid out) counts as wide. */
-export const COMPACT_BELOW = 760;
+export const COMPACT_BELOW = 1180;
 
 function useCompact(ref: { current: HTMLElement | null }): boolean {
   const [compact, setCompact] = useState(false);
@@ -69,6 +70,8 @@ export function Toolbar(p: {
   onRefresh(): void;
   /** The Export control; told whether the toolbar is compact, to show an icon alone. */
   exportMenu?: (compact: boolean) => ReactNode;
+  /** The operations on this view's messages (Send, Receive, Delete, …), before Export. */
+  operations?: (compact: boolean) => ReactNode;
 }) {
   const [seq, setSeq] = useState(p.from.kind === "sequence" ? String(p.from.sequence) : "");
   // Choosing Sequence shows the field; the peek starts there once a number is entered.
@@ -227,6 +230,7 @@ export function Toolbar(p: {
             <DropdownMenuItem onSelect={p.onResetColumns}>Reset columns</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
+        {p.operations?.(compact)}
         {p.exportMenu?.(compact)}
         {/* One slot, as wide as its wider label ("Peek again", with its icon and padding), so swapping it with Stop
             never moves Columns. */}

@@ -1,9 +1,9 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { Download } from "lucide-react";
-import { useId, useMemo, useRef, useState } from "react";
+import { ArrowRightToLine, CalendarX, CheckCheck, ChevronDown, Download, Inbox, ListTree, Repeat2, SendHorizontal, Trash2 } from "lucide-react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { TAIL_MAX, normalizeFilter, usePeekStream, type EntityCounts, type FilterSpec, type MessageSummary, type PeekView } from "@/engine";
 import {
-  Button, DataGrid, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, EmptyState, Panel, PanelGroup, Problem, ResizeHandle, formatNumber, rowHeight,
+  Button, DataGrid, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger, EmptyState, Hint, Panel, PanelGroup, Problem, ResizeHandle, cn, formatNumber, rowHeight,
 } from "@/ui";
 import { yearOf } from "../time";
 import { useShell } from "../context";
@@ -11,6 +11,8 @@ import type { EntityTab } from "../state";
 import { VIEW_LABEL } from "../tabs/subtabs";
 import { buildColumns, optionalColumns, propColumn, useColumnPrefs } from "./columns";
 import { DetailPane } from "./DetailPane";
+import { DlqSummary, reasonFilter } from "./DlqSummary";
+import { setViewSelection } from "./selectionStore";
 import { FilterBar } from "./FilterBar";
 import { useAuthKind } from "../access";
 import { describePeekError } from "./peekError";
@@ -165,6 +167,7 @@ export function MessagesView({
 
   // Export: the whole view (with its filter and session), the selected rows, or one message from the detail pane.
   // The sheet gets what the view holds now; the engine reads the messages again when the export runs.
+  const [summaryOpen, setSummaryOpen] = useState(false);
   const exportSheet = (selected: number[]) =>
     openSheet({ kind: "export", entity: tab.id, view, filter: vs.filter, selected, total: counts && listedView ? listedView.count(counts) : null });
   const selectedSequences = () => [...sel.ids].map(Number).sort((a, b) => a - b);
@@ -184,6 +187,118 @@ export function MessagesView({
       </DropdownMenuContent>
     </DropdownMenu>
   );
+
+  // Operations on this view's messages: the selected rows, or (none selected) every message matching the view's
+  // filter. Sending puts new messages on the entity (a subscription's topic).
+  const dlqView = view === "dead-letter" || view === "transfer-dead-letter";
+  const subQueue = view === "dead-letter" ? "dead-letter" : view === "transfer-dead-letter" ? "transfer-dead-letter" : "active";
+  const total = counts && listedView ? listedView.count(counts) : null;
+  // The palette acts on what this view holds.
+  const selKeyText = [...sel.ids].join(",");
+  useEffect(() => {
+    setViewSelection(tab.id, { view, sequences: selKeyText ? selKeyText.split(",").map(Number).sort((a, b) => a - b) : [], filter: vs.filter, total });
+    return () => void setViewSelection(tab.id, null);
+  }, [tab.id, view, selKeyText, vs.filter, total]);
+  const pick = (op: "delete" | "move" | "resubmit") => openSheet({ kind: "operation", op, entity: tab.id, view, sequences: selectedSequences(), filter: vs.filter, total });
+  const settle = (how: "complete" | "abandon" | "dead-letter") =>
+    openSheet({ kind: "operation", op: "settle-deferred", entity: tab.id, subQueue: "active", sequences: selectedSequences(), session: vs.filter.session_id ?? null, how });
+  // The selection's size goes in the labels ("Delete 3"), so the scope is seen before a sheet opens.
+  const picked = sel.ids.size;
+  const counted = (verb: string) => (picked > 0 ? `${verb} ${formatNumber(picked)}` : verb);
+  const opButton = (
+    compact: boolean,
+    id: string,
+    label: string,
+    icon: ReactNode,
+    run: () => void,
+    o: { pressed?: boolean; disabled?: boolean; hint?: string; shortcut?: string } = {},
+  ) => {
+    const button = (
+      <Button
+        variant="quiet"
+        disabled={!profileId || o.disabled}
+        aria-label={compact ? label : undefined}
+        aria-pressed={o.pressed}
+        onClick={run}
+        className={cn("shrink-0", o.pressed && "bg-selection")}
+      >
+        {icon}
+        <CompactLabel compact={compact}>{label}</CompactLabel>
+      </Button>
+    );
+    return o.hint ? (
+      <Hint key={id} label={o.hint} shortcut={o.shortcut}>
+        {/* A disabled button gets no pointer events: the span carries the tooltip. */}
+        <span className="inline-flex">{button}</span>
+      </Hint>
+    ) : (
+      <CompactHint key={id} compact={compact} label={label}>
+        {button}
+      </CompactHint>
+    );
+  };
+  const operations = (compact: boolean) => {
+    const send = opButton(compact, "send", "Send", <SendHorizontal aria-hidden="true" className="text-icon" />, () => openSheet({ kind: "operation", op: "send", entity: tab.id }));
+    const receive = opButton(compact, "receive", "Receive", <Inbox aria-hidden="true" className="text-icon" />, () =>
+      openSheet({ kind: "operation", op: "receive", entity: tab.id, subQueue, session: vs.filter.session_id ?? null }),
+    );
+    const resubmit = opButton(compact, "resubmit", counted("Resubmit"), <Repeat2 aria-hidden="true" className="text-icon" />, () => pick("resubmit"));
+    const move = opButton(compact, "move", counted("Move"), <ArrowRightToLine aria-hidden="true" className="text-icon" />, () => pick("move"));
+    const del = opButton(compact, "delete", counted("Delete"), <Trash2 aria-hidden="true" className="text-icon" />, () => pick("delete"), {
+      hint: picked > 0 ? `Delete the ${formatNumber(picked)} selected` : "Delete the messages matching the view",
+      shortcut: picked > 0 ? "delete" : undefined,
+    });
+    if (view === "scheduled")
+      return (
+        <>
+          {send}
+          {opButton(
+            compact,
+            "unschedule",
+            counted("Unschedule"),
+            <CalendarX aria-hidden="true" className="text-icon" />,
+            () => openSheet({ kind: "operation", op: "cancel-scheduled", entity: tab.id, sequences: selectedSequences() }),
+            { disabled: picked === 0, hint: picked === 0 ? "Select scheduled messages first." : "Unschedule the selected messages" },
+          )}
+        </>
+      );
+    if (view === "deferred")
+      return (
+        <>
+          <DropdownMenu>
+            <CompactHint compact={compact} label="Settle">
+              <DropdownMenuTrigger asChild>
+                <Button variant="quiet" disabled={!profileId} aria-label={compact ? "Settle" : undefined}>
+                  <CheckCheck aria-hidden="true" className="text-icon" />
+                  <CompactLabel compact={compact}>{counted("Settle")}</CompactLabel>
+                  <ChevronDown aria-hidden="true" className="!size-3 text-icon" />
+                </Button>
+              </DropdownMenuTrigger>
+            </CompactHint>
+            <DropdownMenuContent align="end">
+              {picked === 0 && <DropdownMenuLabel>Select deferred messages to settle them.</DropdownMenuLabel>}
+              <DropdownMenuItem disabled={picked === 0} onSelect={() => settle("complete")}>Complete…</DropdownMenuItem>
+              <DropdownMenuItem disabled={picked === 0} onSelect={() => settle("abandon")}>Abandon…</DropdownMenuItem>
+              <DropdownMenuItem disabled={picked === 0} onSelect={() => settle("dead-letter")}>Dead-letter…</DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => pick("delete")}>Delete…</DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+          {resubmit}
+          {move}
+        </>
+      );
+    return (
+      <>
+        {view === "active" && send}
+        {receive}
+        {resubmit}
+        {move}
+        {del}
+        {dlqView && opButton(compact, "reasons", "Reasons", <ListTree aria-hidden="true" className="text-icon" />, () => setSummaryOpen(!summaryOpen), { pressed: summaryOpen })}
+      </>
+    );
+  };
+
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -211,6 +326,7 @@ export function MessagesView({
         onStop={stream.stop}
         onRefresh={restart}
         exportMenu={exportMenu}
+        operations={operations}
       />
       {vs.filterOpen && (
         <FilterBar
@@ -229,7 +345,30 @@ export function MessagesView({
           <Problem role="alert" title={failure.title} body={failure.body} detail={stream.error!.message} action={fixAction} />
         </div>
       )}
-      <div ref={gridBox} className="min-h-0 flex-1">
+      {dlqView && summaryOpen && (
+        <DlqSummary
+          profileId={profileId}
+          entity={tab.id}
+          subQueue={subQueue}
+          combined={!!vs.filter.property?.trim()}
+          onPick={(reason) => {
+            // A property filter already applied stays: the reason joins it.
+            const before = vs.filter.property?.trim();
+            applyFilter({ ...vs.filter, property: before && !before.includes(reasonFilter(reason)) ? `${before} AND ${reasonFilter(reason)}` : reasonFilter(reason) });
+          }}
+        />
+      )}
+      <div
+        ref={gridBox}
+        className="min-h-0 flex-1"
+        onKeyDown={(e) => {
+          // The Delete key opens the delete sheet for the selected rows; it never deletes by itself.
+          if ((e.key === "Delete" || e.key === "Backspace") && sel.ids.size > 0 && (e.target as HTMLElement).closest('[role="grid"]')) {
+            e.preventDefault();
+            pick("delete");
+          }
+        }}
+      >
         <PanelGroup
           direction="horizontal"
           onLayout={(sizes) => sizes.length === 2 && dispatch({ type: "layout", patch: { detailSize: Math.round(sizes[1]) } })}
@@ -281,6 +420,7 @@ export function MessagesView({
                   onClose={closeDetail}
                   onPeekAgain={restart}
                   onExport={(sequence) => exportSheet([sequence])}
+                  onClone={(d) => openSheet({ kind: "operation", op: "send", entity: tab.id, clone: d })}
                   shownProps={shownProps}
                   onShowColumn={(name) => {
                     const id = propColumn(name);

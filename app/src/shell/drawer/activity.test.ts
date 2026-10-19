@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ACTIVITY_CAP, createActivityStore, createJobStore } from "./activity";
-import { finished, progress, started } from "./jobEvents";
+import { finished, itemEvent, progress, report, started } from "./jobEvents";
 
 const entry = (i: number) => ({ at: "2026-10-15T09:41:12Z", action: `Step ${i}`, duration_ms: 12, error: null });
 
@@ -35,11 +35,13 @@ describe("startEventCapture", () => {
     vi.doMock("@/engine", () => ({
       onActivity: vi.fn(async () => off),
       onJob: vi.fn(async () => { throw new Error("listen failed"); }),
+      onConfirm: vi.fn(async () => off),
+      onActivityRecord: vi.fn(async () => off),
     }));
     try {
       const { startEventCapture } = await import("./activity");
       await expect(startEventCapture()).rejects.toThrow("listen failed");
-      expect(off).toHaveBeenCalledTimes(1);
+      expect(off).toHaveBeenCalledTimes(3);
     } finally {
       vi.doUnmock("@/engine");
     }
@@ -65,5 +67,40 @@ describe("job store", () => {
     expect(s.all()[0].finished).toBe(true);
     s.apply(progress("unknown", 1, null));
     expect(s.all()).toHaveLength(1);
+  });
+});
+
+describe("job store with operate jobs", () => {
+  it("folds started, three items and finished into one job with succeeded 3", () => {
+    const s = createJobStore();
+    s.apply(started("j1", "Delete 3 from orders", null, null, "delete"));
+    for (const n of ["1", "2", "3"]) s.apply(itemEvent("j1", { sequence_number: n, outcome: "succeeded" }));
+    expect(s.all()[0]).toMatchObject({ kind: "delete", finished: false, tally: { succeeded: 3, failed: 0 } });
+    s.apply(finished("j1", { report: report({ items: 3, succeeded: 3, summary_line: "Deleted 3 messages from orders" }), summary: "Deleted 3 messages from orders" }));
+    expect(s.all()).toHaveLength(1);
+    expect(s.all()[0]).toMatchObject({ finished: true, report: { succeeded: 3 }, tally: { succeeded: 3 } });
+  });
+
+  it("keeps the failed count of a partly failed job", () => {
+    const s = createJobStore();
+    s.apply(started("j1", "Delete 3 from orders", null, null, "delete"));
+    s.apply(itemEvent("j1", { outcome: "succeeded" }));
+    s.apply(itemEvent("j1", { outcome: "failed", reason: "lock lost" }));
+    s.apply(finished("j1", { report: report({ outcome: "partly-failed", items: 3, succeeded: 2, failed: 1, incomplete: 1 }) }));
+    expect(s.all()[0]).toMatchObject({ report: { outcome: "partly-failed", failed: 1 }, tally: { failed: 1 } });
+  });
+
+  it("holds a job's waiting confirmation until it is answered or the job ends", () => {
+    const s = createJobStore();
+    const ask = { id: "c1", job_id: "j1", verb: "delete", target: "orders", summary: "Delete 1 message from orders on Logistics", item_count: "1", reversible: false, production: false, step: 1 };
+    // A question can arrive before its job's `started`.
+    s.confirm(ask);
+    s.apply(started("j1", "Delete 1 from orders", null, null, "delete"));
+    expect(s.all()[0].confirm).toEqual(ask);
+    s.answered("j1");
+    expect(s.all()[0].confirm).toBeNull();
+    s.confirm({ ...ask, id: "c2", step: 2 });
+    s.apply(finished("j1", { error: { kind: "cancelled", message: "Cancelled." } }));
+    expect(s.all()[0].confirm).toBeNull();
   });
 });

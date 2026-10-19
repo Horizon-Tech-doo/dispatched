@@ -43,7 +43,22 @@
               "DeadLetteringOnMessageExpiration": false, "DefaultMessageTimeToLive": "PT1H",
               "DuplicateDetectionHistoryTimeWindow": "PT20S", "ForwardDeadLetteredMessagesTo": "",
               "ForwardTo": "", "LockDuration": "PT30S", "MaxDeliveryCount": 10,
-              "RequiresDuplicateDetection": false, "RequiresSession": false } }
+              "RequiresDuplicateDetection": false, "RequiresSession": false } },
+          { "Name": "m2b-a", "Properties": {
+              "DeadLetteringOnMessageExpiration": false, "DefaultMessageTimeToLive": "PT1H",
+              "DuplicateDetectionHistoryTimeWindow": "PT20S", "ForwardDeadLetteredMessagesTo": "",
+              "ForwardTo": "", "LockDuration": "PT30S", "MaxDeliveryCount": 10,
+              "RequiresDuplicateDetection": false, "RequiresSession": false } },
+          { "Name": "m2b-b", "Properties": {
+              "DeadLetteringOnMessageExpiration": false, "DefaultMessageTimeToLive": "PT1H",
+              "DuplicateDetectionHistoryTimeWindow": "PT20S", "ForwardDeadLetteredMessagesTo": "",
+              "ForwardTo": "", "LockDuration": "PT30S", "MaxDeliveryCount": 10,
+              "RequiresDuplicateDetection": false, "RequiresSession": false } },
+          { "Name": "m2b-sessions", "Properties": {
+              "DeadLetteringOnMessageExpiration": false, "DefaultMessageTimeToLive": "PT1H",
+              "DuplicateDetectionHistoryTimeWindow": "PT20S", "ForwardDeadLetteredMessagesTo": "",
+              "ForwardTo": "", "LockDuration": "PT30S", "MaxDeliveryCount": 10,
+              "RequiresDuplicateDetection": false, "RequiresSession": true } }
         ],
         "Topics": [
           { "Name": "events",

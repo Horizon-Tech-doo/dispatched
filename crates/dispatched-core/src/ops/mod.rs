@@ -206,9 +206,13 @@ pub(crate) fn record(job: &mut JobRun<'_>, located: locate::Located) -> bool {
                 why: NotReached::Cancelled,
             }
     });
+    // Items found by the search were recorded live (`locate::Live`); add the others, then put
+    // the report back in the order given.
+    let order: Vec<Option<i64>> = located.items.iter().map(|i| i.sequence_number).collect();
     for item in located.items {
-        job.item(item);
+        job.settle_item(item);
     }
+    job.reorder(&order);
     for note in located.notes {
         job.note(note);
     }
