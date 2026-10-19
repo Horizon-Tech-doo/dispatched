@@ -4,8 +4,11 @@ import { afterEach } from "vitest";
 
 afterEach(async () => {
   cleanup();
-  // A test's fake updater must not leak into the next one.
-  if (typeof window !== "undefined") (await import("@/engine/updater")).resetUpdater();
+  // A test's fake updater, and the message views' filters and sorts (module state), must not leak into the next one.
+  if (typeof window !== "undefined") {
+    (await import("@/engine/updater")).resetUpdater();
+    (await import("@/shell/messages/viewStore")).resetViewStates();
+  }
 });
 
 // Some suites opt into `// @vitest-environment node` (e.g. the ESLint boundary test);

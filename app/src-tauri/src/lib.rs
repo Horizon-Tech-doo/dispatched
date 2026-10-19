@@ -1,6 +1,8 @@
+mod clipboard;
 mod commands;
 mod error;
 mod events;
+mod jobs;
 mod ops;
 mod state;
 
@@ -68,6 +70,7 @@ pub fn run() {
     builder
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(state::AppState::open())
         .invoke_handler(tauri::generate_handler![
             commands::app_info,
@@ -77,17 +80,46 @@ pub fn run() {
             commands::profile_save,
             commands::profile_delete,
             commands::profile_test,
+            commands::profile_test_draft,
+            commands::copy_entity_connection_string,
             commands::account_current,
             commands::sign_in,
             commands::sign_in_cancel,
+            commands::sign_ins_list,
+            commands::sign_out,
+            commands::open_sign_in_page,
             commands::list_tenants,
             commands::discover_namespaces,
             commands::connect,
             commands::disconnect,
             commands::list_entities,
             commands::list_subscriptions,
-            commands::peek,
+            commands::peek_page,
+            commands::message_detail,
+            commands::check_filter,
+            commands::entity_details,
+            commands::list_rules,
+            commands::list_sessions,
+            commands::dashboard,
+            commands::pick_export_path,
+            commands::export_start,
+            commands::job_cancel,
+            commands::job_reveal,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Dispatched");
+        .build(tauri::generate_context!())
+        .expect("error while building Dispatched")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                // The process exit skips destructors, so a running export would leave its hidden temp
+                // file in the user's folder: cancel the exports and give them a moment to remove it.
+                use tauri::Manager;
+                let jobs = app.state::<state::AppState>().jobs.clone();
+                if jobs.any_running() {
+                    tauri::async_runtime::block_on(jobs.stop_all_and_wait(EXIT_WAIT));
+                }
+            }
+        });
 }
+
+/// Longest the app waits at exit for cancelled exports to remove their temp files.
+const EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(2);

@@ -93,6 +93,54 @@ impl ConnectionString {
     }
 }
 
+/// `cs` scoped to `entity` (`EntityPath=` replaced or added). `EntityPath` names the queue or
+/// topic, as the portal and the Azure SDKs expect: a subscription's string is scoped to its topic.
+/// Refuses a string that is already scoped to another queue or topic, since its key works only
+/// there; a key scoped to a topic does copy that topic's subscriptions. The result is a secret.
+pub fn entity_connection_string(cs: &str, entity: &crate::EntityPath) -> Result<SecretString> {
+    // Only the characters Service Bus names use: anything else (`;`, `=`, spaces, control
+    // characters) could add or change segments of the string the user pastes elsewhere.
+    let base = entity.base();
+    let valid = !base.is_empty()
+        && !entity.entity.is_empty()
+        && base
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'/' | b'~' | b'-'));
+    if !valid {
+        return Err(Error::Invalid(format!(
+            "`{}` is not a valid entity name (letters, digits, `.`, `_`, `-`, `~` and `/` only)",
+            base.escape_debug()
+        )));
+    }
+    let scope = entity.entity.as_str();
+    let parsed = ConnectionString::parse(cs)?;
+    if let Some(scoped) = &parsed.entity_path {
+        let same = crate::EntityPath::parse(scoped)
+            .map(|p| p.entity.eq_ignore_ascii_case(scope))
+            .unwrap_or(false);
+        if !same {
+            return Err(Error::Invalid(format!(
+                "this connection string only works for `{scoped}`"
+            )));
+        }
+    }
+    let parts: Vec<&str> = cs
+        .trim()
+        .split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        // Keys compare trimmed and in any case, as `ConnectionString::parse` reads them.
+        .filter(|s| {
+            !s.split_once('=')
+                .is_some_and(|(k, _)| k.trim().eq_ignore_ascii_case("entitypath"))
+        })
+        .collect();
+    Ok(SecretString::from(format!(
+        "{};EntityPath={scope}",
+        parts.join(";")
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,6 +250,119 @@ mod tests {
             ConnectionString::parse("Endpoint=ftp://x;SharedAccessKeyName=k;SharedAccessKey=v")
                 .unwrap_err();
         assert!(err.to_string().contains("sb://"), "{err}");
+    }
+
+    #[test]
+    fn entity_connection_string_appends_or_keeps_the_entity() {
+        let cs =
+            "Endpoint=sb://ns.servicebus.windows.net/;SharedAccessKeyName=r;SharedAccessKey=k=";
+        let q = crate::EntityPath::queue("orders");
+        assert_eq!(
+            entity_connection_string(cs, &q).unwrap().expose_secret(),
+            format!("{cs};EntityPath=orders").replace(";;", ";")
+        );
+        let scoped = format!("{cs};EntityPath=orders");
+        assert!(
+            entity_connection_string(&scoped, &q)
+                .unwrap()
+                .expose_secret()
+                .ends_with(";EntityPath=orders")
+        );
+        let sub = crate::EntityPath::subscription("events", "audit");
+        let e = entity_connection_string(&scoped, &sub)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("only works for `orders`") && !e.contains("k="),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn a_subscription_string_is_scoped_to_its_topic() {
+        // The Azure SDKs expect `EntityPath` to name the queue or topic; they reject a
+        // subscription path there.
+        let cs =
+            "Endpoint=sb://ns.servicebus.windows.net/;SharedAccessKeyName=r;SharedAccessKey=k=";
+        let sub = crate::EntityPath::subscription("events", "audit");
+        let out = entity_connection_string(cs, &sub).unwrap();
+        let out = out.expose_secret();
+        assert!(out.ends_with(";EntityPath=events"), "{out}");
+        assert!(!out.contains("Subscriptions"), "{out}");
+    }
+
+    #[test]
+    fn a_topic_scoped_key_copies_that_topics_subscriptions_only() {
+        let cs =
+            "Endpoint=sb://ns.servicebus.windows.net/;SharedAccessKeyName=r;SharedAccessKey=k=";
+        let topic_scoped = format!("{cs};EntityPath=events");
+        let own = crate::EntityPath::subscription("events", "audit");
+        let out = entity_connection_string(&topic_scoped, &own).unwrap();
+        assert!(out.expose_secret().ends_with(";EntityPath=events"));
+        let other_topic = crate::EntityPath::subscription("billing", "audit");
+        let e = entity_connection_string(&topic_scoped, &other_topic)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("only works for `events`"), "{e}");
+        let queue = crate::EntityPath::queue("orders");
+        assert!(entity_connection_string(&topic_scoped, &queue).is_err());
+        // A queue-scoped key does not copy a subscription either.
+        let queue_scoped = format!("{cs};EntityPath=orders");
+        assert!(entity_connection_string(&queue_scoped, &own).is_err());
+    }
+
+    #[test]
+    fn entity_connection_string_refuses_entity_names_that_would_inject_segments() {
+        let cs =
+            "Endpoint=sb://ns.servicebus.windows.net/;SharedAccessKeyName=r;SharedAccessKey=k=";
+        for bad in [
+            "orders;Endpoint=https:evil.example",
+            "orders;UseDevelopmentEmulator=true",
+            "orders=x",
+            "ord ers",
+            "orders\t",
+            "orders\u{7}",
+        ] {
+            let e = entity_connection_string(cs, &crate::EntityPath::queue(bad)).unwrap_err();
+            assert!(matches!(e, Error::Invalid(_)), "{bad:?}");
+            let msg = e.to_string();
+            assert!(msg.contains("not a valid entity name"), "{msg}");
+            assert!(
+                !msg.contains("k=") && !msg.contains("SharedAccess"),
+                "{msg}"
+            );
+        }
+        let sub = crate::EntityPath::subscription("events", "a;b=c");
+        assert!(entity_connection_string(cs, &sub).is_err());
+        // Every character a Service Bus name may use is kept.
+        let ok = crate::EntityPath::queue("eu/Orders_v2.x-y~z");
+        assert!(
+            entity_connection_string(cs, &ok)
+                .unwrap()
+                .expose_secret()
+                .ends_with(";EntityPath=eu/Orders_v2.x-y~z")
+        );
+    }
+
+    #[test]
+    fn entity_connection_string_replaces_an_entity_path_however_it_is_written() {
+        let cs =
+            "Endpoint=sb://ns.servicebus.windows.net/;SharedAccessKeyName=r;SharedAccessKey=k=";
+        let q = crate::EntityPath::queue("orders");
+        for stored in [
+            format!("{cs};EntityPath =orders"),
+            format!("{cs}; entitypath = orders ;"),
+            format!("{cs};EntityPath=Orders"),
+        ] {
+            let out = entity_connection_string(&stored, &q).unwrap();
+            let out = out.expose_secret();
+            assert!(out.ends_with(";EntityPath=orders"), "{stored}: {out}");
+            assert_eq!(
+                out.to_ascii_lowercase().matches("entitypath").count(),
+                1,
+                "{stored}: {out}"
+            );
+        }
     }
 
     #[test]

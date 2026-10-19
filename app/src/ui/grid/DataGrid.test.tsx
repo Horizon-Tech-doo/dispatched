@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import type { ColumnDef } from "@tanstack/react-table";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
-import { DataGrid } from "./DataGrid";
+import { DataGrid, rowNumberWidth, type DataGridProps, type GridSort } from "./DataGrid";
 
 interface Msg { seq: number; subject: string; size: string }
 const columns: ColumnDef<Msg, unknown>[] = [
@@ -13,7 +13,7 @@ const columns: ColumnDef<Msg, unknown>[] = [
 ];
 const rows = (n: number): Msg[] => Array.from({ length: n }, (_, i) => ({ seq: 48000 + i, subject: `Subject ${i}`, size: "1.8 KB" }));
 
-function Harness({ data = rows(20), onActivate = () => {}, ...rest }: { data?: Msg[]; onActivate?: (id: string) => void; loading?: boolean; empty?: React.ReactNode; error?: React.ReactNode; rowHeight?: number }) {
+function Harness({ data = rows(20), onActivate = () => {}, ...rest }: { data?: Msg[]; onActivate?: (id: string) => void; loading?: boolean; empty?: React.ReactNode; error?: React.ReactNode; rowHeight?: number; rowLabel?: (r: Msg) => string }) {
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [focus, setFocus] = useState<string | null>(null);
   return (
@@ -76,6 +76,11 @@ describe("DataGrid", () => {
     await user.click(rowEls()[6]);
     await user.keyboard("{/Shift}");
     expect(selectedRows().map((r) => r.getAttribute("data-row-id"))).toEqual(["48003", "48004", "48005", "48006"]);
+  });
+
+  it("names a row from rowLabel", () => {
+    render(<Harness rowLabel={(r) => `Message ${r.seq}`} />);
+    expect(screen.getByRole("row", { name: "Message 48002" })).toBeInTheDocument();
   });
 
   it("shows loading and empty states instead of rows", () => {
@@ -161,5 +166,227 @@ describe("DataGrid", () => {
     await user.click(rowEls()[3]);
     await user.keyboard("{/Meta}");
     expect(rowEls()[3].className).toContain("outline-muted");
+  });
+
+  it("marks the keyboard focus on the active row, and on the container only when no row is active", async () => {
+    const user = userEvent.setup();
+    render(<Harness data={rows(12)} />);
+    const ring = () => document.querySelector<HTMLElement>("[data-focus-ring]")!;
+    // Nothing active: the container carries the focus ring.
+    expect(ring().dataset.focusRing).toBe("container");
+    expect(ring().className).toContain("peer-focus-visible:outline-fg");
+    const rowEls = () => screen.getAllByRole("row").slice(1);
+    await user.click(rowEls()[2]);
+    // An active row: its inset outline is the mark and the container draws none.
+    expect(ring().dataset.focusRing).toBe("row");
+    expect(ring().className).not.toContain("peer-focus-visible");
+    expect(rowEls()[2].className).toContain("group-focus-visible/grid:outline-fg");
+    expect(rowEls()[1].className).not.toContain("group-focus-visible/grid:outline-fg");
+  });
+
+  it("shares the panel's width between the columns instead of running past it", () => {
+    render(<Harness />);
+    const header = screen.getAllByRole("row")[0];
+    expect(header.parentElement!.className).toContain("w-full");
+    expect(header.parentElement!.className).not.toContain("w-max");
+  });
+});
+
+const sortable: ColumnDef<Msg, unknown>[] = [
+  { id: "seq", header: "Seq", accessorFn: (r) => r.seq, meta: { mono: true, width: "64px" } },
+  { id: "subject", header: "Subject", accessorFn: (r) => r.subject },
+];
+
+function Sorted(props: Partial<DataGridProps<Msg>> & { initial?: GridSort | null }) {
+  const { initial, ...rest } = props;
+  const [sorting, setSorting] = useState<GridSort | null>(initial ?? null);
+  const [sel, setSel] = useState<{ ids: Set<string>; focus: string | null }>({ ids: new Set(), focus: null });
+  return (
+    <DataGrid<Msg>
+      label="Messages"
+      columns={sortable}
+      rows={rows(5)}
+      getRowId={(r) => String(r.seq)}
+      selectedIds={sel.ids}
+      focusId={sel.focus}
+      onSelectionChange={(ids, focus) => setSel({ ids, focus })}
+      rowHeight={22}
+      initialRect={{ width: 800, height: 600 }}
+      sorting={sorting}
+      onSortingChange={setSorting}
+      {...rest}
+    />
+  );
+}
+
+const seqColumn = () => screen.getAllByRole("row").slice(1).map((r) => within(r).getAllByRole("gridcell")[0].textContent);
+const sortButton = () => within(screen.getByRole("columnheader", { name: /Seq/ })).getByRole("button");
+
+describe("DataGrid sorting and columns", () => {
+  it("cycles a header through ascending, descending and none", async () => {
+    render(<Sorted />);
+    const header = screen.getByRole("columnheader", { name: /Seq/ });
+    await userEvent.click(sortButton());
+    expect(header).toHaveAttribute("aria-sort", "ascending");
+    expect(seqColumn()[0]).toBe("48000");
+    await userEvent.click(sortButton());
+    expect(header).toHaveAttribute("aria-sort", "descending");
+    expect(seqColumn()[0]).toBe("48004");
+    await userEvent.click(sortButton());
+    expect(header).not.toHaveAttribute("aria-sort");
+    expect(seqColumn()[0]).toBe("48000");
+  });
+
+  it("reports sort changes without owning the state", async () => {
+    const onSortingChange = vi.fn();
+    render(<Sorted sorting={null} onSortingChange={onSortingChange} />);
+    await userEvent.click(sortButton());
+    expect(onSortingChange).toHaveBeenCalledWith({ id: "seq", desc: false });
+  });
+
+  it("offers no sort buttons without a sort handler or when a column opts out", () => {
+    const { rerender } = render(<Sorted onSortingChange={undefined} />);
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    const optOut: ColumnDef<Msg, unknown>[] = [{ ...sortable[0], enableSorting: false }, sortable[1]];
+    rerender(<Sorted columns={optOut} />);
+    expect(within(screen.getByRole("columnheader", { name: /Seq/ })).queryByRole("button")).not.toBeInTheDocument();
+    expect(within(screen.getByRole("columnheader", { name: /Subject/ })).getByRole("button")).toBeInTheDocument();
+  });
+
+  it("numbers rows in display order", () => {
+    render(<Sorted rowNumbers initial={{ id: "seq", desc: true }} />);
+    expect(screen.getAllByRole("columnheader")[0]).toHaveTextContent("#");
+    const first = screen.getAllByRole("row")[1];
+    expect(within(first).getAllByRole("gridcell")[0]).toHaveTextContent("1");
+    expect(within(first).getAllByRole("gridcell")[1]).toHaveTextContent("48004");
+  });
+
+  it("keeps a shift range anchored to the row after re-sorting", async () => {
+    render(<Sorted />);
+    const grid = screen.getByRole("grid");
+    await userEvent.click(screen.getAllByRole("row")[1]); // the smallest seq, 48000
+    await userEvent.click(sortButton());
+    await userEvent.click(sortButton()); // descending: 48000 is now the last row
+    // Shift+K extends upwards from the anchor; Shift+J would clamp at the end and select one row.
+    await userEvent.keyboard("{Shift>}K{/Shift}");
+    const selected = [...grid.querySelectorAll('[aria-selected="true"]')].map((r) => within(r as HTMLElement).getAllByRole("gridcell")[0].textContent);
+    expect(selected.sort()).toEqual(["48000", "48001"]);
+  });
+
+  it("extends with Shift+J like Shift+ArrowDown", async () => {
+    render(<Sorted />);
+    screen.getByRole("grid").focus();
+    await userEvent.keyboard("j{Shift>}JJ{/Shift}");
+    expect(selectedRows().map((r) => r.getAttribute("data-row-id"))).toEqual(["48000", "48001", "48002"]);
+  });
+
+  it("moves a page with PageDown and PageUp", async () => {
+    render(<Harness data={rows(200)} />);
+    const grid = screen.getByRole("grid");
+    grid.focus();
+    await userEvent.keyboard("{ArrowDown}{PageDown}");
+    // jsdom has no layout, so the page falls back to ten rows minus one.
+    expect(selectedRows().map((r) => r.getAttribute("data-row-id"))).toEqual(["48009"]);
+    expect(grid.getAttribute("aria-activedescendant")).toMatch(/-48009$/);
+    await userEvent.keyboard("{PageUp}");
+    expect(selectedRows().map((r) => r.getAttribute("data-row-id"))).toEqual(["48000"]);
+  });
+
+  it("does not hijack Enter on a header button", async () => {
+    const onActivate = vi.fn();
+    render(<Sorted onActivate={onActivate} />);
+    await userEvent.click(screen.getAllByRole("row")[1]);
+    sortButton().focus();
+    await userEvent.keyboard("{Enter}");
+    expect(onActivate).not.toHaveBeenCalled();
+    expect(screen.getByRole("columnheader", { name: /Seq/ })).toHaveAttribute("aria-sort", "ascending");
+  });
+
+  it("marks itself busy while loading", () => {
+    const { rerender } = render(<Harness data={rows(2000)} />);
+    expect(screen.getByRole("grid")).not.toHaveAttribute("aria-busy");
+    rerender(<Harness data={[]} loading />);
+    expect(screen.getByRole("grid")).toHaveAttribute("aria-busy", "true");
+  });
+
+  it("never points aria-activedescendant at a row that is not rendered", async () => {
+    render(<Harness data={rows(2000)} />);
+    const grid = screen.getByRole("grid");
+    grid.focus();
+    for (const key of ["{End}", "{Home}", "{PageDown}", "{End}"]) {
+      await userEvent.keyboard(key);
+      const id = grid.getAttribute("aria-activedescendant");
+      if (id) expect(document.getElementById(id)).not.toBeNull();
+    }
+    // jsdom does not scroll, so row 49999 is outside the rendered window after End.
+    expect(document.querySelector('[data-row-id="49999"]')).toBeNull();
+    expect(grid).not.toHaveAttribute("aria-activedescendant");
+  });
+
+  it("puts loading, empty and error bodies in a row and gridcell", () => {
+    const { rerender } = render(<Harness data={[]} loading />);
+    const cellOf = (el: HTMLElement) => el.closest('[role="gridcell"]') as HTMLElement;
+    expect(cellOf(screen.getByRole("status")).parentElement).toHaveAttribute("role", "row");
+    expect(cellOf(screen.getByRole("status"))).toHaveAttribute("aria-colspan", "3");
+    rerender(<Harness data={[]} empty={<p>No dead letters</p>} />);
+    expect(cellOf(screen.getByText("No dead letters")).parentElement).toHaveAttribute("role", "row");
+    rerender(<Harness data={[]} error={<p>Can&apos;t peek</p>} />);
+    expect(cellOf(screen.getByText("Can't peek"))).toHaveAttribute("aria-colspan", "3");
+  });
+
+  it("anchors a range at the preset focus row when nothing was selected yet", async () => {
+    function Preset() {
+      const [sel, setSel] = useState<{ ids: Set<string>; focus: string | null }>({ ids: new Set(), focus: "48000" });
+      return (
+        <DataGrid<Msg>
+          label="Messages"
+          columns={sortable}
+          rows={rows(10)}
+          getRowId={(r) => String(r.seq)}
+          selectedIds={sel.ids}
+          focusId={sel.focus}
+          onSelectionChange={(ids, focus) => setSel({ ids, focus })}
+          rowHeight={22}
+          initialRect={{ width: 800, height: 600 }}
+        />
+      );
+    }
+    render(<Preset />);
+    screen.getByRole("grid").focus();
+    await userEvent.keyboard("{Shift>}{ArrowDown}{ArrowDown}{ArrowDown}{/Shift}");
+    expect(selectedRows().map((r) => r.getAttribute("data-row-id"))).toEqual(["48000", "48001", "48002", "48003"]);
+  });
+
+  it("returns focus to the grid when a navigation key is pressed on a header button", async () => {
+    render(<Sorted />);
+    const grid = screen.getByRole("grid");
+    sortButton().focus();
+    await userEvent.keyboard("j");
+    expect(grid).toHaveFocus();
+    expect(grid.getAttribute("aria-activedescendant")).toMatch(/-48000$/);
+    sortButton().focus();
+    await userEvent.keyboard(" ");
+    expect(sortButton()).toHaveFocus();
+  });
+
+  it("renders a bounded window of a sorted 10,000-row list", () => {
+    render(<Sorted rows={rows(10_000)} initial={{ id: "seq", desc: true }} />);
+    const rendered = screen.getAllByRole("row").length;
+    expect(rendered).toBeLessThan(120);
+    expect(seqColumn()[0]).toBe("57999");
+  });
+
+  it("widens the row-number gutter past five digits only", () => {
+    expect(rowNumberWidth(20)).toBe("52px");
+    expect(rowNumberWidth(99_999)).toBe("52px");
+    expect(rowNumberWidth(100_000)).toBe("60px");
+    expect(rowNumberWidth(1_000_000)).toBe("67px");
+    render(<Sorted rowNumbers />);
+    expect(screen.getAllByRole("row")[0].style.gridTemplateColumns.startsWith("52px ")).toBe(true);
+  });
+
+  it("labels the row-number column", () => {
+    render(<Sorted rowNumbers />);
+    expect(screen.getByRole("columnheader", { name: "Row number" })).toHaveTextContent("#");
   });
 });

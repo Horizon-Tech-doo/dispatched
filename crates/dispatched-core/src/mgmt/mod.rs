@@ -1,9 +1,13 @@
 //! Service Bus management API (ATOM over HTTPS; plain HTTP on the emulator).
 
+mod details;
 mod models;
+mod rules;
 pub(crate) mod xml;
 
+pub use details::{EntityDetails, EntityKind, EntityProperty};
 pub use models::{EntityCounts, QueueInfo, SubscriptionInfo, TopicInfo};
+pub use rules::{CorrelationProperty, RuleFilter, RuleInfo};
 
 use crate::namespace::Namespace;
 use crate::tokens::TokenSource;
@@ -110,6 +114,44 @@ impl ManagementClient {
             .into_iter()
             .find_map(queue_from_entry)
             .ok_or_else(|| Error::NotFound(format!("queue `{name}`")))
+    }
+
+    /// One entity's description. `path` is a queue or topic name, or `topic/subscriptions/name`.
+    /// A missing entity, or one of another kind, is `NotFound`.
+    pub async fn entity_details(&self, kind: EntityKind, path: &str) -> Result<EntityDetails> {
+        let (url_path, topic) = match kind {
+            EntityKind::Queue | EntityKind::Topic => (segment(path), None),
+            EntityKind::Subscription => {
+                let e = crate::EntityPath::parse(path)?;
+                let sub = e.subscription.clone().ok_or_else(|| {
+                    Error::Invalid(format!(
+                        "`{path}` is not a subscription; use `topic/subscriptions/name`"
+                    ))
+                })?;
+                (
+                    format!("{}/Subscriptions/{}", segment(&e.entity), segment(&sub)),
+                    Some(e.entity),
+                )
+            }
+        };
+        let root = self.get(&url_path, &[("enrich", "true")]).await?;
+        entries(&root)
+            .into_iter()
+            .find_map(|e| details::details_from_entry(kind, topic.as_deref(), e))
+            .ok_or_else(|| Error::NotFound(format!("{} `{path}`", kind.as_str())))
+    }
+
+    /// The rules of `topic`'s subscription `subscription`.
+    pub async fn list_rules(&self, topic: &str, subscription: &str) -> Result<Vec<RuleInfo>> {
+        self.list(
+            &format!(
+                "{}/Subscriptions/{}/Rules",
+                segment(topic),
+                segment(subscription)
+            ),
+            rules::rule_from_entry,
+        )
+        .await
     }
 
     /// Page through a feed. Stops on a short page, on a page with no names
@@ -502,5 +544,207 @@ mod tests {
             }
             other => panic!("expected Forbidden, got {other}"),
         }
+    }
+
+    #[tokio::test]
+    async fn queue_details_list_leaf_properties_in_order() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/orders")
+            .match_query(Matcher::UrlEncoded("enrich".into(), "true".into()))
+            .with_status(200)
+            .with_body(include_str!("../../tests/fixtures/queue_entry.xml"))
+            .create_async()
+            .await;
+        let d = client(&server)
+            .entity_details(EntityKind::Queue, "orders")
+            .await
+            .unwrap();
+        assert_eq!(
+            (d.kind, d.name.as_str(), d.topic.as_deref()),
+            (EntityKind::Queue, "orders", None)
+        );
+        assert_eq!(d.status.as_deref(), Some("Active"));
+        assert_eq!(d.counts.as_ref().unwrap().active, 37);
+        assert_eq!(d.size_in_bytes, Some(81_920));
+        let names: Vec<&str> = d.properties.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            &names[..3],
+            [
+                "LockDuration",
+                "MaxSizeInMegabytes",
+                "RequiresDuplicateDetection"
+            ]
+        );
+        assert!(!names.contains(&"CountDetails") && !names.contains(&"AuthorizationRules"));
+        assert!(!names.contains(&"ForwardTo"), "empty leaves are left out");
+        let json = serde_json::to_string(&d).unwrap();
+        for leaked in [
+            "secret-ish",
+            "primary-secret-value",
+            "secondary-secret-value",
+            "PrimaryKey",
+            "SecondaryKey",
+            "AuthorizationRule",
+        ] {
+            assert!(!json.contains(leaked), "{leaked} leaked into {json}");
+        }
+    }
+
+    #[tokio::test]
+    async fn details_of_the_wrong_kind_are_not_found() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/orders")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(include_str!("../../tests/fixtures/queue_entry.xml"))
+            .create_async()
+            .await;
+        let e = client(&server)
+            .entity_details(EntityKind::Topic, "orders")
+            .await
+            .unwrap_err();
+        assert!(matches!(e, Error::NotFound(_)), "{e:?}");
+        let _empty = server
+            .mock("GET", "/gone")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(r#"<feed xmlns="http://www.w3.org/2005/Atom"><title type="text">Publicly Listed Services</title></feed>"#)
+            .create_async()
+            .await;
+        assert!(matches!(
+            client(&server)
+                .entity_details(EntityKind::Queue, "gone")
+                .await
+                .unwrap_err(),
+            Error::NotFound(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn subscription_details_use_the_subscription_path() {
+        let mut server = mockito::Server::new_async().await;
+        let body = r#"<entry xmlns="http://www.w3.org/2005/Atom"><title type="text">audit</title><content type="application/xml">
+            <SubscriptionDescription xmlns="http://schemas.microsoft.com/netservices/2010/10/servicebus/connect">
+            <LockDuration>PT30S</LockDuration><RequiresSession>true</RequiresSession><Status>Active</Status></SubscriptionDescription></content></entry>"#;
+        let _m = server
+            .mock("GET", "/events/Subscriptions/audit")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(body)
+            .create_async()
+            .await;
+        let d = client(&server)
+            .entity_details(EntityKind::Subscription, "events/subscriptions/audit")
+            .await
+            .unwrap();
+        assert_eq!(
+            (d.name.as_str(), d.topic.as_deref()),
+            ("audit", Some("events"))
+        );
+        assert_eq!(d.counts, None);
+        assert!(
+            d.properties
+                .iter()
+                .any(|p| p.name == "RequiresSession" && p.value == "true")
+        );
+        assert!(
+            client(&server)
+                .entity_details(EntityKind::Subscription, "events")
+                .await
+                .is_err(),
+            "not a subscription path"
+        );
+    }
+
+    #[tokio::test]
+    async fn rules_parse_sql_correlation_and_actions() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/events/Subscriptions/all/Rules")
+            .match_query(Matcher::UrlEncoded("$top".into(), "100".into()))
+            .with_status(200)
+            .with_body(include_str!("../../tests/fixtures/rules_feed.xml"))
+            .create_async()
+            .await;
+        let rules = client(&server).list_rules("events", "all").await.unwrap();
+        assert_eq!(rules.len(), 3);
+        assert_eq!(
+            rules[0].filter,
+            RuleFilter::Sql {
+                expression: "1=1".into()
+            }
+        );
+        assert_eq!(rules[0].action, None);
+        assert_eq!(rules[0].created_at.as_deref(), Some("2026-09-01T08:00:00Z"));
+        assert_eq!(rules[1].action.as_deref(), Some("SET priority = 'high'"));
+        let RuleFilter::Correlation {
+            correlation_id,
+            subject,
+            properties,
+            to,
+            ..
+        } = &rules[2].filter
+        else {
+            panic!("{:?}", rules[2])
+        };
+        assert_eq!(
+            (correlation_id.as_deref(), subject.as_deref(), to.as_deref()),
+            (Some("batch-7"), Some("priority"), None)
+        );
+        assert_eq!(
+            properties,
+            &[
+                CorrelationProperty {
+                    name: "region".into(),
+                    value: "eu".into()
+                },
+                CorrelationProperty {
+                    name: "tier".into(),
+                    value: "2".into()
+                },
+            ]
+        );
+        let json = serde_json::to_value(&rules[2]).unwrap();
+        assert_eq!(json["filter"]["kind"], "correlation");
+    }
+
+    #[tokio::test]
+    async fn filters_we_cannot_read_are_unknown_not_invented() {
+        let mut server = mockito::Server::new_async().await;
+        let rule = |name: &str, filter: &str| {
+            format!(
+                r#"<entry><title>{name}</title><content><RuleDescription>{filter}<Name>{name}</Name></RuleDescription></content></entry>"#
+            )
+        };
+        let body = format!(
+            "<feed>{}{}{}{}</feed>",
+            rule("no-filter", ""),
+            rule(
+                "future",
+                r#"<Filter i:type="FancyFilter"><Mode>x</Mode></Filter>"#
+            ),
+            rule("empty-filter", "<Filter/>"),
+            rule(
+                "props-only",
+                "<Filter><Properties><KeyValueOfstringanyType><Key>k</Key><Value>v</Value></KeyValueOfstringanyType></Properties></Filter>"
+            ),
+        );
+        let _m = server
+            .mock("GET", "/events/Subscriptions/all/Rules")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(body)
+            .create_async()
+            .await;
+        let rules = client(&server).list_rules("events", "all").await.unwrap();
+        assert_eq!(rules.len(), 4);
+        for r in &rules[..3] {
+            assert_eq!(r.filter, RuleFilter::Unknown, "{}", r.name);
+        }
+        assert!(matches!(rules[3].filter, RuleFilter::Correlation { .. }));
+        let json = serde_json::to_value(&rules[0]).unwrap();
+        assert_eq!(json["filter"]["kind"], "unknown");
     }
 }

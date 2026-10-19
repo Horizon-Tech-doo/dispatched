@@ -4,6 +4,8 @@ pub mod store;
 
 pub use store::ProfileStore;
 
+use store::normalize_tenant;
+
 use crate::connstr::ConnectionString;
 use crate::namespace::{Namespace, ProxyConfig, Transport};
 use crate::tokens::EntraSource;
@@ -242,13 +244,63 @@ pub fn namespace_for(
             )
         }
     };
-    let ns = ns.with_transport(profile.transport)?;
-    let proxy = profile
+    with_options(ns, profile.transport, profile.proxy.as_deref())
+}
+
+/// Apply a transport and proxy (then the environment's proxy) to `ns`.
+fn with_options(ns: Namespace, transport: Transport, proxy: Option<&str>) -> Result<Namespace> {
+    let ns = ns.with_transport(transport)?;
+    let proxy = proxy.map(ProxyConfig::parse).transpose()?;
+    with_env_proxy(ns.with_proxy(proxy)?)
+}
+
+/// The namespace an unsaved draft points at, so it can be tested before it is saved. Nothing is
+/// stored. A typed connection string is used as is. Otherwise the draft becomes the profile it
+/// would save as, made only for this call: `existing` (a connection-string profile, for its stored
+/// string) or an Entra profile bound to `sign_in`, its tenant normalised as a saved profile's is
+/// (`None` when it is `sign_in`'s own tenant). That profile goes through [`namespace_for`].
+pub fn namespace_for_draft(
+    draft: &ProfileDraft,
+    existing: Option<&Profile>,
+    secrets: &dyn CredentialStore,
+    entra: &Arc<EntraSession>,
+    sign_in: Option<&SignIn>,
+) -> Result<Namespace> {
+    let proxy = draft
         .proxy
         .as_deref()
-        .map(ProxyConfig::parse)
-        .transpose()?;
-    with_env_proxy(ns.with_proxy(proxy)?)
+        .map(str::trim)
+        .filter(|p| !p.is_empty());
+    if let DraftAuth::ConnectionString { connection_string } = &draft.auth
+        && let Some(text) = connection_string
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    {
+        let ns = Namespace::from_connection_string(&ConnectionString::parse(text)?)?;
+        return with_options(ns, draft.transport, proxy);
+    }
+    let mut transient = match &draft.auth {
+        DraftAuth::ConnectionString { .. } => existing
+            .filter(|p| matches!(p.auth, ProfileAuth::ConnectionString))
+            .cloned()
+            .ok_or_else(|| Error::Invalid("paste the namespace's connection string".into()))?,
+        DraftAuth::Entra { namespace, tenant } => {
+            let s = sign_in.ok_or_else(|| {
+                Error::NotSignedIn("sign in with Entra ID first, then test the connection".into())
+            })?;
+            let tenant = normalize_tenant(tenant.as_deref(), Some(&s.tenant_id));
+            Profile::entra(
+                draft.name.trim(),
+                &namespace_host(namespace)?,
+                &s.id,
+                tenant.as_deref(),
+            )
+        }
+    };
+    transient.transport = draft.transport;
+    transient.proxy = proxy.map(str::to_string);
+    namespace_for(&transient, secrets, entra, sign_in)
 }
 
 #[cfg(test)]
@@ -328,6 +380,77 @@ mod tests {
         let ns = namespace_for(&p, &MemoryStore::new(), &session(), Some(&si)).unwrap();
         assert_eq!(ns.transport(), Transport::WebSockets);
         assert!(ns.proxy().is_some());
+    }
+
+    #[test]
+    fn draft_namespace_uses_the_typed_string_or_the_stored_one() {
+        let secrets = MemoryStore::new();
+        let draft = |cs: Option<&str>| ProfileDraft {
+            id: None,
+            name: "A".into(),
+            auth: DraftAuth::ConnectionString {
+                connection_string: cs.map(str::to_string),
+            },
+            production: false,
+            color: None,
+            transport: Transport::Amqp,
+            proxy: None,
+            pinned_entities: vec![],
+        };
+        let cs = "Endpoint=sb://typed.servicebus.windows.net/;SharedAccessKeyName=r;SharedAccessKey=a2V5";
+        assert_eq!(
+            namespace_for_draft(&draft(Some(cs)), None, &secrets, &session(), None)
+                .unwrap()
+                .host(),
+            "typed.servicebus.windows.net"
+        );
+        let e = namespace_for_draft(&draft(None), None, &secrets, &session(), None).unwrap_err();
+        assert!(matches!(e, Error::Invalid(_)));
+        let stored = Profile::connection_string("B", &ConnectionString::parse(cs).unwrap());
+        secrets
+            .put(
+                &secret_key(&stored.id),
+                &secrecy::SecretString::from(cs.to_string()),
+            )
+            .unwrap();
+        assert_eq!(
+            namespace_for_draft(&draft(None), Some(&stored), &secrets, &session(), None)
+                .unwrap()
+                .host(),
+            "typed.servicebus.windows.net"
+        );
+        let entra = ProfileDraft {
+            auth: DraftAuth::Entra {
+                namespace: "myns".into(),
+                tenant: None,
+            },
+            ..draft(None)
+        };
+        assert!(matches!(
+            namespace_for_draft(&entra, None, &secrets, &session(), None).unwrap_err(),
+            Error::NotSignedIn(_)
+        ));
+        // With a sign-in the draft goes through namespace_for as a transient Entra profile.
+        let who = SignIn {
+            id: "oid-1".into(),
+            user_principal: "a@x.io".into(),
+            tenant_id: "t".into(),
+            display_name: None,
+            cloud: AzureCloud::Public,
+        };
+        let guest = ProfileDraft {
+            auth: DraftAuth::Entra {
+                namespace: "myns".into(),
+                tenant: Some(" T ".into()),
+            },
+            ..draft(None)
+        };
+        assert_eq!(
+            namespace_for_draft(&guest, None, &secrets, &session(), Some(&who))
+                .unwrap()
+                .host(),
+            "myns.servicebus.windows.net"
+        );
     }
 
     fn namespace(cs: &str) -> Namespace {

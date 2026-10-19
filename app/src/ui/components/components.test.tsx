@@ -9,6 +9,7 @@ import { CountBadge, ProdBadge } from "./badge";
 import { Kbd } from "./kbd";
 import { EmptyState } from "./empty-state";
 import { SkeletonRows } from "./skeleton";
+import { ToggleGroup } from "./toggle-group";
 
 describe("Button", () => {
   it("is a type=button that clicks and disables", async () => {
@@ -53,6 +54,20 @@ describe("Field", () => {
   });
 });
 
+describe("Field detail and inline layout", () => {
+  it("shows the engine's text on a detail line under the problem, and keeps the label beside an inline control", () => {
+    render(
+      <Field inline={72} label="Properties" error="This expression can't be read." detail="unexpected = at column 14">
+        {(ids) => <Input {...ids} />}
+      </Field>,
+    );
+    const input = screen.getByLabelText("Properties");
+    expect(input).toHaveAccessibleDescription(/can't be read/);
+    expect(input).toHaveAccessibleDescription(/unexpected = at column 14/);
+    expect(screen.getByText("unexpected = at column 14").className).toContain("font-mono");
+  });
+});
+
 describe("CountBadge", () => {
   it("formats and marks attention only above zero", () => {
     const { rerender } = render(<CountBadge value={3417} attention />);
@@ -80,5 +95,29 @@ describe("ProdBadge, Kbd, EmptyState, SkeletonRows", () => {
     expect(screen.getByText(/K$/)).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "No dead letters" })).toBeInTheDocument();
     expect(screen.getByRole("status", { name: "Loading" }).querySelectorAll("[data-skeleton-row]")).toHaveLength(3);
+  });
+});
+
+describe("ToggleGroup", () => {
+  it("toggles values independently with aria-pressed", async () => {
+    const onChange = vi.fn();
+    const opts = [{ value: "active", label: "Active" }, { value: "dlq", label: "Dead-letter" }] as const;
+    render(<ToggleGroup label="Counts" values={["active"]} options={[...opts]} onChange={onChange} />);
+    expect(screen.getByRole("group", { name: "Counts" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Active" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Dead-letter" })).toHaveAttribute("aria-pressed", "false");
+    await userEvent.click(screen.getByRole("button", { name: "Dead-letter" }));
+    expect(onChange).toHaveBeenCalledWith(["active", "dlq"]);
+    await userEvent.click(screen.getByRole("button", { name: "Active" }));
+    expect(onChange).toHaveBeenLastCalledWith([]);
+  });
+  it("marks the items that are on with a check, and separates the items with a 1px line", () => {
+    render(<ToggleGroup label="Counts" values={["a"]} options={[{ value: "a", label: "A" }, { value: "b", label: "B" }]} onChange={() => {}} />);
+    expect(screen.getByRole("button", { name: "A" }).querySelector("svg")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "B" }).querySelector("svg")).toBeNull();
+    expect(screen.getByRole("button", { name: "B" }).className).toContain("border-l");
+    expect(screen.getByRole("button", { name: "A" }).className).not.toContain("border-l");
+    expect(screen.getByRole("button", { name: "B" }).className).toContain("hover:bg-hover");
+    expect(screen.getByRole("button", { name: "A" }).className).toContain("hover:bg-selection");
   });
 });

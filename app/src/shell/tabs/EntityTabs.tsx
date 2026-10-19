@@ -9,8 +9,9 @@ export function EntityTabs() {
     <Tabs value={shell.activeTab ?? ""} onValueChange={(id) => dispatch({ type: "activate", id })}>
       <TabsList variant="strip" aria-label="Open entities" className="border-b border-line">
         {shell.tabs.map((t) => {
+          const dashboard = t.kind === "dashboard";
           const sub = t.kind === "subscription" ? splitSubscription(t.id) : null;
-          const name = sub ? sub.name : t.id;
+          const name = dashboard ? "Dashboard" : sub ? sub.name : t.id;
           return (
             // The marker and the active background belong to the whole tab, close button included.
             <div
@@ -20,7 +21,7 @@ export function EntityTabs() {
             >
               <TabsTrigger value={t.id} className="border-r-0 border-t-0 pr-1 data-[state=active]:border-t-0 data-[state=active]:bg-transparent">
                 <span>{name}</span>
-                <span className="text-faint">{sub ? sub.topic : t.kind}</span>
+                {!dashboard && <span className="text-faint">{sub ? sub.topic : t.kind}</span>}
               </TabsTrigger>
               <IconButton
                 label={sub ? `Close ${name} on ${sub.topic}` : `Close ${name}`}

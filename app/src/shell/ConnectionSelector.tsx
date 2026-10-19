@@ -28,12 +28,12 @@ export function ConnectionSelector() {
         <button
           type="button"
           aria-label={`Connection: ${description}`}
-          className="flex h-[26px] max-w-[420px] items-center gap-2 rounded-ctl border border-line bg-field px-2 text-12 hover:bg-hover"
+          className="flex h-[26px] min-w-0 max-w-[420px] shrink items-center gap-2 rounded-ctl border border-line bg-field px-2 text-12 hover:bg-hover"
         >
           {conn.status === "connected" && current && <LabelSwatch color={current.color} />}
-          <span className="truncate font-semibold">{label}</span>
-          {conn.status === "connected" && current && <span className="truncate text-muted">{shortHost(current.host)}</span>}
-          {conn.status === "connected" && current?.production && <ProdBadge />}
+          <span className="min-w-0 truncate font-semibold">{label}</span>
+          {conn.status === "connected" && current && <span className="min-w-0 truncate text-muted">{shortHost(current.host)}</span>}
+          {conn.status === "connected" && current?.production && <ProdBadge className="shrink-0" />}
           {trouble && <CircleAlert aria-hidden="true" className="size-3.5 shrink-0 text-accent" />}
           <ChevronDown aria-hidden="true" className="size-3 shrink-0 text-icon" />
         </button>

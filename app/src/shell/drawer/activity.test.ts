@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ACTIVITY_CAP, createActivityStore, createJobStore } from "./activity";
+import { finished, progress, started } from "./jobEvents";
 
 const entry = (i: number) => ({ at: "2026-10-15T09:41:12Z", action: `Step ${i}`, duration_ms: 12, error: null });
 
@@ -48,21 +49,21 @@ describe("startEventCapture", () => {
 describe("job store", () => {
   it("replaces a job that starts again with the same id", () => {
     const s = createJobStore();
-    s.apply({ type: "started", id: "j1", title: "First", total: 10 });
-    s.apply({ type: "progress", id: "j1", done: 5, total: 10 });
-    s.apply({ type: "started", id: "j1", title: "Second", total: 20 });
+    s.apply(started("j1", "First", 10));
+    s.apply(progress("j1", 5, 10));
+    s.apply(started("j1", "Second", 20));
     expect(s.all()).toHaveLength(1);
     expect(s.all()[0]).toMatchObject({ title: "Second", done: 0, total: 20, finished: false });
   });
 
   it("tracks start, progress and finish", () => {
     const s = createJobStore();
-    s.apply({ type: "started", id: "j1", title: "Export dead letters", total: 3417 });
-    s.apply({ type: "progress", id: "j1", done: 1920, total: 3417 });
+    s.apply(started("j1", "Export dead letters", 3417));
+    s.apply(progress("j1", 1920, 3417));
     expect(s.all()[0]).toMatchObject({ done: 1920, total: 3417, finished: false });
-    s.apply({ type: "finished", id: "j1", error: null });
+    s.apply(finished("j1", { error: null }));
     expect(s.all()[0].finished).toBe(true);
-    s.apply({ type: "progress", id: "unknown", done: 1, total: null });
+    s.apply(progress("unknown", 1, null));
     expect(s.all()).toHaveLength(1);
   });
 });

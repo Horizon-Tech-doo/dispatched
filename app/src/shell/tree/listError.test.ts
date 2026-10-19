@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { describeListError, troubleOf } from "./listError";
 
-const sas = { name: "Logistics", host: "sb-logistics-prod", entra: false };
-const entra = { name: "Logistics dev", host: "sb-logistics-dev", entra: true };
+const sas = { name: "Logistics", host: "sb-logistics-prod", auth: "connection-string" as const };
+const entra = { name: "Logistics dev", host: "sb-logistics-dev", auth: "entra" as const };
+const unknown = { name: "Logistics", host: "sb-logistics-prod", auth: "unknown" as const };
 
 describe("describeListError", () => {
   it("explains a network failure and the next step", () => {
@@ -12,10 +13,16 @@ describe("describeListError", () => {
     });
     expect(describeListError("timeout", sas).message).toContain("interrupted");
   });
-  it("explains missing rights", () => {
-    expect(describeListError("forbidden", sas).message).toBe(
-      "This identity isn't allowed to list sb-logistics-prod. Grant it Manage rights or pin entities on the connection.",
-    );
+  it("explains missing rights by how the connection signs in, and sends the user to the connection", () => {
+    expect(describeListError("forbidden", sas)).toEqual({
+      message: "This key has no Manage right. Use a key whose policy includes Manage. You can also pin entities on the connection.",
+      fix: "edit",
+    });
+    const e = describeListError("forbidden", entra);
+    expect(e.message).toMatch(/^Your account needs the Azure Service Bus Data Owner role on this namespace\./);
+    expect(e.message).toMatch(/You can also pin entities on the connection\.$/);
+    expect(e.fix).toBe("edit");
+    expect(describeListError("forbidden", unknown).message).toMatch(/^Your connection needs the Manage right: an Entra role or a key/);
   });
   it("sends an expired or revoked Entra sign-in to the connection sheet", () => {
     for (const kind of ["not_signed_in", "auth"]) {

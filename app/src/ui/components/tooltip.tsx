@@ -22,14 +22,17 @@ export function TooltipContent({ className, sideOffset = 4, ...props }: Componen
 }
 
 /** A trigger with a tooltip naming it, and its shortcut if it has one. */
-export function Hint({ label, shortcut, children }: { label: string; shortcut?: string; children: ReactNode }) {
+export function Hint({ label, shortcut, off, children }: { label: string; shortcut?: string; off?: boolean; children: ReactNode }) {
+  // `off`: no tooltip for now, but the trigger stays where it is in the tree (its button is not remounted).
   return (
     <Tooltip>
       <TooltipTrigger asChild>{children}</TooltipTrigger>
-      <TooltipContent>
-        <span>{label}</span>
-        {shortcut && <Kbd shortcut={shortcut} />}
-      </TooltipContent>
+      {!off && (
+        <TooltipContent>
+          <span>{label}</span>
+          {shortcut && <Kbd shortcut={shortcut} />}
+        </TooltipContent>
+      )}
     </Tooltip>
   );
 }

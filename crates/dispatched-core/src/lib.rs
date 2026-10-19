@@ -22,10 +22,19 @@ pub mod tokens;
 pub use connstr::ConnectionString;
 pub use error::{Error, Result};
 pub use explorer::Explorer;
-pub use export::{EXPORT_SCHEMA, ExportFormat, ExportedMessage, write_messages};
-pub use filter::{BodyFilter, MessageFilter, PropertyFilter};
-pub use messaging::{MessageBody, MessageState, PeekOptions, PeekPage, PeekedMessage, PropValue};
-pub use mgmt::{EntityCounts, ManagementClient, QueueInfo, SubscriptionInfo, TopicInfo};
+pub use export::{
+    Continuation, EXPORT_PAGE, EXPORT_SCHEMA, ExportFormat, ExportedMessage, FileExport, Streamed,
+    continuation, stream_pages, write_messages,
+};
+pub use filter::{BodyFilter, FilterField, FilterIssue, FilterSpec, MessageFilter, PropertyFilter};
+pub use messaging::{
+    BrokerList, MessageBody, MessageDetail, MessageState, MessageSummary, PeekOptions, PeekPage,
+    PeekedMessage, PropValue, SessionListing, SessionSummary,
+};
+pub use mgmt::{
+    CorrelationProperty, EntityCounts, EntityDetails, EntityKind, EntityProperty, ManagementClient,
+    QueueInfo, RuleFilter, RuleInfo, SubscriptionInfo, TopicInfo,
+};
 pub use namespace::{
     EmulatorPorts, EntityPath, Namespace, PeekView, ProxyConfig, SubQueue, Transport,
 };

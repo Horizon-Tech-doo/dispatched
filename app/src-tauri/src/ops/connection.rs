@@ -50,7 +50,7 @@ pub async fn connect(
                 explorer,
             });
             if let Some(old) = previous {
-                old.explorer.close().await;
+                state.close(old).await;
             }
             Ok(view)
         },
@@ -68,7 +68,7 @@ pub async fn disconnect(state: &AppState, ev: &dyn Events) -> Result<(), Command
             // Take it out first so the write lock is not held while closing.
             let old = state.active.write().await.take();
             if let Some(old) = old {
-                old.explorer.close().await;
+                state.close(old).await;
             }
             Ok(())
         },
@@ -144,6 +144,39 @@ mod tests {
         // Listing for the profile that is no longer active is refused.
         assert_eq!(s.active_for(&a.id).await.unwrap_err().kind, "not_connected");
         assert_eq!(s.active_for(&b.id).await.unwrap().profile_id, b.id);
+    }
+
+    #[tokio::test]
+    async fn closing_the_connection_cancels_running_exports() {
+        let s = state();
+        let ev = Recorder::default();
+        let a = s
+            .store
+            .add_connection_string("A", CS, s.secrets.as_ref(), false)
+            .unwrap();
+        let b = s
+            .store
+            .add_connection_string("B", CS, s.secrets.as_ref(), false)
+            .unwrap();
+        let (_, before) = s.jobs.start();
+        connect(&s, &ev, &a.id).await.unwrap();
+        assert!(!before.is_cancelled(), "nothing was closed");
+        let (_, on_a) = s.jobs.start();
+        connect(&s, &ev, &b.id).await.unwrap();
+        assert!(
+            on_a.is_cancelled(),
+            "switching profiles closes A's explorer"
+        );
+        let (_, on_b) = s.jobs.start();
+        disconnect(&s, &ev).await.unwrap();
+        assert!(on_b.is_cancelled());
+        connect(&s, &ev, &a.id).await.unwrap();
+        let (_, on_a) = s.jobs.start();
+        crate::ops::profiles::delete(&s, &ev, &a.id).await.unwrap();
+        assert!(
+            on_a.is_cancelled(),
+            "removing the connected profile closes it"
+        );
     }
 
     #[tokio::test]

@@ -62,18 +62,22 @@ fn text_message(
     body: &str,
     props: &[(&str, &str)],
     scheduled: Option<OffsetDateTime>,
+    session: Option<&str>,
 ) -> Message<Data> {
     let mut app = OrderedMap::new();
     for (k, v) in props {
         app.insert((*k).to_string(), SimpleValue::String((*v).to_string()));
     }
     let builder = Message::builder()
-        .properties(
-            Properties::builder()
+        .properties({
+            let mut p = Properties::builder()
                 .message_id(uuid::Uuid::new_v4().to_string())
-                .content_type("application/json")
-                .build(),
-        )
+                .content_type("application/json");
+            if let Some(s) = session {
+                p = p.group_id(s.to_string());
+            }
+            p.build()
+        })
         .application_properties(ApplicationProperties(app));
     let builder = match scheduled {
         Some(at) => builder.message_annotations(
@@ -118,7 +122,23 @@ pub async fn send_text(
     body: &str,
     props: &[(&str, &str)],
 ) -> Result<()> {
-    send_message(conn, address, text_message(body, props, None)).await
+    send_message(conn, address, text_message(body, props, None, None)).await
+}
+
+/// Send one text message in session `session_id`.
+pub async fn send_session_text(
+    conn: &mut ServiceBusConnection,
+    address: &str,
+    session_id: &str,
+    body: &str,
+    props: &[(&str, &str)],
+) -> Result<()> {
+    send_message(
+        conn,
+        address,
+        text_message(body, props, None, Some(session_id)),
+    )
+    .await
 }
 
 /// Send one text message that the broker enqueues only at `enqueue_at`
@@ -130,7 +150,12 @@ pub async fn send_scheduled(
     props: &[(&str, &str)],
     enqueue_at: OffsetDateTime,
 ) -> Result<()> {
-    send_message(conn, address, text_message(body, props, Some(enqueue_at))).await
+    send_message(
+        conn,
+        address,
+        text_message(body, props, Some(enqueue_at), None),
+    )
+    .await
 }
 
 /// Attach a peek-lock receiver holding exactly one credit that is not refilled

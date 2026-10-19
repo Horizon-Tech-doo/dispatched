@@ -1,5 +1,6 @@
 import { useShell } from "./context";
 import { useHotkeys, type Binding } from "./keys";
+import { DASHBOARD_ID } from "./state";
 
 /** The window's keyboard map. Renders nothing. */
 export function Hotkeys() {
@@ -15,6 +16,7 @@ export function Hotkeys() {
     { combo: "mod+f", run: () => free && document.getElementById("tree-filter")?.focus(), inInputs: true },
     { combo: "mod+r", run: () => {}, inInputs: true },
     { combo: "mod+shift+r", run: () => {}, inInputs: true },
+    { combo: "mod+shift+d", run: () => free && dispatch({ type: "open", tab: { id: DASHBOARD_ID, kind: "dashboard" } }) },
     { combo: "mod+j", run: () => free && dispatch({ type: "layout", patch: { drawerOpen: !shell.layout.drawerOpen } }) },
     { combo: "mod+w", run: () => free && shell.activeTab && dispatch({ type: "close", id: shell.activeTab }) },
     ...Array.from({ length: 9 }, (_, i) => ({ combo: `mod+${i + 1}`, run: () => free && dispatch({ type: "activateIndex", index: i }) })),

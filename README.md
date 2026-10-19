@@ -4,7 +4,7 @@
 
 Dispatched is an open-source alternative to [ServiceBusExplorer](https://github.com/paolosalvatori/ServiceBusExplorer) that runs on Windows, macOS and Linux, signs in with Microsoft Entra ID, works with the Service Bus Emulator, and (soon) exposes an MCP server so agents can inspect and operate your messaging safely.
 
-> **Status:** M1a (core and CLI). Browse-only: sign-in, profiles, listing, peeking, filtering and export, from the CLI and the core library. Not ready for production use.
+> **Status:** M1c, desktop browse. Read-only: sign-in, profiles, a lazy entity tree, peek views, filters, detail, export, Overview, Sessions, Rules and a Dashboard, in the desktop app and (for browsing, filtering and export) the CLI. Nothing here changes or removes messages. Not ready for production use.
 > Auto-update: release builds are signed and publish an updater manifest (the in-app update prompt arrives with the M1 shell).
 
 ## Try it (CLI)
@@ -41,6 +41,8 @@ dispatched peek orders
 - Body filters: `--body-contains <text>` (case-insensitive), `--body-regex <re>`, and `--body-json <jsonpath>` with an optional `--body-json-eq <value>`.
 - `--scan-limit N` caps how many messages one peek call examines, matching or not (per page for `export`). When it stops a scan early, the command prints `--from-seq <n>` to continue from. `--format json` gives machine-readable output.
 - `export --out <file|-> [--top N] [--format json|ndjson] [--force]` writes peeked messages using the `dispatched.message/v1` schema (JSON array by default, or one object per line). Files are written to a temp file and renamed into place, and an existing file needs `--force`; devices and pipes (`/dev/stdout`, FIFOs) are written directly. An export whose scan stalled before confirming the end of the entity is written but exits non-zero.
+- `peek --from-end [--top N]` shows the last N matching messages (oldest first) instead of the first; it has no continuation, `--top` is limited to 5000, and it examines at most 100,000 messages (or `--scan-limit` if larger) and says so when that limit, not the start of the entity, ended the search. `--session ID` on `peek` and `export` keeps only the messages of that session.
+- `show <entity>` prints an entity's status, counts and properties (`--format json` for the full description); `session ls <entity>` lists a session-enabled entity's sessions with message counts (`~N+` is a lower bound); `rule ls <topic>/subscriptions/<sub>` lists a subscription's rules with their filters and actions. All are read-only.
 
 ### Connectivity
 
@@ -48,6 +50,10 @@ dispatched peek orders
 - `HTTPS_PROXY` routes a connection through an HTTP proxy and forces WebSockets. A profile can store a proxy as `--proxy http://host:port`, without credentials; it takes precedence over `HTTPS_PROXY`. For an authenticated proxy, set `HTTPS_PROXY=http://user:pass@host:port` and leave the profile's proxy unset.
 - The emulator supports neither WebSockets nor a proxy.
 - TLS trust: AMQP over TCP and WebSockets use the bundled webpki root store, while the HTTPS management calls (listing, counts) use the OS store. A TLS-inspecting proxy whose CA is only in the OS store may need follow-up work.
+
+### Desktop app
+
+The app browses the namespaces and profiles you connect, read-only. Each queue or subscription has sub-tabs for Messages, Dead-letter, Transfer DLQ, Scheduled, Deferred, Sessions (session-enabled entities) and Rules (subscriptions). Views can start at the first messages, from a sequence number, or from the end, with "Peek more" to continue. Filter by property expression, body text, regex or JSONPath, and by session. A detail pane shows the body (JSON, XML, text or hex) and every system and custom property. Export the current view or the selected rows to JSON or NDJSON; it runs as a job and writes only to the file you pick in the save dialog. The Overview shows an entity's properties and live counts. The Dashboard lists counts for every queue and subscription and can refresh on a timer. Peeks never lock, receive or settle a message.
 
 ## Develop
 

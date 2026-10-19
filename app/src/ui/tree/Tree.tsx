@@ -9,6 +9,10 @@ export interface TreeNode {
   parentId: string | null;
   depth: number;
   label: string;
+  /** What a screen reader says for the row when it is more than the label (counts, a highlight). */
+  ariaLabel?: string;
+  /** Spoken after the name: the detail that is not part of it. */
+  ariaDescription?: string;
   expandable: boolean;
   expanded: boolean;
 }
@@ -172,7 +176,8 @@ export function Tree<N extends TreeNode>(props: TreeProps<N>) {
               aria-level={n.depth + 1}
               aria-expanded={n.expandable ? n.expanded : undefined}
               aria-selected={selected}
-              aria-label={n.label}
+              aria-label={n.ariaLabel ?? n.label}
+              aria-description={n.ariaDescription}
               onClick={() => onSelect(n.id)}
               onDoubleClick={() => onActivate(n.id)}
               className={cn(

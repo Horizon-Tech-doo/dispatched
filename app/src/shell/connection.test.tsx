@@ -51,4 +51,57 @@ describe("connection controller", () => {
     await act(() => first);
     await waitFor(() => expect(result.current.status).toBe("idle"));
   });
+
+  it("drops the state of a connection the engine closed, without calling disconnect again", async () => {
+    const mock = createMockTransport("default");
+    setTransport(mock);
+    const { result } = renderHook(() => useConnectionController(), { wrapper: wrapper() });
+    await act(() => result.current.connect("p-logistics"));
+    expect(result.current.status).toBe("connected");
+    act(() => result.current.closedByEngine("p-partner")); // some other connection: nothing to do
+    expect(result.current.status).toBe("connected");
+    act(() => result.current.closedByEngine("p-logistics"));
+    expect(result.current.status).toBe("idle");
+    expect(result.current.profileId).toBeNull();
+    expect(mock.calls.some((c) => c.cmd === "disconnect")).toBe(false);
+    expect(mock.calls).toContainEqual({ cmd: "settings_set", args: { key: "last_profile", value: null } });
+  });
+
+  it("drops peeks and message details on connect and disconnect, so another connection never shows them", async () => {
+    setTransport(createMockTransport("default"));
+    const client = createQueryClient();
+    const { result } = renderHook(() => useConnectionController(), {
+      wrapper: ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>,
+    });
+    const seed = () => {
+      client.setQueryData(["peek", "p-logistics", "invoice-generate", "active"], { pages: [], pageParams: [] });
+      client.setQueryData(["message", "p-logistics", "invoice-generate", "active", 1], null);
+    };
+    const cached = () => client.getQueryCache().findAll().filter((q) => q.queryKey[0] === "peek" || q.queryKey[0] === "message").length;
+    seed();
+    await act(() => result.current.connect("p-logistics"));
+    expect(cached()).toBe(0);
+    seed();
+    await act(() => result.current.disconnect());
+    expect(cached()).toBe(0);
+    seed();
+    await act(() => result.current.connect("p-logistics"));
+    seed();
+    act(() => result.current.closedByEngine("p-logistics"));
+    expect(cached()).toBe(0);
+  });
+
+  it("a reconnect of the same profile drops every per-entity read: details, rules, sessions and the dashboard too", async () => {
+    setTransport(createMockTransport("default"));
+    const client = createQueryClient();
+    const { result } = renderHook(() => useConnectionController(), {
+      wrapper: ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>,
+    });
+    await act(() => result.current.connect("p-logistics"));
+    const families = ["entity-details", "rules", "sessions", "dashboard", "peek", "message"];
+    for (const f of families) client.setQueryData([f, "p-logistics", "x"], { stale: true });
+    await act(() => result.current.connect("p-logistics"));
+    const left = client.getQueryCache().findAll().map((q) => q.queryKey[0]).filter((k) => families.includes(k as string));
+    expect(left).toEqual([]);
+  });
 });

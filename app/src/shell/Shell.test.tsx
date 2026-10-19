@@ -2,6 +2,7 @@ import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { EngineError, keys, setTransport } from "@/engine";
+import { useShell } from "./context";
 import { renderShell } from "./test-utils";
 
 const treePanel = () => document.querySelector('[data-panel-id="tree"]');
@@ -140,5 +141,36 @@ describe("Shell", () => {
     await chooseConnection(/Logistics dev/);
     expect(await screen.findByRole("list", { name: "Saved connections" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Show activity/ })).not.toBeInTheDocument();
+  });
+});
+
+describe("the tree pane in a narrow window", () => {
+  const SavedSize = () => <output aria-label="Saved tree size">{useShell().shell.layout.treeSize}</output>;
+  const size = () => parseFloat(treePanel()!.getAttribute("data-panel-size")!);
+  const resizeTo = (width: number) =>
+    act(() => {
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: width });
+      window.dispatchEvent(new Event("resize"));
+    });
+
+  it("is shown wider than saved, keeps the saved size, and returns to it when the window widens", async () => {
+    const wide = window.innerWidth;
+    try {
+      renderShell("default", {
+        last_profile: "p-logistics",
+        "shell:p-logistics": { tabs: [], activeTab: null, expanded: [], selected: null, layout: { treeSize: 18, drawerOpen: false, drawerSize: 18, drawerTab: "activity", detailSize: 38 } },
+      }, <SavedSize />);
+      await waitFor(() => expect(treePanel()).not.toBeNull());
+      await resizeTo(1440);
+      await waitFor(() => expect(size()).toBeCloseTo(18, 0));
+      await resizeTo(500); // 200 px of 500 is 40%
+      await waitFor(() => expect(size()).toBeGreaterThanOrEqual(40));
+      expect(screen.getByLabelText("Saved tree size")).toHaveTextContent("18");
+      await resizeTo(1440);
+      await waitFor(() => expect(size()).toBeCloseTo(18, 0));
+      expect(screen.getByLabelText("Saved tree size")).toHaveTextContent("18");
+    } finally {
+      await resizeTo(wide);
+    }
   });
 });

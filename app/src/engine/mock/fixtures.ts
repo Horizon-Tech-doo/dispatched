@@ -1,4 +1,8 @@
-import type { DiscoveredNamespace, DiscoveryView, EntityCounts, QueueInfo, SkippedSubscription, StoredProfile, SubscriptionInfo, TenantView, TopicInfo } from "../types";
+import type {
+  DiscoveredNamespace, DiscoveryView, EntityCounts, EntityKindName, EntityProperty, QueueInfo, RuleInfo, SkippedSubscription, StoredProfile, SubscriptionInfo,
+  TenantView, TopicInfo,
+} from "../types";
+import { generate, type MockMessage, type Spec } from "./messages";
 
 export const counts = (active: number, dead_letter: number, scheduled = 0): EntityCounts => ({
   active, dead_letter, scheduled, transfer: 0, transfer_dead_letter: 0, approximate: false, truncated: false,
@@ -30,9 +34,9 @@ const q = (name: string, c: EntityCounts | null, extra: Partial<QueueInfo> = {})
 
 export const queues: QueueInfo[] = [
   q("customs-docs", counts(112, 0)),
-  q("invoice-generate", counts(1284, 37)),
+  q("invoice-generate", counts(1284, 37, 3)),
   q("label-print", counts(6, 0)),
-  q("returns-intake", counts(0, 211), { requires_session: true }),
+  q("returns-intake", counts(48, 211), { requires_session: true }),
 ];
 
 export const topics: TopicInfo[] = [
@@ -119,4 +123,142 @@ export const guestDiscovery: DiscoveryView = {
     ns("nw-telemetry", GUEST_TENANT, "Northwind shared", "uksouth", "Standard"),
   ],
   skipped: [],
+};
+
+/** The sessions of `returns-intake`'s 48 active messages. */
+export const RMA = Array.from({ length: 12 }, (_, i) => `RMA-${1001 + i}`);
+
+/** Messages per entity. Counts match the listing (invoice-generate: 1,288 generated = 1,284 active + 3 scheduled
+ *  + 1 deferred; the listing says 1,284 active). `many-messages` gives customs-docs 12,000. */
+const specs = (scenario: string): Record<string, Spec[]> => ({
+  "customs-docs": [{ entity: "customs-docs", sub: "main", count: scenario === "many-messages" ? 12_000 : 112, firstSeq: 1 }],
+  "invoice-generate": [
+    { entity: "invoice-generate", sub: "main", count: 1288, firstSeq: 20_000, scheduledEvery: 400, deferredEvery: 600 },
+    { entity: "invoice-generate", sub: "dlq", count: 37, firstSeq: 41_000 },
+    { entity: "invoice-generate", sub: "tdlq", count: 2, firstSeq: 41_500 },
+  ],
+  "label-print": [{ entity: "label-print", sub: "main", count: 6, firstSeq: 300 }],
+  "returns-intake": [
+    { entity: "returns-intake", sub: "main", count: 48, firstSeq: 9_000, sessions: RMA },
+    { entity: "returns-intake", sub: "dlq", count: 211, firstSeq: 8_000 },
+  ],
+  "shipment-events/subscriptions/tracking-sync": [
+    { entity: "tracking-sync", sub: "main", count: 2906, firstSeq: 48_300 },
+    { entity: "tracking-sync", sub: "dlq", count: 3417, firstSeq: 48_213 - 3416 },
+  ],
+  "carrier-updates/subscriptions/eta-recalc": [
+    { entity: "eta-recalc", sub: "main", count: 58, firstSeq: 700 },
+    { entity: "eta-recalc", sub: "dlq", count: 9, firstSeq: 650 },
+  ],
+  "shipment-events/subscriptions/warehouse-notify": [
+    { entity: "warehouse-notify", sub: "main", count: 14, firstSeq: 1_000 },
+    { entity: "warehouse-notify", sub: "dlq", count: 1, firstSeq: 990 },
+  ],
+});
+
+const cache = new Map<string, MockMessage[]>();
+/** Every message of an entity (all sub-queues, by sequence number), generated once per scenario. */
+export function messagesOf(entity: string, scenario: string): MockMessage[] {
+  const key = `${scenario === "many-messages" ? "many" : "default"}|${entity}`;
+  let all = cache.get(key);
+  if (!all) {
+    all = (specs(scenario)[entity] ?? []).flatMap(generate);
+    // The newest tracking-sync dead letters: an empty body, a 6 MiB log that arrives cut, a 5 MiB binary that arrives cut
+    // (both cut to a few thousand rows: the viewer's work is the same).
+    const at = (seq: number) => all!.find((m) => m.sub === "dlq" && m.sequence_number === seq);
+    const empty = at(48_211);
+    if (empty) Object.assign(empty, { body: { kind: "empty" }, body_size: 0, content_type: null });
+    const log = at(48_212);
+    if (log) {
+      const text = Array.from({ length: 600 }, (_, i) => `2026-10-15T10:58:${String(i % 60).padStart(2, "0")}Z worker-${i % 7} INFO shipment ${48_212 + i} step ${i % 23} ok`).join("\n");
+      Object.assign(log, { body: { kind: "text", value: text }, content_type: "text/plain", body_size: 6 * 1024 * 1024, body_truncated: true });
+    }
+    const big = at(48_213);
+    if (big) {
+      // Bytes that are not UTF-8, so the viewer shows hex.
+      const bytes = Array.from({ length: 4096 }, (_, i) => String.fromCharCode((i * 31 + 0xc3) & 0xff)).join("");
+      Object.assign(big, { body: { kind: "binary", value: btoa(bytes) }, content_type: "application/octet-stream", body_size: 5 * 1024 * 1024, body_truncated: true });
+    }
+    cache.set(key, all);
+  }
+  return all;
+}
+
+/** The properties an entity's description lists, in the service's order. Each kind reports its own set. */
+export const details = (kind: EntityKindName, c: EntityCounts | null, session: boolean, forwardTo = ""): EntityProperty[] => {
+  const created = [{ name: "CreatedAt", value: "2026-09-01T08:00:00Z" }, { name: "UpdatedAt", value: "2026-10-01T08:00:00Z" }];
+  if (kind === "topic")
+    return [
+      { name: "MaxSizeInMegabytes", value: "1024" },
+      { name: "RequiresDuplicateDetection", value: "true" },
+      { name: "DuplicateDetectionHistoryTimeWindow", value: "PT10M" },
+      { name: "DefaultMessageTimeToLive", value: "P14D" },
+      { name: "EnableBatchedOperations", value: "true" },
+      { name: "EnablePartitioning", value: "false" },
+      { name: "SupportOrdering", value: "true" },
+      { name: "SubscriptionCount", value: "3" },
+      { name: "AutoDeleteOnIdle", value: "P10675199DT2H48M5.4775807S" },
+      ...created,
+    ];
+  if (kind === "subscription")
+    return [
+      { name: "LockDuration", value: "PT30S" },
+      { name: "RequiresSession", value: String(session) },
+      { name: "DefaultMessageTimeToLive", value: "P14D" },
+      { name: "DeadLetteringOnMessageExpiration", value: "true" },
+      { name: "DeadLetteringOnFilterEvaluationExceptions", value: "true" },
+      { name: "MaxDeliveryCount", value: "10" },
+      { name: "ForwardTo", value: forwardTo },
+      { name: "ForwardDeadLetteredMessagesTo", value: "" },
+      { name: "AutoDeleteOnIdle", value: "P10675199DT2H48M5.4775807S" },
+      ...created,
+      ...(c ? [{ name: "MessageCount", value: String(c.active + c.dead_letter) }] : []),
+    ];
+  return [
+    { name: "LockDuration", value: "PT30S" },
+    { name: "MaxSizeInMegabytes", value: "1024" },
+    { name: "RequiresDuplicateDetection", value: "false" },
+    { name: "RequiresSession", value: String(session) },
+    { name: "DefaultMessageTimeToLive", value: "P14D" },
+    { name: "DeadLetteringOnMessageExpiration", value: "true" },
+    { name: "MaxDeliveryCount", value: "10" },
+    { name: "EnableBatchedOperations", value: "true" },
+    { name: "EnablePartitioning", value: "false" },
+    { name: "AutoDeleteOnIdle", value: "P10675199DT2H48M5.4775807S" },
+    ...created,
+    ...(c ? [{ name: "MessageCount", value: String(c.active + c.dead_letter) }] : []),
+  ];
+};
+
+const defaultRule: RuleInfo = { name: "$Default", filter: { kind: "sql", expression: "1=1" }, action: null, created_at: "2026-09-01T08:00:00Z" };
+
+/** Subscription rules; any other subscription has only `$Default`. */
+export const rules: Record<string, RuleInfo[]> = {
+  "shipment-events/subscriptions/tracking-sync": [
+    defaultRule,
+    { name: "eu-only", filter: { kind: "sql", expression: "region = 'eu' AND sys.Label LIKE 'shipment%'" }, action: "SET priority = 'high'", created_at: "2026-09-12T10:30:00Z" },
+    {
+      name: "priority",
+      filter: {
+        kind: "correlation", correlation_id: "batch-7", message_id: null, to: null, reply_to: null, subject: "priority", session_id: null,
+        reply_to_session_id: null, content_type: null, properties: [{ name: "region", value: "eu" }, { name: "tier", value: "2" }],
+      },
+      action: null,
+      created_at: null,
+    },
+  ],
+  // A filter the reader does not understand (the engine's `unknown`), and a correlation filter that sets nothing (never matches).
+  "carrier-updates/subscriptions/eta-recalc": [
+    defaultRule,
+    { name: "legacy-route", filter: { kind: "unknown" }, action: null, created_at: "2026-09-20T14:05:00Z" },
+    {
+      name: "unset",
+      filter: {
+        kind: "correlation", correlation_id: null, message_id: null, to: null, reply_to: null, subject: null, session_id: null,
+        reply_to_session_id: null, content_type: null, properties: [],
+      },
+      action: null,
+      created_at: null,
+    },
+  ],
 };

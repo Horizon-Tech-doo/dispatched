@@ -1,11 +1,15 @@
 use crate::error::CommandError;
 use crate::events::{Events, tracked};
 use crate::state::{AppState, same_identity};
+use dispatched_core::connstr::entity_connection_string;
 use dispatched_core::diagnostics::{Check, ConnectionReport, test_connection};
 use dispatched_core::profiles::store::normalize_tenant;
-use dispatched_core::profiles::{DraftAuth, Profile, ProfileAuth, ProfileDraft, namespace_for};
+use dispatched_core::profiles::{
+    DraftAuth, Profile, ProfileAuth, ProfileDraft, namespace_for, namespace_for_draft, secret_key,
+};
 use dispatched_core::{Error, Explorer, Namespace};
 use horizon_azure_kit::auth::SignIn;
+use secrecy::ExposeSecret;
 use serde::Serialize;
 
 /// The sign-in an Entra profile uses, as the UI needs it: whose it is and whether it still works.
@@ -173,7 +177,7 @@ pub async fn delete(state: &AppState, ev: &dyn Events, id: &str) -> Result<(), C
                 }
             };
             if let Some(old) = old {
-                old.explorer.close().await;
+                state.close(old).await;
             }
             state.store.delete(&profile.name, state.secrets.as_ref())?;
             state
@@ -247,6 +251,107 @@ pub async fn test(
                 check_word(&r.messaging)
             )
         },
+    )
+    .await
+}
+
+/// The sign-in a draft test uses: for an edited Entra profile, the one connecting uses
+/// (`AppState::usable_sign_in`: the same person's own sign-in in the draft's tenant first, then
+/// the bound one, then the same person's live sign-in in the bound one's tenant); for a new
+/// one, the one saving would bind (`entra_sign_in`). `None` for connection strings.
+pub fn draft_sign_in(
+    state: &AppState,
+    draft: &ProfileDraft,
+    existing: Option<&Profile>,
+) -> Result<Option<SignIn>, CommandError> {
+    let DraftAuth::Entra { tenant, .. } = &draft.auth else {
+        return Ok(None);
+    };
+    let tenant = tenant.as_deref().map(str::trim).filter(|t| !t.is_empty());
+    match existing.map(|p| &p.auth) {
+        Some(ProfileAuth::Entra { sign_in_id, .. }) => {
+            Ok(state.usable_sign_in(sign_in_id, tenant)?.1)
+        }
+        _ => entra_sign_in(state, tenant),
+    }
+}
+
+/// Test a draft before it is saved. The draft may carry a connection string: it is used
+/// for this test only and never logged.
+pub async fn test_draft(
+    state: &AppState,
+    ev: &dyn Events,
+    draft: ProfileDraft,
+) -> Result<ConnectionReport, CommandError> {
+    let name = draft.name.trim().to_string();
+    let existing = match &draft.id {
+        Some(id) => state.store.get_by_id(id)?,
+        None => None,
+    };
+    tracked(
+        ev,
+        "Testing the connection failed",
+        async {
+            let sign_in = draft_sign_in(state, &draft, existing.as_ref())?;
+            let ns = namespace_for_draft(
+                &draft,
+                existing.as_ref(),
+                state.secrets.as_ref(),
+                &state.session,
+                sign_in.as_ref(),
+            )?;
+            let explorer = Explorer::new(ns)?;
+            let report = test_connection(&explorer, None).await;
+            explorer.close().await;
+            Ok(report)
+        },
+        |r| tested_line(&name, check_word(&r.management), check_word(&r.messaging)),
+    )
+    .await
+}
+
+/// The activity line of a draft test.
+pub fn tested_line(name: &str, management: &str, messaging: &str) -> String {
+    format!("Tested {name} (unsaved): management {management}, messaging {messaging}")
+}
+
+/// Put `entity`'s connection string on the clipboard through `put`. The string never
+/// leaves Rust otherwise; the activity line names the entity only.
+pub async fn copy_entity_connection_string(
+    state: &AppState,
+    ev: &dyn Events,
+    profile_id: &str,
+    entity: &str,
+    put: impl FnOnce(String) -> Result<(), CommandError>,
+) -> Result<(), CommandError> {
+    let p = state
+        .store
+        .get_by_id(profile_id)?
+        .ok_or_else(|| CommandError::new("not_found", "That profile no longer exists."))?;
+    let path = dispatched_core::EntityPath::parse(entity)?;
+    tracked(
+        ev,
+        &format!("Copying the connection string for {path} failed"),
+        async {
+            if !matches!(p.auth, ProfileAuth::ConnectionString) {
+                return Err(CommandError::new(
+                    "invalid",
+                    "Entra ID connections have no connection string. Copy the URL instead.",
+                ));
+            }
+            let secret = state.secrets.get(&secret_key(&p.id))?.ok_or_else(|| {
+                CommandError::new(
+                    "invalid",
+                    format!(
+                        "{} has no stored connection string. Edit the connection and paste it again.",
+                        p.name
+                    ),
+                )
+            })?;
+            let scoped = entity_connection_string(secret.expose_secret(), &path)?;
+            put(scoped.expose_secret().to_string())
+        },
+        |_| format!("Copied the connection string for {path}"),
     )
     .await
 }
@@ -559,6 +664,128 @@ mod tests {
                 tenant: None
             }
         );
+    }
+
+    #[test]
+    fn a_draft_test_uses_the_sign_in_connecting_or_saving_would_use() {
+        use crate::ops::test_util::{remember_guest_sign_in, remember_sign_in};
+        let s = state();
+        let home = remember_sign_in(&s, "oid-1", "tenant-1", true);
+        s.store.set_current_sign_in(Some(&home.id)).unwrap();
+        remember_guest_sign_in(&s, &home, "oid-1g", "tenant-guest", true);
+        let entra = |tenant: Option<&str>, id: Option<&str>| ProfileDraft {
+            id: id.map(str::to_string),
+            auth: DraftAuth::Entra {
+                namespace: "myns".into(),
+                tenant: tenant.map(str::to_string),
+            },
+            ..draft("E", None)
+        };
+        let used = |d: &ProfileDraft, existing: Option<&Profile>| {
+            draft_sign_in(&s, d, existing).unwrap().map(|x| x.id)
+        };
+
+        // A new profile: the sign-in saving would bind (entra_sign_in).
+        assert_eq!(used(&entra(None, None), None).as_deref(), Some("oid-1"));
+        assert_eq!(
+            used(&entra(Some("tenant-guest"), None), None).as_deref(),
+            Some("oid-1g")
+        );
+
+        // An edited profile bound to the home sign-in and asking for the guest tenant: the same
+        // person's own sign-in there comes first, as when connecting (usable_sign_in).
+        let p = Profile::entra(
+            "E",
+            "myns.servicebus.windows.net",
+            "oid-1",
+            Some("tenant-guest"),
+        );
+        s.store.insert(&p).unwrap();
+        assert_eq!(
+            used(&entra(Some("tenant-guest"), Some(&p.id)), Some(&p)).as_deref(),
+            Some("oid-1g")
+        );
+
+        // An edited profile whose bound sign-in expired: the same person's live sign-in in that tenant.
+        let old = remember_sign_in(&s, "oid-2", "tenant-2", false);
+        remember_guest_sign_in(&s, &old, "oid-2b", "tenant-2", true);
+        let q = Profile::entra("F", "myns.servicebus.windows.net", "oid-2", None);
+        s.store.insert(&q).unwrap();
+        assert_eq!(
+            used(&entra(None, Some(&q.id)), Some(&q)).as_deref(),
+            Some("oid-2b")
+        );
+
+        // Expired with no replacement: none, so the test reports "sign in again" as connecting would,
+        // never the current account instead.
+        remember_sign_in(&s, "oid-3", "tenant-3", false);
+        let r = Profile::entra("G", "myns.servicebus.windows.net", "oid-3", None);
+        s.store.insert(&r).unwrap();
+        assert_eq!(used(&entra(None, Some(&r.id)), Some(&r)), None);
+    }
+
+    #[tokio::test]
+    async fn test_draft_activity_never_contains_the_secret() {
+        let s = state();
+        let ev = Recorder::default();
+        // A string that fails to parse: the test stops before any network work, and neither
+        // the error nor the log may echo the key.
+        let bad = "Endpoint=not a url;SharedAccessKeyName=r;SharedAccessKey=c2VjcmV0LWtleQ==";
+        let e = test_draft(&s, &ev, draft("Draft", Some(bad)))
+            .await
+            .unwrap_err();
+        assert_eq!(e.kind, "invalid");
+        assert!(!e.message.contains(SECRET_PART), "{}", e.message);
+        let log = serde_json::to_string(&*ev.activity.lock().unwrap()).unwrap();
+        assert!(log.contains("Testing the connection failed"), "{log}");
+        assert!(!log.contains(SECRET_PART), "{log}");
+        assert_eq!(
+            tested_line("Draft", "ok", "failed"),
+            "Tested Draft (unsaved): management ok, messaging failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn copy_connection_string_never_returns_or_logs_the_secret() {
+        let s = state();
+        let ev = Recorder::default();
+        let p = save(&s, &ev, draft("Logistics", Some(CS))).await.unwrap();
+        let mut copied = None;
+        copy_entity_connection_string(&s, &ev, &p.id, "orders", |text| {
+            copied = Some(text);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let copied = copied.unwrap();
+        assert!(copied.contains(SECRET_PART) && copied.ends_with(";EntityPath=orders"));
+        let log = serde_json::to_string(&*ev.activity.lock().unwrap()).unwrap();
+        assert!(
+            log.contains("Copied the connection string for orders"),
+            "{log}"
+        );
+        assert!(!log.contains(SECRET_PART), "{log}");
+    }
+
+    #[tokio::test]
+    async fn entra_profiles_have_no_connection_string_to_copy() {
+        let s = state();
+        let ev = Recorder::default();
+        let signed = crate::ops::test_util::remember_sign_in(&s, "oid-1", "tenant-1", true);
+        s.store.set_current_sign_in(Some(&signed.id)).unwrap();
+        let entra = ProfileDraft {
+            auth: DraftAuth::Entra {
+                namespace: "myns".into(),
+                tenant: None,
+            },
+            ..draft("E", None)
+        };
+        let p = save(&s, &ev, entra).await.unwrap();
+        let e = copy_entity_connection_string(&s, &ev, &p.id, "orders", |_| Ok(()))
+            .await
+            .unwrap_err();
+        assert_eq!(e.kind, "invalid");
+        assert!(e.message.contains("Entra ID"), "{}", e.message);
     }
 
     #[test]

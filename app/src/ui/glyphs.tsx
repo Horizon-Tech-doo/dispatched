@@ -1,6 +1,6 @@
 import type { ReactNode, SVGProps } from "react";
 
-export type EntityKind = "namespace" | "queue" | "topic" | "subscription" | "rule";
+export type EntityKind = "namespace" | "queue" | "topic" | "subscription" | "rule" | "unknown";
 
 type GlyphProps = Omit<SVGProps<SVGSVGElement>, "children"> & { size?: number };
 
@@ -29,7 +29,12 @@ export const RuleGlyph = (p: GlyphProps) => (
   <Glyph {...p}><path d="M2.5 3.5h11l-4.2 5v4l-2.6 1.2V8.5z" /></Glyph>
 );
 
-const byKind = { namespace: NamespaceGlyph, queue: QueueGlyph, topic: TopicGlyph, subscription: SubscriptionGlyph, rule: RuleGlyph };
+/** An entity that is known by name only, so its kind is not: a dashed outline of the entity box. */
+export const UnknownGlyph = (p: GlyphProps) => (
+  <Glyph {...p}><title>Kind unknown</title><rect x="1.5" y="4.5" width="13" height="7" rx="1" strokeDasharray="2 1.6" /></Glyph>
+);
+
+const byKind = { namespace: NamespaceGlyph, queue: QueueGlyph, topic: TopicGlyph, subscription: SubscriptionGlyph, rule: RuleGlyph, unknown: UnknownGlyph };
 
 export function EntityGlyph({ kind, ...rest }: GlyphProps & { kind: EntityKind }) {
   const G = byKind[kind];

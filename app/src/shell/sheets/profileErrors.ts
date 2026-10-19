@@ -1,4 +1,5 @@
 import type { EngineError } from "@/engine";
+import { accessAdvice, type AuthKind } from "../access";
 
 export type Errors = Partial<Record<"name" | "connectionString" | "namespace" | "proxy" | "pins" | "signIn" | "general", string>>;
 
@@ -22,4 +23,30 @@ export function placeError(e: Pick<EngineError, "kind" | "message">): Errors {
     if (/pinned|entity/i.test(m)) return { pins: m };
   }
   return { general: m };
+}
+
+/** What to do about a failed check of a connection test, from the engine's error kind. */
+export function checkAdvice(label: "Management" | "Messaging", kind: string, auth: AuthKind): string {
+  switch (kind) {
+    case "forbidden":
+      return accessAdvice([label === "Management" ? "Manage" : "Listen"], auth);
+    case "auth":
+    case "not_signed_in":
+      return "The credentials were refused. Check them, or sign in again.";
+    case "network":
+    case "timeout":
+      return "Couldn't reach the namespace. Check the network, the proxy and the transport.";
+    case "not_found":
+      return "The namespace or entity wasn't found. Check the namespace name.";
+    default:
+      return "Check the connection settings and test again.";
+  }
+}
+
+/** A skipped check's reason in the app's words: Rust's two pinned reasons are worded for the command line. */
+export function skippedReason(reason: string): string {
+  if (reason.includes("management check failed"))
+    return "No queue could be listed because the Management check failed. Pin an entity to test receive rights.";
+  if (reason.includes("no entity to probe")) return "No entity to test. Pin one to test receive rights.";
+  return sentence(reason);
 }

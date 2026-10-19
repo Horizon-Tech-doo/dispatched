@@ -56,6 +56,16 @@ pub fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
     out.join("\n")
 }
 
+/// `10000` as `10,000`.
+pub fn thousands(n: u64) -> String {
+    let digits: Vec<char> = n.to_string().chars().rev().collect();
+    let groups: Vec<String> = digits
+        .chunks(3)
+        .map(|g| g.iter().rev().collect::<String>())
+        .collect();
+    groups.iter().rev().cloned().collect::<Vec<_>>().join(",")
+}
+
 pub fn ellipsize(s: &str, max: usize) -> String {
     let flat = sanitize(s);
     if flat.chars().count() <= max {
@@ -70,6 +80,15 @@ pub fn ellipsize(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn thousands_groups_digits() {
+        use super::thousands;
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(10_000), "10,000");
+        assert_eq!(thousands(1_234_567), "1,234,567");
+    }
+
     use super::*;
 
     #[test]

@@ -16,3 +16,10 @@ export function shortcutLabel(spec: string, mac: boolean = isMac): string {
   }
   return [...parts.map((m) => OTHER[m] ?? m), keyLabel].join("+");
 }
+
+export const isWindows = typeof navigator !== "undefined" && /Win/.test(navigator.platform || navigator.userAgent);
+
+/** What the platform calls the app that shows a file in its folder: Finder, Explorer, or just "folder". */
+export function fileManagerName(mac: boolean = isMac, windows: boolean = isWindows): "Finder" | "Explorer" | "folder" {
+  return mac ? "Finder" : windows ? "Explorer" : "folder";
+}

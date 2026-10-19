@@ -37,6 +37,11 @@ pub struct AppState {
     pub sign_in_cancel: Notify,
     /// Why the real database could not be opened, if it couldn't.
     pub startup_error: Option<String>,
+    /// Running and finished jobs (exports).
+    pub jobs: Arc<crate::jobs::Jobs>,
+    /// The URL of the sign-in prompt shown last, while a sign-in waits for it.
+    /// Shared, so a finishing sign-in can tell its own URL from a newer one's (`ops::account::PromptUrl`).
+    pub last_prompt_url: std::sync::Mutex<Option<Arc<str>>>,
 }
 
 impl AppState {
@@ -54,6 +59,8 @@ impl AppState {
             connect_lock: Mutex::new(()),
             sign_in_cancel: Notify::new(),
             startup_error: None,
+            jobs: Arc::default(),
+            last_prompt_url: std::sync::Mutex::new(None),
         }
     }
 
@@ -75,6 +82,14 @@ impl AppState {
                 s
             }
         }
+    }
+
+    /// Close a connection that was taken out of `active`. Running jobs read through it, so they
+    /// are stopped first (as `stopped`: the connection closed) and end at their next page instead
+    /// of failing on a closed explorer.
+    pub async fn close(&self, old: Active) {
+        self.jobs.close_running();
+        old.explorer.close().await;
     }
 
     pub async fn active(&self) -> Result<Active, CommandError> {

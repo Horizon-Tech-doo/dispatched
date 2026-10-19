@@ -1,17 +1,38 @@
+import { useEffect } from "react";
 import { Button, CountBadge, EmptyState, SkeletonRows, Tabs, TabsContent, TabsList, TabsTrigger } from "@/ui";
 import { useShell } from "../context";
-import type { OpenTab, SubTabId } from "../state";
-import { splitSubscription, subTabsFor, useEntityInfo, validSubTab } from "./subtabs";
+import { MessagesView } from "../messages/MessagesView";
+import { OverviewView } from "../overview/OverviewView";
+import { RulesView } from "../rules/RulesView";
+import { SessionsView } from "../sessions/SessionsView";
+import type { EntityTab, SubTabId } from "../state";
+import { countPlaceholderCh, countsKey, recallCounts, rememberCounts, splitSubscription, subTabsFor, useEntityInfo, validSubTab, viewOf, type EntityInfo, type SubTabDef } from "./subtabs";
 
 const KIND_LINE = { queue: "Queue", topic: "Topic", subscription: "Subscription" } as const;
 
-/** A sub-tab count's reserved width: room for "99,999" in tabular numerals (five digit-wide ch plus a
- *  narrower comma), so counts up to that size, and the placeholder before them, never move the row. */
-const COUNT_SLOT = "min-w-[6ch] tabular-nums";
+/** One sub-tab's content. Message views load on their own; only the entity's own facts wait for its info. */
+function SubTabBody({ tab, def, info }: { tab: EntityTab; def: SubTabDef; info: EntityInfo }) {
+  const view = viewOf(def.id);
+  if (view) return <MessagesView tab={tab} view={view} counts={info.counts} requiresSession={info.facts.includes("sessions")} />;
+  if (def.id === "overview") return <OverviewView tab={tab} />;
+  if (def.id === "rules") return <RulesView tab={tab} />;
+  // Whether the entity uses sessions comes with its listing: wait for it rather than list sessions of an entity without.
+  if (def.id === "sessions")
+    return info.status === "loading" ? <SkeletonRows rows={6} /> : <SessionsView tab={tab} requiresSession={info.status === "found" ? info.facts.includes("sessions") : null} />;
+  if (def.id === "listener")
+    return <EmptyState title="Listener isn't available yet" body="Live receive, with auto-complete and message rates, comes with the operate features." />;
+  return info.status === "loading" ? <SkeletonRows rows={6} /> : <EmptyState title={`${def.label} isn't available yet`} body={def.description} />;
+}
 
-export function EntityView({ tab }: { tab: OpenTab }) {
-  const { dispatch } = useShell();
+export function EntityView({ tab }: { tab: EntityTab }) {
+  const { dispatch, conn } = useShell();
   const info = useEntityInfo(tab);
+  const seenKey = countsKey(conn.profileId, tab.id);
+  // While counts load, each tab holds the room its count took last time (a first-ever load holds a little).
+  const last = info.counts ?? recallCounts(seenKey);
+  useEffect(() => {
+    if (info.counts) rememberCounts(seenKey, info.counts);
+  }, [info.counts, seenKey]);
   const sub = tab.kind === "subscription" ? splitSubscription(tab.id) : null;
   const name = sub ? sub.name : tab.id;
 
@@ -45,18 +66,20 @@ export function EntityView({ tab }: { tab: OpenTab }) {
               <TabsTrigger key={d.id} value={d.id}>
                 <span>{d.label}</span>
                 {c ? (
-                  <CountBadge value={c.value} quality={info.counts ?? undefined} attention={c.attention} className={COUNT_SLOT} />
+                  <CountBadge value={c.value} quality={info.counts ?? undefined} attention={c.attention} />
                 ) : (
-                  // Hold the count's place while it loads, so the row does not shift when it arrives.
-                  d.count && info.status === "loading" && <span aria-hidden="true" data-count-placeholder className={COUNT_SLOT} />
+                  // Hold the count's place while it loads.
+                  d.count && info.status === "loading" && (
+                    <span aria-hidden="true" data-count-placeholder className="tabular-nums" style={{ minWidth: `${countPlaceholderCh(d, last)}ch` }} />
+                  )
                 )}
               </TabsTrigger>
             );
           })}
         </TabsList>
         {defs.map((d) => (
-          <TabsContent key={d.id} value={d.id} className="overflow-y-auto">
-            {info.status === "loading" ? <SkeletonRows rows={6} /> : <EmptyState title={`${d.label} isn't available yet`} body={d.description} />}
+          <TabsContent key={d.id} value={d.id} className={viewOf(d.id) || ["overview", "sessions", "rules"].includes(d.id) ? "overflow-hidden" : "overflow-y-auto"}>
+            <SubTabBody tab={tab} def={d} info={info} />
           </TabsContent>
         ))}
       </Tabs>

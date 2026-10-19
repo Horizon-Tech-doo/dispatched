@@ -13,9 +13,26 @@ interface ConnState {
 
 const idle: ConnState = { status: "idle", view: null, error: null, profileId: null };
 
+/** Every query family that belongs to one connection: dropped whenever the connection changes, so another connection
+ *  (or the same one, connected again) never shows them. They are keyed by profile, but a reconnect of the same profile
+ *  ("Edit connection", then save) must read again too: a new key may now be allowed what the old one was refused, or
+ *  point at another namespace. The one list for the whole shell: a new profile-keyed query family belongs here. */
+const PER_CONNECTION = [
+  ["entities"],
+  ["subscriptions"],
+  ["peek"],
+  ["message"],
+  ["entity-details"],
+  ["rules"],
+  ["sessions"],
+  ["dashboard"],
+];
+
 export function useConnectionController() {
   const qc = useQueryClient();
   const [s, setS] = useState<ConnState>(idle);
+  const current = useRef(s);
+  current.current = s;
   const autoTried = useRef(false);
   // Every connect or disconnect takes a number; a connect whose number is no longer the latest
   // finished after the user moved on, and its result is dropped.
@@ -28,8 +45,7 @@ export function useConnectionController() {
       try {
         const view = await commands.connect(profileId);
         if (n !== latest.current) return;
-        qc.removeQueries({ queryKey: ["entities"] });
-        qc.removeQueries({ queryKey: ["subscriptions"] });
+        for (const queryKey of PER_CONNECTION) qc.removeQueries({ queryKey });
         setS({ status: "connected", view, error: null, profileId });
         void commands.settingsSet("last_profile", profileId).catch(() => {});
       } catch (e) {
@@ -43,11 +59,23 @@ export function useConnectionController() {
   const disconnect = useCallback(async () => {
     latest.current++;
     await commands.disconnect().catch(() => {});
-    qc.removeQueries({ queryKey: ["entities"] });
-    qc.removeQueries({ queryKey: ["subscriptions"] });
+    for (const queryKey of PER_CONNECTION) qc.removeQueries({ queryKey });
     setS(idle);
     void commands.settingsSet("last_profile", null).catch(() => {});
   }, [qc]);
+
+  /** The engine already closed this connection (its sign-in went away): drop the shell's state for it without
+   *  asking the engine to disconnect again. A no-op unless that connection is the one the shell shows. */
+  const closedByEngine = useCallback(
+    (profileId: string) => {
+      if (current.current.profileId !== profileId || current.current.status !== "connected") return;
+      latest.current++;
+      for (const queryKey of PER_CONNECTION) qc.removeQueries({ queryKey });
+      setS(idle);
+      void commands.settingsSet("last_profile", null).catch(() => {});
+    },
+    [qc],
+  );
 
   const retry = useCallback(() => {
     if (s.profileId) void connect(s.profileId);
@@ -64,7 +92,7 @@ export function useConnectionController() {
       .catch(() => {});
   }, [connect]);
 
-  return { ...s, connect, disconnect, retry };
+  return { ...s, connect, disconnect, closedByEngine, retry };
 }
 
 export type ConnectionController = ReturnType<typeof useConnectionController>;

@@ -121,6 +121,7 @@ async fn m1a_views_filters_export_counts() {
     let ours = |f: &str| MessageFilter {
         property: Some(PropertyFilter::parse(&format!("run = '{run}'{f}")).unwrap()),
         body: vec![],
+        ..Default::default()
     };
     let with_body = |f: BodyFilter| {
         let mut m = ours("");
