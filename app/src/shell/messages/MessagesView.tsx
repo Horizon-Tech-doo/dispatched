@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { ArrowRightToLine, CalendarX, CheckCheck, ChevronDown, Download, Inbox, ListTree, Repeat2, SendHorizontal, Trash2 } from "lucide-react";
-import { useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { TAIL_MAX, normalizeFilter, usePeekStream, type EntityCounts, type FilterSpec, type MessageSummary, type PeekView } from "@/engine";
 import {
   Button, DataGrid, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, EmptyState, Panel, PanelGroup, Problem, ResizeHandle, cn, formatNumber, rowHeight,
@@ -12,6 +12,7 @@ import { VIEW_LABEL } from "../tabs/subtabs";
 import { buildColumns, optionalColumns, propColumn, useColumnPrefs } from "./columns";
 import { DetailPane } from "./DetailPane";
 import { DlqSummary, reasonFilter } from "./DlqSummary";
+import { setViewSelection } from "./selectionStore";
 import { FilterBar } from "./FilterBar";
 import { useAuthKind } from "../access";
 import { describePeekError } from "./peekError";
@@ -192,6 +193,12 @@ export function MessagesView({
   const dlqView = view === "dead-letter" || view === "transfer-dead-letter";
   const subQueue = view === "dead-letter" ? "dead-letter" : view === "transfer-dead-letter" ? "transfer-dead-letter" : "active";
   const total = counts && listedView ? listedView.count(counts) : null;
+  // The palette acts on what this view holds.
+  const selKeyText = [...sel.ids].join(",");
+  useEffect(() => {
+    setViewSelection(tab.id, { view, sequences: selKeyText ? selKeyText.split(",").map(Number).sort((a, b) => a - b) : [], filter: vs.filter, total });
+    return () => void setViewSelection(tab.id, null);
+  }, [tab.id, view, selKeyText, vs.filter, total]);
   const pick = (op: "delete" | "move" | "resubmit") => openSheet({ kind: "operation", op, entity: tab.id, view, sequences: selectedSequences(), filter: vs.filter, total });
   const settle = (how: "complete" | "abandon" | "dead-letter") =>
     openSheet({ kind: "operation", op: "settle-deferred", entity: tab.id, subQueue: "active", sequences: selectedSequences(), session: vs.filter.session_id ?? null, how });

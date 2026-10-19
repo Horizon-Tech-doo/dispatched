@@ -18,6 +18,26 @@ const ctx = () => ({
 });
 
 describe("buildCommands", () => {
+  it("palette lists every operate command for a queue, and no Rules commands", () => {
+    const c = { ...ctx(), activeTab: { id: "invoice-generate", kind: "queue" as const } };
+    const labels = buildCommands(c).filter((x) => x.group === "This entity").map((x) => x.label);
+    for (const l of [
+      "Send messages to invoice-generate…", "Receive messages from invoice-generate…", "Delete messages in invoice-generate…", "Move messages from invoice-generate…",
+      "Resubmit messages from invoice-generate…", "Purge invoice-generate…", "Cancel scheduled messages in invoice-generate…", "Session state of invoice-generate…",
+      "Import messages into invoice-generate…",
+    ])
+      expect(labels).toContain(l);
+    expect(buildCommands(c).map((x) => x.label)).toContain("Show activity");
+    expect(labels.some((l) => /rule/i.test(l))).toBe(false);
+    buildCommands(c).find((x) => x.label === "Purge invoice-generate…")!.run();
+    expect(c.openSheet).toHaveBeenCalledWith({ kind: "operation", op: "purge", entities: ["invoice-generate"] });
+  });
+
+  it("a topic offers only sending and importing", () => {
+    const labels = buildCommands({ ...ctx(), activeTab: { id: "shipment-events", kind: "topic" } }).filter((x) => x.group === "This entity").map((x) => x.label);
+    expect(labels.filter((l) => l.endsWith("…"))).toEqual(["Send messages to shipment-events…", "Import messages into shipment-events…"]);
+  });
+
   it("offers entities, connections and app commands with shortcuts", () => {
     const cmds = buildCommands(ctx());
     const labels = cmds.map((c) => `${c.group}: ${c.label}`);

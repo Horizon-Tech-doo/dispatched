@@ -2,6 +2,8 @@ import { ComposerSheet } from "./ComposerSheet";
 import { DeleteSheet } from "./DeleteSheet";
 import { ImportSheet } from "./ImportSheet";
 import { MoveSheet } from "./MoveSheet";
+import { PurgeSheet } from "./PurgeSheet";
+import { SessionStateSheet } from "../sessions/SessionStateSheet";
 import { ReceiveSheet } from "./ReceiveSheet";
 import { ResubmitSheet } from "./ResubmitSheet";
 import { CancelScheduledSheet, SettleDeferredSheet } from "./ScheduledSheets";
@@ -26,8 +28,10 @@ export function OperationHost({ seed }: { seed: OperationSeed }) {
       return <CancelScheduledSheet entity={seed.entity} sequences={seed.sequences} />;
     case "settle-deferred":
       return <SettleDeferredSheet {...seed} />;
-    default:
-      return null;
+    case "purge":
+      return <PurgeSheet entities={seed.entities} />;
+    case "session-state":
+      return <SessionStateSheet entity={seed.entity} session={seed.session} />;
   }
 }
 

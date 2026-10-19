@@ -1,4 +1,5 @@
 import type { EntityListing, Profile, SubscriptionInfo } from "@/engine";
+import type { ViewSelection } from "../messages/selectionStore";
 import type { SheetState } from "../context";
 import { DASHBOARD_ID, type EntityKind, type Prefs } from "../state";
 import { displayName, entityIdOf } from "../entityId";
@@ -41,7 +42,36 @@ export interface PaletteContext {
   openSheet(s: Exclude<SheetState, null>): void;
   refresh(): void;
   toggleDrawer(): void;
+  /** Opens the drawer on its Activity tab. */
+  showActivity?(): void;
   setPrefs(p: Partial<Prefs>): void;
+  /** What the active tab's message view holds (its selected rows, filter and count), when it shows one. */
+  selection?: ViewSelection | null;
+}
+
+/** Every operation on one entity, as palette commands. Delete, Move and Resubmit act on the view's selected rows, or on
+ *  every message matching its filter. A topic only receives messages. */
+function operateCommands(tab: { id: string; kind: EntityKind }, c: PaletteContext): Omit<PaletteCommand, "group">[] {
+  const name = displayName(tab.id);
+  const send = { id: "op:send", label: `Send messages to ${displayName(sendTarget(tab.id))}…`, keywords: ["compose", "new message"], run: () => c.openSheet({ kind: "operation", op: "send", entity: tab.id }) };
+  const importing = { id: "op:import", label: `Import messages into ${displayName(sendTarget(tab.id))}…`, keywords: ["file", "restore"], run: () => c.openSheet({ kind: "operation", op: "import", entity: tab.id }) };
+  if (tab.kind === "topic") return [send, importing];
+  const s = c.selection ?? null;
+  const view = s?.view ?? "active";
+  const picked = (op: "delete" | "move" | "resubmit") => () =>
+    c.openSheet({ kind: "operation", op, entity: tab.id, view, sequences: s?.sequences ?? [], filter: s?.filter ?? {}, total: s?.total ?? null });
+  const selected = s?.sequences.length ? ` (${s.sequences.length} selected)` : "";
+  return [
+    send,
+    { id: "op:receive", label: `Receive messages from ${name}…`, keywords: ["lock", "settle", "complete"], run: () => c.openSheet({ kind: "operation", op: "receive", entity: tab.id, subQueue: view === "dead-letter" || view === "transfer-dead-letter" ? view : "active", session: s?.filter.session_id ?? null }) },
+    { id: "op:delete", label: `Delete messages in ${name}…`, detail: selected.trim() || undefined, keywords: ["remove"], run: picked("delete") },
+    { id: "op:move", label: `Move messages from ${name}…`, detail: selected.trim() || undefined, run: picked("move") },
+    { id: "op:resubmit", label: `Resubmit messages from ${name}…`, detail: selected.trim() || undefined, keywords: ["dead letter", "retry", "replay"], run: picked("resubmit") },
+    { id: "op:purge", label: `Purge ${name}…`, keywords: ["empty", "clear", "remove all"], run: () => c.openSheet({ kind: "operation", op: "purge", entities: [tab.id] }) },
+    { id: "op:cancel-scheduled", label: `Cancel scheduled messages in ${name}…`, run: () => c.openSheet({ kind: "operation", op: "cancel-scheduled", entity: tab.id, sequences: view === "scheduled" ? (s?.sequences ?? []) : [] }) },
+    { id: "op:session-state", label: `Session state of ${name}…`, keywords: ["session"], run: () => c.openSheet({ kind: "operation", op: "session-state", entity: tab.id, session: s?.filter.session_id ?? "" }) },
+    importing,
+  ];
 }
 
 export function buildCommands(c: PaletteContext): PaletteCommand[] {
@@ -88,7 +118,9 @@ export function buildCommands(c: PaletteContext): PaletteCommand[] {
   if (tab && c.activeProfileId !== null) {
     if (c.host) out.push({ id: "entity:url", group: "This entity", label: `Copy URL of ${displayName(tab.id)}`, keywords: ["address", "sb://"], run: () => c.copy(entityUrl(c.host, tab.id, tab.kind), `Copied the URL for ${displayName(tab.id)}`) });
     if (!c.entra) out.push({ id: "entity:string", group: "This entity", label: `Copy connection string of ${displayName(tab.id)}`, keywords: ["key", "secret"], run: () => c.copyConnectionString(tab.id) });
-    out.push({ id: "op:send", group: "This entity", label: `Send messages to ${displayName(sendTarget(tab.id))}…`, keywords: ["compose", "new message"], run: () => c.openSheet({ kind: "operation", op: "send", entity: tab.id }) });
+    for (const o of operateCommands(tab, c)) out.push({ ...o, group: "This entity" });
   }
+  if (c.activeProfileId !== null)
+    out.push({ id: "app:activity", group: "App", label: "Show activity", keywords: ["log", "audit", "history", "cli"], run: () => (c.showActivity ?? c.toggleDrawer)() });
   return out;
 }

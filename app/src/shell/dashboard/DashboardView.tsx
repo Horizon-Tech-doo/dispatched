@@ -1,6 +1,6 @@
 import type { ColumnDef } from "@tanstack/react-table";
 import { Check, ClipboardCopy } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useDashboard, type DashboardRow } from "@/engine";
 import { Button, CountBadge, DataGrid, EmptyState, EntityGlyph, Hint, Input, Problem, Segmented, cn, formatClock, formatNumber, rowHeight, type GridSort } from "@/ui";
 import { accessAdvice, rightsOf, useAuthKind } from "../access";
@@ -36,6 +36,25 @@ function countColumn(id: string, header: string, pick: (r: DashboardRow) => numb
   };
 }
 
+const Picks = createContext<{ ids: ReadonlySet<string>; toggle(id: string): void }>({ ids: new Set(), toggle: () => {} });
+
+/** A row's checkbox: picked for a purge. */
+function PickBox({ row }: { row: DashboardRow }) {
+  const p = useContext(Picks);
+  return (
+    <input
+      type="checkbox"
+      aria-label={`Select ${pathOf(row).replace(/^\//, "")}`}
+      className="size-3.5 align-middle accent-[var(--c-fg)]"
+      checked={p.ids.has(row.id)}
+      onMouseDown={(e) => e.stopPropagation()}
+      onClick={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+      onChange={() => p.toggle(row.id)}
+    />
+  );
+}
+
 export function DashboardView() {
   const { conn, prefs, setPrefs, dispatch, openSheet } = useShell();
   const auth = useAuthKind();
@@ -54,8 +73,30 @@ export function DashboardView() {
   // string's EntityPath arrives as a queue row. Such rows get the "Kind unknown" glyph, and no kind in the TSV.
   const limited = data?.limited != null;
   const unknownReason = limited ? LIMITED_NOTE : "The service didn't report counts for this entity.";
+  // Row checkboxes pick the entities to purge, beside the grid's own multi-select (they share one selection). They read
+  // it from context, so the columns are not rebuilt (and the cells not remounted) when it changes.
+  const picks = useMemo(
+    () => ({
+      ids: sel.ids,
+      toggle: (id: string) =>
+        setSel((s) => {
+          const ids = new Set(s.ids);
+          if (ids.has(id)) ids.delete(id);
+          else ids.add(id);
+          return { ids, focus: id };
+        }),
+    }),
+    [sel.ids],
+  );
   const columns = useMemo<ColumnDef<DashboardRow, unknown>[]>(
     () => [
+      {
+        id: "pick",
+        header: () => <span className="sr-only">Selected</span>,
+        enableSorting: false,
+        meta: { width: "28px" },
+        cell: (c) => <PickBox row={c.row.original} />,
+      },
       {
         id: "entity",
         header: "Entity",
@@ -175,7 +216,16 @@ export function DashboardView() {
           onChange={(v) => setPrefs({ dashboardRefresh: Number(v) as DashboardRefresh })}
           options={DASHBOARD_REFRESH.map((s) => ({ value: String(s), label: REFRESH_LABEL[s] }))}
         />
-        <div className="ml-auto flex items-center">
+        <div className="ml-auto flex items-center gap-1">
+          {!limited && (
+            <Button
+              variant="quiet"
+              disabled={sel.ids.size === 0}
+              onClick={() => openSheet({ kind: "operation", op: "purge", entities: rows.filter((r) => sel.ids.has(r.id)).map((r) => r.id) })}
+            >
+              {sel.ids.size > 0 ? `Purge ${formatNumber(sel.ids.size)} selected…` : "Purge…"}
+            </Button>
+          )}
           <Hint label={TSV_HINT}>
             <Button variant="quiet" className="min-w-[124px]" disabled={rows.length === 0} onClick={doCopy}>
               {copy === "copied" ? <Check aria-hidden="true" className="text-icon" /> : <ClipboardCopy aria-hidden="true" className="text-icon" />}
@@ -216,6 +266,7 @@ export function DashboardView() {
         </div>
       )}
       <div className="min-h-0 flex-1">
+        <Picks.Provider value={picks}>
         <DataGrid<DashboardRow>
           label="Dashboard"
           columns={columns}
@@ -265,6 +316,7 @@ export function DashboardView() {
           }
           initialRect={{ width: 1000, height: 600 }}
         />
+        </Picks.Provider>
       </div>
       <div title={data?.limited ?? undefined} className="flex min-h-[22px] shrink-0 items-center border-t border-line px-3 py-0.5 text-11 text-muted">
         <span className="truncate tabular-nums">{status}</span>
