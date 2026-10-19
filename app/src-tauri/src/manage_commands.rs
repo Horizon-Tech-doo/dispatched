@@ -263,3 +263,25 @@ pub async fn op_entities_import(
 ) -> Result<JobStarted, CommandError> {
     manage::entities_import(&state, events(app), &profile_id, &preview_id, overwrite).await
 }
+
+// ---- Listener ----
+
+#[tauri::command]
+pub async fn op_listen(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile_id: String,
+    form: crate::ops::listen::ListenForm,
+) -> Result<JobStarted, CommandError> {
+    crate::ops::listen::listen(&state, events(app), &profile_id, form).await
+}
+
+/// A message a listener or receive job took; `null` when it holds none with that number.
+#[tauri::command]
+pub fn job_message(
+    state: State<'_, AppState>,
+    id: String,
+    sequence: String,
+) -> Result<Option<dispatched_core::messaging::MessageDetail>, CommandError> {
+    crate::ops::listen::job_message(&state.jobs, &id, &sequence)
+}

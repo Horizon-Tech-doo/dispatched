@@ -111,7 +111,7 @@ impl Audited for ListenOutcome {
 }
 
 /// Refuse a request the listener cannot run, before any I/O.
-pub(crate) fn check(req: &ListenRequest) -> Result<()> {
+pub fn check(req: &ListenRequest) -> Result<()> {
     if req.concurrency == 0 || req.concurrency > MAX_CONCURRENCY {
         return Err(Error::Invalid(format!(
             "run 1 to {MAX_CONCURRENCY} receivers at a time"

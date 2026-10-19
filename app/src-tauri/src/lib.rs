@@ -124,6 +124,8 @@ pub fn run() {
             manage_commands::entities_export,
             manage_commands::entities_import_preview,
             manage_commands::op_entities_import,
+            manage_commands::op_listen,
+            manage_commands::job_message,
             commands::op_send,
             commands::op_import,
             commands::op_cancel_scheduled,

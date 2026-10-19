@@ -17,6 +17,10 @@ struct Entry {
     stopped_by_close: bool,
     /// An operate job's report, once it finished.
     report: Option<std::sync::Arc<crate::ops::operate::StoredReport>>,
+    /// Why the job stopped itself (a listener at its held cap), said when it finishes.
+    stop_reason: Option<String>,
+    /// The messages a running listener holds, for `job_message`.
+    held: Option<std::sync::Arc<crate::ops::operate::Held>>,
 }
 
 #[derive(Default)]
@@ -170,6 +174,42 @@ impl Jobs {
         n
     }
 
+    /// Stop job `id` for `reason` (said when it finishes, as `stopped`).
+    pub fn stop_with(&self, id: &str, reason: &str) {
+        if let Some(e) = self.inner.lock().unwrap().get_mut(id) {
+            e.stop_reason = Some(reason.to_string());
+            if let Some(t) = &e.cancel {
+                t.cancel();
+            }
+        }
+        self.confirms.cancel_job(id);
+    }
+
+    /// Why job `id` stopped itself, if it did.
+    pub fn stop_reason(&self, id: &str) -> Option<String> {
+        self.inner
+            .lock()
+            .unwrap()
+            .get(id)
+            .and_then(|e| e.stop_reason.clone())
+    }
+
+    /// Keep the messages a running listener holds.
+    pub fn set_held(&self, id: &str, held: std::sync::Arc<crate::ops::operate::Held>) {
+        if let Some(e) = self.inner.lock().unwrap().get_mut(id) {
+            e.held = Some(held);
+        }
+    }
+
+    /// The messages a listener holds while it runs.
+    pub fn held(&self, id: &str) -> Option<std::sync::Arc<crate::ops::operate::Held>> {
+        self.inner
+            .lock()
+            .unwrap()
+            .get(id)
+            .and_then(|e| e.held.clone())
+    }
+
     /// Whether job `id` was stopped by its connection closing.
     pub fn stopped_by_close(&self, id: &str) -> bool {
         self.inner
@@ -208,6 +248,7 @@ impl Jobs {
         if let Some(e) = self.inner.lock().unwrap().get_mut(id) {
             e.cancel = None;
             e.output = output;
+            e.held = None;
         }
     }
 
