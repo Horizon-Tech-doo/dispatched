@@ -94,7 +94,22 @@ Every changing command writes to a local activity log (`activity.db`, next to `d
 
 ### Desktop app
 
-The app browses the namespaces and profiles you connect, read-only. Each queue or subscription has sub-tabs for Messages, Dead-letter, Transfer DLQ, Scheduled, Deferred, Sessions (session-enabled entities) and Rules (subscriptions). Views can start at the first messages, from a sequence number, or from the end, with "Peek more" to continue. Filter by property expression, body text, regex or JSONPath, and by session. A detail pane shows the body (JSON, XML, text or hex) and every system and custom property. Export the current view or the selected rows to JSON or NDJSON; it runs as a job and writes only to the file you pick in the save dialog. The Overview shows an entity's properties and live counts. The Dashboard lists counts for every queue and subscription and can refresh on a timer. Peeks never lock, receive or settle a message.
+The app browses and operates on the namespaces you connect. Each queue or subscription has sub-tabs for Messages, Dead-letter, Transfer DLQ, Scheduled, Deferred, Sessions (session-enabled entities) and Rules (subscriptions). Views can start at the first messages, from a sequence number, or from the end, with "Peek more" to continue. Filter by property expression, body text, regex or JSONPath, and by session. A detail pane shows the body (JSON, XML, text or hex) and every system and custom property. Export the current view or the selected rows to JSON or NDJSON; it runs as a job and writes only to the file you pick in the save dialog. The Overview shows an entity's properties and live counts. The Dashboard lists counts for every queue and subscription and can refresh on a timer. Peeks never lock, receive or settle a message.
+
+Operating on messages works as in the CLI, through the same safety gate and the same activity log:
+
+- **Send** from the composer: text, files sent round-robin, or an incumbent `BrokeredMessageTemplate`. You can set every system property and typed custom properties, an auto-increment MessageId, a schedule, N copies, or a batch. **Clone & resend** opens the composer from any message, and **Import** replays an export file.
+- From a view's toolbar:
+  - **Receive**: peek-lock with complete, abandon, defer or dead-letter, or receive-and-delete.
+  - **Delete**, **Move** and **Resubmit**, the last with edits, a new MessageId and an option to remove the original.
+  - **Cancel scheduled** in the Scheduled view and **Settle** in the Deferred view.
+  - A dead-letter **Summary**, grouped by reason, in the dead-letter views.
+
+  Each acts on the selected rows, or on every message matching the view's filter.
+- **Purge** one entity from the tree, or several from the Dashboard. It counts first, shows what each entity will lose, and confirms each entity.
+- **Session state**: view it as text or hex, copy it, save it to a file, replace it, or clear it.
+- Every change is confirmed in the sheet that started it, with the exact effect. On a production profile, you type each entity's name, including a move's target. The Delete key opens a confirmation and never deletes directly. Receive-and-delete is never pre-selected.
+- Each operation runs as a job in the Jobs drawer, with progress, cancel and a per-message report you can save. The Activity tab shows the shared `activity.db`, including changes made by the CLI, and refreshes the views those changes touched.
 
 ## Develop
 
