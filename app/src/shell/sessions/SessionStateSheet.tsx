@@ -39,6 +39,7 @@ export function SessionStateSheet({ entity, session: first }: { entity: string; 
   const [value, setValue] = useState("");
   const [large, setLarge] = useState(false);
   const [copied, setCopied] = useState<boolean | null>(null);
+  const [saved, setSaved] = useState<{ name?: string; error?: string } | null>(null);
   // Read again once a change has run.
   useEffect(() => {
     if (op.stage === "done") void qc.invalidateQueries({ queryKey: ["session-state", conn.profileId, entity] });
@@ -54,6 +55,14 @@ export function SessionStateSheet({ entity, session: first }: { entity: string; 
   const copyCurrent = async () => {
     if (!s) return;
     setCopied(await copyText(s.text ?? s.base64, s.text !== null ? "Copied the session state" : "Copied the session state as base64", { inline: true }));
+  };
+  const saveCurrent = async () => {
+    try {
+      const name = await commands.saveSessionState(conn.profileId!, entity, asked);
+      setSaved(name ? { name } : null);
+    } catch (e) {
+      setSaved({ error: e instanceof Error ? e.message : String(e) });
+    }
   };
   const submit = () => {
     if (!valid) return;
@@ -109,11 +118,16 @@ export function SessionStateSheet({ entity, session: first }: { entity: string; 
                 <Button size="sm" className="ml-auto" onClick={() => void copyCurrent()}>
                   Copy current state
                 </Button>
+                <Button size="sm" onClick={() => void saveCurrent()}>
+                  Save current state…
+                </Button>
               </div>
               <div className="h-40 overflow-hidden rounded-ctl border border-line">
                 {s.text !== null && view === "text" ? <CodeView text={s.text} label="Session state" /> : shownBytes && <HexView bytes={shownBytes} label="Session state" />}
               </div>
               {copied === false && <FieldMessage error="Couldn't copy to the clipboard." />}
+              {saved?.name && <p className="m-0 text-11 text-muted">Saved to {saved.name}</p>}
+              {saved?.error && <FieldMessage error={`Couldn't save the state: ${saved.error}`} />}
             </>
           )}
         </Group>
@@ -130,7 +144,7 @@ export function SessionStateSheet({ entity, session: first }: { entity: string; 
         />
         {change === "clear" ? (
           <p className="m-0 text-12 text-muted">
-            {s ? "Copy the current state first: a cleared state can't be brought back." : "The session's state is removed."}
+            {s ? "Copy or save the current state first: a cleared state can't be brought back." : "The session's state is removed."}
           </p>
         ) : (
           <>
@@ -146,7 +160,7 @@ export function SessionStateSheet({ entity, session: first }: { entity: string; 
             <Textarea mono aria-label="New state" aria-invalid={valueError ? true : undefined} rows={5} value={value} onChange={(e) => setValue(e.target.value)} />
             {valueError && <FieldMessage error={valueError} />}
             {bytes && <p className="m-0 text-11 tabular-nums text-muted">{formatBytes(bytes.length)}{format === "text" ? " as UTF-8" : ""}</p>}
-            {s && <p className="m-0 text-11 text-muted">The current state is replaced; copy it first to keep it.</p>}
+            {s && <p className="m-0 text-11 text-muted">The current state is replaced; copy or save it first to keep it.</p>}
             {bytes !== null && bytes.length > STATE_LIMIT && (
               <Check
                 label="Allow large state"

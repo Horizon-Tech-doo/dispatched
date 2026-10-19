@@ -93,6 +93,10 @@ export const sessionStateGet = (profileId: string, entity: string, session: stri
 /** `value` is base64, or null to clear it. Over 256 KiB needs `allowLarge`. */
 export const opSessionStateSet = (profileId: string, entity: string, session: string, value: string | null, allowLarge: boolean) =>
   call<JobStarted>("op_session_state_set", { profileId, entity, session, value, allowLarge });
+/** Save the session's current state (read fresh) to a file the native save dialog picks; the file name, or null
+ *  when cancelled or there is no state. */
+export const saveSessionState = (profileId: string, entity: string, session: string) =>
+  call<string | null>("save_session_state", { profileId, entity, session });
 /** What a pinned or `EntityPath` entity is, or null when the namespace does not say. */
 export const resolveKind = (profileId: string, entity: string) => call<EntityKindName | null>("resolve_kind", { profileId, entity });
 /** The native open dialog; `null` when cancelled. The paths stay in the engine under `pick`. */

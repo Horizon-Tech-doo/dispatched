@@ -22,11 +22,20 @@ describe("SessionStateSheet", () => {
     const sheet = await screen.findByRole("dialog", { name: "Session state" });
     await within(sheet).findByText(/"step":"inspect"/);
     await userEvent.click(within(sheet).getByRole("radio", { name: "Clear" }));
-    expect(within(sheet).getByText(/Copy the current state first/)).toBeInTheDocument();
+    expect(within(sheet).getByText(/Copy or save the current state first/)).toBeInTheDocument();
     await userEvent.click(within(sheet).getByRole("button", { name: "Copy current state" }));
     expect(write).toHaveBeenCalledWith('{"step":"inspect","owner":"returns-team"}');
     await userEvent.click(within(sheet).getByRole("button", { name: "Clear state" }));
     await waitFor(() => expect(lastCall(mock, "op_session_state_set")).toEqual({ profileId: "p-logistics", entity: "returns-intake", session: "RMA-1001", value: null, allowLarge: false }));
+  });
+
+  it("saves the current state to a file before a change", async () => {
+    const { mock } = renderShell("operate-ok", { last_profile: "p-logistics" }, open());
+    const sheet = await screen.findByRole("dialog", { name: "Session state" });
+    await within(sheet).findByText(/"step":"inspect"/);
+    await userEvent.click(within(sheet).getByRole("button", { name: "Save current state…" }));
+    await waitFor(() => expect(lastCall(mock, "save_session_state")).toEqual({ profileId: "p-logistics", entity: "returns-intake", session: "RMA-1001" }));
+    expect(await within(sheet).findByText("Saved to RMA-1001-state.bin")).toBeInTheDocument();
   });
 
   it("sets text as base64, and state over 256 KiB needs Allow large state", async () => {

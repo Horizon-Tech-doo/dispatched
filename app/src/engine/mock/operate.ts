@@ -456,6 +456,9 @@ export function createOperateMock(h: OperateHost) {
           truncated: false,
         } satisfies DlqSummaryView;
       }
+      case "save_session_state":
+        h.connectedTo(args.profileId);
+        return `${args.session}-state.bin`;
       case "session_state_get": {
         h.connectedTo(args.profileId);
         const key = `${args.entity}|${args.session}`;

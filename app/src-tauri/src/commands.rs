@@ -750,3 +750,42 @@ pub fn activity_export(
         &format,
     )
 }
+
+/// Save a session's current state to a file the save dialog picks (Rust-side), read fresh, so a
+/// state about to be replaced or cleared can be kept. The file name of what was written, or
+/// `None` when the dialog was cancelled or the session has no state.
+#[tauri::command]
+pub async fn save_session_state(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    profile_id: String,
+    entity: String,
+    session: String,
+) -> Result<Option<String>, CommandError> {
+    use tauri_plugin_dialog::DialogExt;
+    let active = state.active_for(&profile_id).await?;
+    let Some(bytes) = active
+        .explorer
+        .session_state(&dispatched_core::EntityPath::parse(&entity)?, &session)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let name = format!("{}-state.bin", session.replace(['/', '\\', ':'], "-"));
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .set_parent(&window)
+            .set_file_name(&name)
+            .blocking_save_file()
+    })
+    .await
+    .map_err(|e| CommandError::new("io", format!("The save dialog failed: {e}")))?;
+    let Some(path) = picked.and_then(|p| p.into_path().ok()) else {
+        return Ok(None);
+    };
+    std::fs::write(&path, &bytes)
+        .map_err(|e| CommandError::new("io", format!("Could not write {}: {e}", path.display())))?;
+    Ok(path.file_name().map(|n| n.to_string_lossy().into_owned()))
+}

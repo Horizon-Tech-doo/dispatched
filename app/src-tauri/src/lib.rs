@@ -120,6 +120,7 @@ pub fn run() {
             commands::session_state_get,
             commands::op_session_state_set,
             commands::resolve_kind,
+            commands::save_session_state,
             commands::pick_open_paths,
             commands::job_report,
             commands::pick_report_path,

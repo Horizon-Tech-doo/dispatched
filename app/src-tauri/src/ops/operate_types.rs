@@ -628,7 +628,8 @@ mod tests {
 
     #[test]
     fn received_view_sends_the_sequence_number_once_as_text() {
-        let summary = serde_json::json!({"sequence_number": 9_007_199_254_740_993_i64, "subject": "x"});
+        let summary =
+            serde_json::json!({"sequence_number": 9_007_199_254_740_993_i64, "subject": "x"});
         let v = with_text_sequence(summary);
         assert_eq!(v["sequence_number"], "9007199254740993");
         assert_eq!(v["subject"], "x");
