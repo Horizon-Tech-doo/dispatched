@@ -65,7 +65,8 @@ describe("operation sheets after review", () => {
   it("the target picker says when the namespace can't be listed and lets the name be typed", async () => {
     const { mock } = open({ op: "move", entity: "customs-docs", view: "active", sequences: [1], filter: {} }, "network");
     const sheet = await screen.findByRole("dialog", { name: "Move messages" });
-    expect(await within(sheet).findByText("Couldn't list the queues and topics.")).toBeInTheDocument();
+    // A network error is retried once (about a second) before it shows: wait past the default 1 s.
+    expect(await within(sheet).findByText("Couldn't list the queues and topics.", undefined, { timeout: 5000 })).toBeInTheDocument();
     await typeInto(within(sheet).getByRole("textbox", { name: "Entity name" }), "orders");
     await userEvent.click(within(sheet).getByRole("button", { name: "Move 1 message" }));
     await waitFor(() => expect(lastCall(mock, "op_move")).toMatchObject({ target: "orders" }));
