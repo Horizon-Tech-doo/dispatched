@@ -1,4 +1,4 @@
-import type { FilterSpec, MessageDetail, PeekView, Settlement, SubQueue } from "@/engine";
+import type { EntityKindName, FilterSpec, MessageDetail, PeekView, PolicyChange, RuleInfo, Settlement, SubQueue } from "@/engine";
 
 /** What an operation sheet opens on. Sequence numbers are the grid's numbers; they become strings at the engine call. */
 export type OperationSeed =
@@ -11,6 +11,13 @@ export type OperationSeed =
   | { op: "cancel-scheduled"; entity: string; sequences: number[] }
   | { op: "settle-deferred"; entity: string; subQueue: SubQueue; sequences: number[]; session: string | null; how?: Settlement["type"] }
   | { op: "purge"; entities: string[] }
-  | { op: "session-state"; entity: string; session: string };
+  | { op: "session-state"; entity: string; session: string }
+  /** Add a rule to a subscription, or (with `rule`) edit that rule. */
+  | { op: "rule-save"; entity: string; rule: RuleInfo | null }
+  /** Remove a rule; `last` when it is the subscription's only rule. */
+  | { op: "rule-remove"; entity: string; name: string; last: boolean }
+  | { op: "policy-add"; entityKind: EntityKindName; entity: string }
+  /** Remove a policy, or regenerate one of its keys. */
+  | { op: "policy-change"; entityKind: EntityKindName; entity: string; name: string; change: Exclude<PolicyChange, { type: "add" }> };
 
 export type OperationKind = OperationSeed["op"];

@@ -1,3 +1,4 @@
+import { PoliciesSection } from "../manage/PoliciesSection";
 import { Check, Copy, KeyRound } from "lucide-react";
 import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useEntityDetails, useProfiles, useSubscriptionsFor, type EntityCounts, type EntityDetails, type SubscriptionInfo } from "@/engine";
@@ -336,6 +337,7 @@ export function OverviewView({ tab }: { tab: EntityTab }) {
           {kind !== "topic" && <Address label="Dead-letter URL" copyLabel="Copy dead-letter URL" value={dlq} said={`Copied the dead-letter URL for ${displayName(tab.id)}`} />}
           <ConnectionStringCopy entity={tab.id} eligible={eligible} entra={entra} />
         </section>
+        {kind !== "subscription" && <PoliciesSection kind={kind} entity={tab.id} />}
       </div>
       <div className="flex min-w-[320px] max-w-[680px] flex-1 flex-col">
         {isTopic && <SubscriptionsTable topic={tab.id} profileId={conn.profileId} />}

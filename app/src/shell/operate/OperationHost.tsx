@@ -8,6 +8,8 @@ import { ReceiveSheet } from "./ReceiveSheet";
 import { ResubmitSheet } from "./ResubmitSheet";
 import { CancelScheduledSheet, SettleDeferredSheet } from "./ScheduledSheets";
 import type { OperationSeed } from "./seed";
+import { PolicyAddSheet, PolicyChangeSheet } from "../manage/PolicySheet";
+import { RuleRemoveSheet, RuleSaveSheet } from "../manage/RuleSheet";
 
 /** Renders the sheet of one operation. */
 export function OperationHost({ seed }: { seed: OperationSeed }) {
@@ -32,6 +34,14 @@ export function OperationHost({ seed }: { seed: OperationSeed }) {
       return <PurgeSheet entities={seed.entities} />;
     case "session-state":
       return <SessionStateSheet entity={seed.entity} session={seed.session} />;
+    case "rule-save":
+      return <RuleSaveSheet entity={seed.entity} rule={seed.rule} />;
+    case "rule-remove":
+      return <RuleRemoveSheet entity={seed.entity} name={seed.name} last={seed.last} />;
+    case "policy-add":
+      return <PolicyAddSheet kind={seed.entityKind} entity={seed.entity} />;
+    case "policy-change":
+      return <PolicyChangeSheet kind={seed.entityKind} entity={seed.entity} name={seed.name} change={seed.change} />;
   }
 }
 
