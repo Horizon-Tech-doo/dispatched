@@ -28,6 +28,19 @@ Every gate ran against the namespace with `DISPATCHED_GATE_CONNECTION_STRING`. T
 | `listen --complete --each-session`: sessions a, b and a later c taken in full (8 messages) | ✅ |
 | AMQP over WebSockets (443): send, peek, receive-and-delete | ✅ |
 
+## Entra ID
+
+Signed in with `dispatched login` as a user granted "Azure Service Bus Data Owner" on the test namespace only (no SAS):
+
+| Check | Result |
+|---|---|
+| `whoami`, `ls` with counts | ✅ |
+| Send 3, peek, receive-and-delete 3 | ✅ |
+| Create a queue, rename it | ✅ |
+| Create a queue forwarding to another (supplementary authorization with an Entra token) | ✅ |
+| `policy add`, `policy ls` | ✅ |
+| Bulk delete | ✅ |
+
 ## Bugs found and fixed
 
 1. **The desktop panicked on its first TLS connection.** Two rustls crypto providers were linked, so neither was picked by default. The fix is in spec §18.1; the `emulator_m3b` gate failed before it and passes after.
@@ -36,6 +49,5 @@ Every gate ran against the namespace with `DISPATCHED_GATE_CONNECTION_STRING`. T
 
 ## Not run yet
 
-- Entra ID sign-in. It needs a data-plane role on the test namespace and an interactive `dispatched login` by the user.
 - The native desktop window against the cloud (the walkthroughs in the M2b and M3b notes).
 - Premium (message size, namespace partitions), a proxy, and a real ServiceBusExplorer export file.
