@@ -65,6 +65,8 @@ fn app_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<tauri
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Before any TLS (sign-in, discovery, management, AMQP): this build links two rustls providers.
+    dispatched_core::tls::ensure_crypto_provider();
     let builder = tauri::Builder::default();
     // Windows and Linux have no menu bar by default; only macOS gets one.
     #[cfg(target_os = "macos")]

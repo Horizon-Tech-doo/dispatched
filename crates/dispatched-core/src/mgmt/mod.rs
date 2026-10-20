@@ -85,6 +85,7 @@ impl ManagementClient {
         tokens: Arc<dyn TokenSource>,
         proxy: Option<reqwest::Proxy>,
     ) -> Result<Self> {
+        crate::tls::ensure_crypto_provider();
         let mut builder = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT);
@@ -243,15 +244,53 @@ impl ManagementClient {
         .await
     }
 
+    /// A forwarding target as the service takes it: an absolute URL on this namespace (a bare
+    /// name is refused, "Absolute URI must be provided"). Descriptions hold names; see
+    /// [`model::entity_name_of`].
+    fn absolute(&self, target: &Option<String>) -> Option<String> {
+        target.as_ref().map(|t| {
+            if t.is_empty() || t.contains("://") {
+                t.clone()
+            } else {
+                format!("{}/{}", self.base.trim_end_matches('/'), segment(t))
+            }
+        })
+    }
+
+    fn absolute_queue(&self, d: &Description<QueueSettings>) -> Description<QueueSettings> {
+        let mut d = d.clone();
+        d.settings.forward_to = self.absolute(&d.settings.forward_to);
+        d.settings.forward_dead_lettered_messages_to =
+            self.absolute(&d.settings.forward_dead_lettered_messages_to);
+        d
+    }
+
+    fn absolute_subscription(
+        &self,
+        d: &Description<SubscriptionSettings>,
+    ) -> Description<SubscriptionSettings> {
+        let mut d = d.clone();
+        d.settings.forward_to = self.absolute(&d.settings.forward_to);
+        d.settings.forward_dead_lettered_messages_to =
+            self.absolute(&d.settings.forward_dead_lettered_messages_to);
+        d
+    }
+
     /// Create queue `name`. An existing queue is `Conflict`.
     pub async fn create_queue(&self, name: &str, d: &Description<QueueSettings>) -> Result<()> {
+        let mut d = d.clone();
+        d.settings.max_size_in_megabytes = configured_size(
+            d.settings.enable_partitioning,
+            d.settings.max_size_in_megabytes,
+        );
+        let d = &d;
         let fwd = forwarding(
             &d.settings.forward_to,
             &d.settings.forward_dead_lettered_messages_to,
         );
         self.put(
             &segment(name),
-            queue_entry(d),
+            queue_entry(&self.absolute_queue(d)),
             Write::Create,
             &format!("queue {name}"),
             fwd,
@@ -267,7 +306,7 @@ impl ManagementClient {
         );
         self.put(
             &segment(name),
-            queue_entry(d),
+            queue_entry(&self.absolute_queue(d)),
             Write::Update,
             &format!("queue {name}"),
             fwd,
@@ -282,6 +321,12 @@ impl ManagementClient {
 
     /// Create topic `name`.
     pub async fn create_topic(&self, name: &str, d: &Description<TopicSettings>) -> Result<()> {
+        let mut d = d.clone();
+        d.settings.max_size_in_megabytes = configured_size(
+            d.settings.enable_partitioning,
+            d.settings.max_size_in_megabytes,
+        );
+        let d = &d;
         self.put(
             &segment(name),
             topic_entry(d),
@@ -339,7 +384,7 @@ impl ManagementClient {
         );
         self.put(
             &subscription_path(topic, name),
-            subscription_entry_with_rule(d, rule),
+            subscription_entry_with_rule(&self.absolute_subscription(d), rule),
             Write::Create,
             &format!("subscription {topic}/subscriptions/{name}"),
             fwd,
@@ -360,7 +405,7 @@ impl ManagementClient {
         );
         self.put(
             &subscription_path(topic, name),
-            subscription_entry(d),
+            subscription_entry(&self.absolute_subscription(d)),
             Write::Update,
             &format!("subscription {topic}/subscriptions/{name}"),
             fwd,
@@ -682,6 +727,16 @@ pub(crate) fn unauthorized(detail: String) -> Error {
 /// the HTTP wording ("Manage,EntityRead claims required for this operation.")
 /// and the AMQP wording ("'Listen' claim(s) are required to perform this
 /// operation", `"Manage,EntityRead" claim(s) are required ...`).
+/// The size to create an entity with. A partitioned Standard entity reads back 16 times its
+/// configured size (1024 → 16384) but is created with the configured one (1, 2, 3, 4 or 5 GB);
+/// a copy, a rename or an import of what was read would otherwise be refused.
+pub(crate) fn configured_size(partitioned: Option<bool>, size: Option<u64>) -> Option<u64> {
+    match (partitioned, size) {
+        (Some(true), Some(s)) if s > 5_120 && s % 16 == 0 => Some(s / 16),
+        _ => size,
+    }
+}
+
 pub fn needed_claims(detail: &str) -> Option<String> {
     for marker in [" claim(s) are required", " claims are required"] {
         if let Some(idx) = detail.find(marker) {
@@ -772,6 +827,65 @@ mod tests {
             .await;
         client(&server).create_queue("orders", &d).await.unwrap();
         m.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn create_of_a_partitioned_copy_sends_the_configured_size() {
+        // A partitioned Standard entity reads back 16 times its size (1024 → 16384), and a create
+        // with 16384 is refused: a copy of what was read must send 1024.
+        let mut server = mockito::Server::new_async().await;
+        let mut d = Description::new(QueueSettings {
+            enable_partitioning: Some(true),
+            max_size_in_megabytes: Some(16_384),
+            ..Default::default()
+        });
+        d.settings.max_delivery_count = Some(4);
+        let q = server
+            .mock("PUT", "/orders")
+            .match_query(Matcher::Any)
+            .match_body(Matcher::Regex(
+                "<MaxSizeInMegabytes>1024</MaxSizeInMegabytes>".into(),
+            ))
+            .with_status(201)
+            .create_async()
+            .await;
+        client(&server).create_queue("orders", &d).await.unwrap();
+        q.assert_async().await;
+        let t = server
+            .mock("PUT", "/events")
+            .match_query(Matcher::Any)
+            .match_body(Matcher::Regex(
+                "<MaxSizeInMegabytes>5120</MaxSizeInMegabytes>".into(),
+            ))
+            .with_status(201)
+            .create_async()
+            .await;
+        let topic = Description::new(TopicSettings {
+            enable_partitioning: Some(true),
+            max_size_in_megabytes: Some(81_920),
+            ..Default::default()
+        });
+        client(&server)
+            .create_topic("events", &topic)
+            .await
+            .unwrap();
+        t.assert_async().await;
+    }
+
+    #[test]
+    fn configured_size_leaves_other_sizes_alone() {
+        assert_eq!(configured_size(Some(true), Some(16_384)), Some(1024));
+        assert_eq!(
+            configured_size(Some(true), Some(2048)),
+            Some(2048),
+            "already a configured size"
+        );
+        assert_eq!(
+            configured_size(Some(false), Some(16_384)),
+            Some(16_384),
+            "not partitioned (Premium sizes)"
+        );
+        assert_eq!(configured_size(None, None), None);
     }
 
     #[tokio::test]
@@ -1019,6 +1133,29 @@ mod tests {
             .await
             .unwrap();
         del.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn forwarding_targets_are_written_as_absolute_urls() {
+        // The service refuses a bare name ("Absolute URI must be provided"), as the SDK knows.
+        let mut server = mockito::Server::new_async().await;
+        let d = Description::new(QueueSettings {
+            forward_to: Some("archive".into()),
+            forward_dead_lettered_messages_to: Some("dlq sink".into()),
+            ..Default::default()
+        });
+        let m = server
+            .mock("PUT", "/orders")
+            .match_query(Matcher::Any)
+            .match_body(Matcher::AllOf(vec![
+                Matcher::Regex("<ForwardTo>http://127\\.0\\.0\\.1:\\d+/archive</ForwardTo>".into()),
+                Matcher::Regex("<ForwardDeadLetteredMessagesTo>http://127\\.0\\.0\\.1:\\d+/dlq%20sink</ForwardDeadLetteredMessagesTo>".into()),
+            ]))
+            .with_status(201)
+            .create_async()
+            .await;
+        client(&server).create_queue("orders", &d).await.unwrap();
+        m.assert_async().await;
     }
 
     #[tokio::test]

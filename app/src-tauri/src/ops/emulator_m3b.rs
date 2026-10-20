@@ -23,6 +23,12 @@ use std::time::Duration;
 
 const EMULATOR: &str = "Endpoint=sb://localhost;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;";
 
+/// The namespace the gate runs on: the emulator, or `DISPATCHED_GATE_CONNECTION_STRING` (a cloud
+/// test namespace; the string comes only from the environment and is never printed).
+fn gate_cs() -> String {
+    std::env::var("DISPATCHED_GATE_CONNECTION_STRING").unwrap_or_else(|_| EMULATOR.to_string())
+}
+
 fn enabled() -> bool {
     std::env::var("DISPATCHED_EMULATOR").as_deref() == Ok("1")
 }
@@ -182,7 +188,7 @@ async fn emulator_m3b() {
     let dev: Arc<dyn Events> = ev.clone();
     let p = s
         .store
-        .add_connection_string("emulator-prod", EMULATOR, s.secrets.as_ref(), true)
+        .add_connection_string("emulator-prod", &gate_cs(), s.secrets.as_ref(), true)
         .unwrap();
     crate::ops::connection::connect(&s, &*ev, &p.id)
         .await
@@ -397,9 +403,37 @@ async fn emulator_m3b() {
     .unwrap();
     one(&ev, &started.id, "policy add").await;
     gated += 1;
-    eprintln!(
-        "GATE-NOTE: the emulator drops SAS policies; the policy read-back and removal are not checked here"
-    );
+    let policies = manage_read::entity_policies(&s, &*ev, &p.id, EntityKind::Queue, &q)
+        .await
+        .unwrap();
+    if policies.is_empty() {
+        eprintln!(
+            "GATE-NOTE: the emulator drops SAS policies; the policy read-back and removal are not checked here"
+        );
+    } else {
+        // A cloud namespace keeps it: it reads back with its rights, and is removed again.
+        let app = policies
+            .iter()
+            .find(|x| x.key_name == "app")
+            .expect("policy app");
+        assert_eq!(app.rights, [AccessRight::Listen, AccessRight::Send]);
+        let started = manage::policy_change(
+            &s,
+            dev.clone(),
+            &p.id,
+            r(EntityKind::Queue, &q),
+            "app".into(),
+            PolicyChange::Remove,
+        )
+        .await
+        .unwrap();
+        one(&ev, &started.id, "policy remove").await;
+        gated += 1;
+        let after = manage_read::entity_policies(&s, &*ev, &p.id, EntityKind::Queue, &q)
+            .await
+            .unwrap();
+        assert!(after.iter().all(|x| x.key_name != "app"));
+    }
 
     // 6. Export, delete in one job, import, read back.
     let file = std::env::temp_dir().join(format!("dispatched-m3b-{run}.xml"));

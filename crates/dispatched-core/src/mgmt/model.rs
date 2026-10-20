@@ -531,6 +531,20 @@ fn description_of<'a>(entry: &'a Node, kind: &str) -> Result<&'a Node> {
         .ok_or_else(|| Error::Protocol(format!("the entry holds no {kind}")))
 }
 
+/// A forwarding target as an entity name: the service answers with an absolute URL
+/// (`https://ns.servicebus.windows.net/archive`), forms, pickers and exports use the name.
+pub(crate) fn entity_name_of(target: Option<String>) -> Option<String> {
+    target.map(|t| match url::Url::parse(&t) {
+        Ok(u) if t.contains("://") => {
+            let path = u.path().trim_start_matches('/');
+            percent_encoding::percent_decode_str(path)
+                .decode_utf8_lossy()
+                .into_owned()
+        }
+        _ => t,
+    })
+}
+
 fn text(d: &Node, name: &str) -> Option<String> {
     d.child(name)
         .map(|n| n.text.clone())
@@ -632,8 +646,11 @@ pub fn parse_queue(entry: &Node) -> Result<Description<QueueSettings>> {
             max_delivery_count: num(d, "MaxDeliveryCount")?,
             enable_batched_operations: flag(d, "EnableBatchedOperations")?,
             status: status(d)?,
-            forward_to: text(d, "ForwardTo"),
-            forward_dead_lettered_messages_to: text(d, "ForwardDeadLetteredMessagesTo"),
+            forward_to: entity_name_of(text(d, "ForwardTo")),
+            forward_dead_lettered_messages_to: entity_name_of(text(
+                d,
+                "ForwardDeadLetteredMessagesTo",
+            )),
             auto_delete_on_idle: dur(d, "AutoDeleteOnIdle")?,
             enable_partitioning: flag(d, "EnablePartitioning")?,
             enable_express: flag(d, "EnableExpress")?,
@@ -684,8 +701,11 @@ pub fn parse_subscription(entry: &Node) -> Result<Description<SubscriptionSettin
             max_delivery_count: num(d, "MaxDeliveryCount")?,
             enable_batched_operations: flag(d, "EnableBatchedOperations")?,
             status: status(d)?,
-            forward_to: text(d, "ForwardTo"),
-            forward_dead_lettered_messages_to: text(d, "ForwardDeadLetteredMessagesTo"),
+            forward_to: entity_name_of(text(d, "ForwardTo")),
+            forward_dead_lettered_messages_to: entity_name_of(text(
+                d,
+                "ForwardDeadLetteredMessagesTo",
+            )),
             auto_delete_on_idle: dur(d, "AutoDeleteOnIdle")?,
             user_metadata: text(d, "UserMetadata"),
         },
@@ -823,6 +843,24 @@ pub fn validate_filter(f: &RuleFilter) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn forwarding_targets_read_back_as_names() {
+        assert_eq!(
+            entity_name_of(Some("https://ns.servicebus.windows.net/archive".into())),
+            Some("archive".into())
+        );
+        assert_eq!(
+            entity_name_of(Some("https://ns.servicebus.windows.net/dlq%20sink".into())),
+            Some("dlq sink".into())
+        );
+        assert_eq!(
+            entity_name_of(Some("archive".into())),
+            Some("archive".into())
+        );
+        assert_eq!(entity_name_of(None), None);
+    }
+
     use super::*;
     use crate::mgmt::xml;
 

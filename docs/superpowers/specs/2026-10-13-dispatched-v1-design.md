@@ -599,3 +599,13 @@ Decided while planning and building M3b, the desktop half of M3 (`docs/superpowe
 16. The desktop gate `emulator_m3b` (in CI after `emulator_m2b`) runs the app's own manage and listener paths on a production-marked emulator profile. It covers create, update, status, duplicate, rename, a topic and subscription with rule add/update/remove, a policy add, export, bulk delete and import, and a watch and a complete listener with `job_message`, plus the activity entries of every gated step. Its entities are `m3b-{run}-…`, deleted by a guard on every path.
 17. The screen review of M3b was done against §6 from screenshots of the mock build in both themes, not with the impeccable skill, which was not available in the session. M4's impeccable audit of every screen covers it.
 18. Parked: typed correlation property values in the desktop; a Dashboard "Export selected"; listener reconnect (v1.x); MCP tools for manage and listen (M4).
+
+## 18. Cloud verification decisions (2026-10-20)
+
+Found on the first run against a real namespace (a temporary Standard namespace in the ponte tenant, SAS). Results in `docs/live-verification-cloud.md`.
+
+1. The process installs aws-lc-rs as its rustls crypto provider before any TLS (`tls::ensure_crypto_provider`, also at desktop start). The desktop links both rustls providers (a Tauri dependency brings `ring`), so without it the first AMQP-over-TLS connection panicked. Only the emulator path, which has no TLS, had been run.
+2. Forwarding targets are written as absolute URLs on the namespace (`https://ns.servicebus.windows.net/name`), as the SDK does: the service refuses a bare name ("Absolute URI must be provided"). This corrects §16 Decision 7. They are read back as names, so forms, pickers and the incumbent export keep working with names.
+3. A partitioned Standard entity reads back 16 times its configured size (1024 → 16384) but must be created with the configured one, so creates send `size / 16` for a partitioned entity whose size is above 5120 and divisible by 16. Duplicate, rename and import of partitioned entities failed before.
+4. The emulator gates run against a cloud namespace when `DISPATCHED_GATE_CONNECTION_STRING` is set (from the environment only; it is never printed). On the cloud, the emulator's GATE-NOTE skips become assertions: metadata, policies, exact counts and 404s.
+5. A queue created over the management API takes a few seconds to appear on the AMQP side, and a management read right after a write can be stale. The gates wait for the first. In the desktop, opening a just-created entity at once can show "not found" for a few seconds.
