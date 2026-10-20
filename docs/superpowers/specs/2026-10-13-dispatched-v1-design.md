@@ -589,9 +589,9 @@ Decided while planning and building M3b, the desktop half of M3 (`docs/superpowe
 ### Desktop listener
 
 11. `op_listen` runs the core listener as a job. Each message arrives as a `received` event. The Listener tab keeps the newest 1,000 in its grid, and per-second counts of messages and bytes for the last minute.
-12. A removing listener (complete, delete) holds every message it removed, for the report, "Save report" and "Send again". At 10,000 held messages or 256 MiB it stops itself, with a note saying so, rather than drop one (`Jobs::stop_with`). Watch holds nothing.
+12. A removing listener (complete, delete) holds every message it removed, for the report, "Save report" and "Send again". At 10,000 held messages or 256 MiB it stops itself, with a note saying so, rather than drop one (`Jobs::stop_with`). Once its report is saved, the held messages leave memory (the report notes it), so a listener restarted after "save the report, then start again" does not pile them up; an unsaved report keeps them until the app quits. Watch holds nothing.
 13. A listener's normal end is the user's Stop: it finishes without an error. A self-stop at the cap, or a closed connection, ends it `stopped`.
-14. The listener belongs to its tab. Leaving the sub-tab keeps it running, and coming back finds it again. Closing the tab stops it. The form starts at Watch on every visit: a removing mode is never remembered (§5).
+14. The listener belongs to its tab. Leaving the sub-tab keeps it running, and coming back finds it again, with the sub-queue and mode it was started with. A listener whose start returns after its tab went away is cancelled at once. Closing the tab stops it. The form starts at Watch on every visit: a removing mode is never remembered (§5).
 15. `job_message` reads a message from a job's held messages, by sequence number as text. The detail pane uses it for removed messages, and "Send again" seeds the composer's copy flow from it.
 
 ### Process and scope

@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import type { JobEvent, ReceivedView } from "@/engine";
+import type { JobEvent, ReceivedView, SubQueue } from "@/engine";
 
 /** The grid keeps the newest this many messages; the counters count them all. */
 export const ROLLING_ROWS = 1000;
@@ -70,14 +70,20 @@ export function useListened(jobId: string | null): Listened | undefined {
 
 // ---- Which listener each tab runs ----
 
-const tabListeners = new Map<string, string>();
+/** A tab's listener: its job, and what it listens to (the form starts afresh on every visit). */
+export interface TabListener {
+  jobId: string;
+  subQueue: SubQueue;
+  removing: boolean;
+}
+const tabListeners = new Map<string, TabListener>();
 const tabSubs = new Set<() => void>();
 /** A tab's key: its connection and entity. */
 export const tabKey = (profileId: string | null, entity: string) => `${profileId ?? ""}|${entity}`;
 export const tabListener = {
   get: (key: string) => tabListeners.get(key) ?? null,
-  set(key: string, jobId: string | null) {
-    if (jobId) tabListeners.set(key, jobId);
+  set(key: string, l: TabListener | null) {
+    if (l) tabListeners.set(key, l);
     else tabListeners.delete(key);
     tabSubs.forEach((f) => f());
   },

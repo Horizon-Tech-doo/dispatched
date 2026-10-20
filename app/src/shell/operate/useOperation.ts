@@ -55,7 +55,14 @@ export function useOperation(jobIdToFollow: string | null = null): Operation {
     live.current.detached = true;
   }, []);
   // Replaced by another sheet, or the shell went away.
-  useEffect(() => leave, [leave]);
+  const gone = useRef(false);
+  useEffect(() => {
+    gone.current = false;
+    return () => {
+      gone.current = true;
+      leave();
+    };
+  }, [leave]);
 
   const start = useCallback(async (run: () => Promise<JobStarted>) => {
     setFailure(null);
@@ -64,6 +71,11 @@ export function useOperation(jobIdToFollow: string | null = null): Operation {
     live.current.detached = false;
     try {
       const { id } = await run();
+      // The view went away while the job was being started: nobody can see it, so it does not run.
+      if (gone.current && !live.current.detached) {
+        void commands.jobCancel(id).catch(() => {});
+        return;
+      }
       setJobId(id);
     } catch (e) {
       setFailure({ kind: e instanceof EngineError ? e.kind : "unknown", message: e instanceof Error ? e.message : String(e) });

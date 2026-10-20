@@ -323,6 +323,41 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_listener_report_releases_its_held_messages() {
+        let s = crate::ops::test_util::state();
+        let (id, cancel) = s.jobs.start();
+        cancel.cancel();
+        let b = ProgressBridge::new(&id, Arc::new(Recorder::default()));
+        finish_listen(
+            &s.jobs,
+            &Recorder::default(),
+            &id,
+            &cancel,
+            &b,
+            Ok(outcome(false)),
+            vec![msg(1), msg(2)],
+        );
+        let file = std::env::temp_dir().join(format!("dispatched-listen-{id}.json"));
+        let pick = s.jobs.pick(file.clone());
+        crate::ops::operate::save_report(&s.jobs, &id, &pick, "json").unwrap();
+        let written = std::fs::read_to_string(&file).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        assert!(
+            written.contains("body-1") && written.contains("body-2"),
+            "the file holds them"
+        );
+        let kept = s.jobs.report(&id).unwrap();
+        assert!(
+            kept.messages.is_empty(),
+            "saved, so no longer held in memory"
+        );
+        assert_eq!(
+            kept.report.notes.last().map(String::as_str),
+            Some("The removed messages were saved to the report file and released.")
+        );
+    }
+
+    #[test]
     fn listen_form_refusals() {
         let form = |mode: &str,
                     concurrency: u8,

@@ -50,7 +50,7 @@ export function ListenerView({ tab, requiresSession }: { tab: EntityTab; require
   const { conn, openSheet } = useShell();
   const key = tabKey(conn.profileId, tab.id);
   const following = useTabListener(key);
-  const op = useOperation(following);
+  const op = useOperation(following?.jobId ?? null);
   const [mode, setMode] = useState<ListenMode>("watch");
   const [subQueue, setSubQueue] = useState<SubQueue>("active");
   const [sessions, setSessions] = useState<"each" | "id">("each");
@@ -63,7 +63,9 @@ export function ListenerView({ tab, requiresSession }: { tab: EntityTab; require
 
   // The tab remembers its listener, so it is there again after a visit to another sub-tab.
   useEffect(() => {
-    if (op.jobId && op.jobId !== following) tabListener.set(key, op.jobId);
+    if (op.jobId && op.jobId !== following?.jobId) tabListener.set(key, { jobId: op.jobId, subQueue, removing: mode !== "watch" });
+    // The form's choices at the start are what the job listens to.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [op.jobId, following, key]);
   // Once it runs, leaving the sub-tab does not stop it: only Stop, closing the tab or the connection does.
   useEffect(() => {
@@ -76,8 +78,10 @@ export function ListenerView({ tab, requiresSession }: { tab: EntityTab; require
   const now = useSeconds(running);
   const rates = useMemo(() => (listened ? ratesOf(listened, now) : null), [listened, now]);
   const name = displayName(tab.id);
-  const removing = job ? !job.title.startsWith("Watch") : mode !== "watch";
-  const view = VIEW_OF[subQueue];
+  // A listener that runs (or ran) listens to what it was started with, not to the form that starts afresh on each visit.
+  const started = following && following.jobId === op.jobId ? following : null;
+  const removing = started ? started.removing : mode !== "watch";
+  const view = VIEW_OF[started ? started.subQueue : subQueue];
 
   const n = Number(receivers);
   const p = Number(prefetch);

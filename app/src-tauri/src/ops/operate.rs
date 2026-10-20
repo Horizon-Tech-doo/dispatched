@@ -892,6 +892,21 @@ pub fn save_report(
     stored
         .report
         .write_with_messages(&path, format, true, &stored.messages)?;
+    // A listener's held messages (up to 256 MiB each) are on disk now: they leave memory, so restarting a listener
+    // after its report was saved does not pile them up.
+    if stored.report.kind == JobKind::Listen && !stored.messages.is_empty() {
+        let mut report = stored.report.clone();
+        report
+            .notes
+            .push("The removed messages were saved to the report file and released.".into());
+        jobs.set_report(
+            id,
+            Arc::new(StoredReport {
+                report,
+                messages: Vec::new(),
+            }),
+        );
+    }
     Ok(path.display().to_string())
 }
 

@@ -84,4 +84,20 @@ describe("listener tab", () => {
     expect(within(sheet).getByDisplayValue("order-created")).toBeInTheDocument();
     expect(lastCall<{ form: SendForm }>(mock, "op_send")).toBeUndefined();
   });
+
+  it("a running dead-letter watch keeps its sub-queue after a visit to another sub-tab", async () => {
+    onListener("operate-ok");
+    const panel = await screen.findByRole("region", { name: "Listener" });
+    await userEvent.click(within(panel).getByRole("radio", { name: "Dead-letter" }));
+    await userEvent.click(within(panel).getByRole("button", { name: "Start watching" }));
+    await waitFor(() => expect(within(panel).getAllByRole("row").length).toBeGreaterThan(2), { timeout: 3000 });
+    act(() => screen.getByRole("tab", { name: /^Overview/ }).focus());
+    await userEvent.keyboard("{Enter}");
+    act(() => screen.getByRole("tab", { name: /^Listener/ }).focus());
+    await userEvent.keyboard("{Enter}");
+    const again = await screen.findByRole("region", { name: "Listener" });
+    act(() => within(again).getByRole("grid", { name: "Messages received" }).focus());
+    await userEvent.keyboard("{ArrowDown}");
+    expect(await within(again).findByText("dead-letter queue")).toBeInTheDocument();
+  });
 });

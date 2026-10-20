@@ -7,6 +7,7 @@ import { OpenSheet, lastCall, typeInto } from "../operate/testing";
 import type { OperationSeed } from "../operate/seed";
 import { changesOf } from "./fields";
 import { manageCommands } from "../palette/commands";
+import { useShell } from "../context";
 
 const open = (seed: OperationSeed) => renderShell("operate-ok", { last_profile: "p-logistics" }, <OpenSheet sheet={{ kind: "operation", ...seed }} />);
 type Create = { kind: string; entity: string; settings: SettingsChange; rule: RuleForm | null };
@@ -86,4 +87,24 @@ describe("entity sheets", () => {
     const all = manageCommands(null, { openSheet: (s) => opened.push(s) });
     expect(all.map((c) => c.label)).toEqual(expect.arrayContaining(["New queue…", "New topic…"]));
   });
+
+  it("the edit sheet reads the settings afresh every time it opens", async () => {
+    const { mock } = renderShell("operate-ok", { last_profile: "p-logistics" }, <Reopener />);
+    const reads = () => mock.calls.filter((c) => c.cmd === "entity_settings").length;
+    await userEvent.click(await screen.findByRole("button", { name: "open edit" }));
+    const sheet = await screen.findByRole("dialog", { name: "Settings of invoice-generate" });
+    await within(sheet).findByRole("textbox", { name: "Lock duration" });
+    const first = reads();
+    await userEvent.click(within(sheet).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await userEvent.click(screen.getByRole("button", { name: "open edit" }));
+    await screen.findByRole("dialog", { name: "Settings of invoice-generate" });
+    await waitFor(() => expect(reads()).toBeGreaterThan(first));
+  });
 });
+
+/** A button that opens the edit sheet of invoice-generate (tests). */
+function Reopener() {
+  const { openSheet } = useShell();
+  return <button onClick={() => openSheet({ kind: "operation", op: "entity-edit", entityKind: "queue", entity: "invoice-generate" })}>open edit</button>;
+}

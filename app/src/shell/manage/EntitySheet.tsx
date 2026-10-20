@@ -70,8 +70,9 @@ export function EntityEditSheet({ kind, entity }: { kind: EntityKindName; entity
     queryKey: keys.settings(conn.profileId, entity),
     queryFn: () => commands.entitySettings(conn.profileId!, kind, entity),
     enabled: conn.profileId !== null,
-    // The form edits what was read when it opened.
+    // The form edits what was read when it opened: read afresh on every opening, never from an earlier one.
     staleTime: Infinity,
+    gcTime: 0,
   });
   const initial = useMemo(() => (q.data?.settings ?? {}) as Values, [q.data]);
   const [values, setValues] = useState<Values | null>(null);

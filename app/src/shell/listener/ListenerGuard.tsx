@@ -13,9 +13,9 @@ export function ListenerGuard() {
     const prefix = `${conn.profileId ?? ""}|`;
     for (const k of tabListener.keys()) {
       if (!k.startsWith(prefix) || open.has(k)) continue;
-      const id = tabListener.get(k);
+      const l = tabListener.get(k);
       tabListener.set(k, null);
-      if (id) void commands.jobCancel(id).catch(() => {});
+      if (l) void commands.jobCancel(l.jobId).catch(() => {});
     }
     // `key` is the set of open tabs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
