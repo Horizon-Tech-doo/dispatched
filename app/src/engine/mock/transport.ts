@@ -28,6 +28,8 @@ export type Scenario =
   | "sessions-empty" | "sessions-capped" | "sessions-cut"
   // Every peek page is refused: the identity lacks Listen.
   | "peek-error"
+  // The entities file chosen for an import can't be read (a value the parser refuses).
+  | "import-broken"
   // A peek's first page arrives; the next one never does (screenshots of a view still reading).
   | "peek-slow"
   // Every message read for the detail pane has gone since the grid read it (received, expired or moved).

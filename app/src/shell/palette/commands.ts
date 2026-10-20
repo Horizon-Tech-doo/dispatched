@@ -85,9 +85,12 @@ export function manageCommands(
   const out: (Omit<PaletteCommand, "group"> & { group: "App" | "This entity" })[] = [
     { id: "manage:new-queue", group: "App", label: "New queue…", keywords: ["create", "add"], glyph: "queue", run: () => c.openSheet({ kind: "operation", op: "entity-create", entityKind: "queue", topic: null }) },
     { id: "manage:new-topic", group: "App", label: "New topic…", keywords: ["create", "add"], glyph: "topic", run: () => c.openSheet({ kind: "operation", op: "entity-create", entityKind: "topic", topic: null }) },
+    { id: "manage:export", group: "App", label: "Export entities (ServiceBusExplorer XML)…", keywords: ["xml", "backup", "migrate", "servicebusexplorer"], run: () => c.openSheet({ kind: "operation", op: "entities-export", entities: [] }) },
+    { id: "manage:import", group: "App", label: "Import entities from XML…", keywords: ["xml", "restore", "migrate", "servicebusexplorer"], run: () => c.openSheet({ kind: "operation", op: "entities-import" }) },
   ];
   if (!tab) return out;
   const name = displayName(tab.id);
+  out.push({ id: "manage:export-one", group: "This entity", label: `Export ${name} as XML…`, keywords: ["xml", "backup", "servicebusexplorer"], run: () => c.openSheet({ kind: "operation", op: "entities-export", entities: [{ kind: tab.kind, entity: tab.id }] }) });
   if (tab.kind === "topic")
     out.push({ id: "manage:new-subscription", group: "This entity", label: `New subscription on ${name}…`, keywords: ["create", "add"], glyph: "subscription", run: () => c.openSheet({ kind: "operation", op: "entity-create", entityKind: "subscription", topic: tab.id }) });
   out.push({ id: "manage:edit", group: "This entity", label: `Edit settings of ${name}…`, keywords: ["properties", "lock", "ttl", "forward", "configure"], run: () => c.openSheet({ kind: "operation", op: "entity-edit", entityKind: tab.kind, entity: tab.id }) });

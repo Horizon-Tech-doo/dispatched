@@ -11,6 +11,7 @@ import type { OperationSeed } from "./seed";
 import { EntityCreateSheet, EntityEditSheet } from "../manage/EntitySheet";
 import { CopySheet, DeleteEntitiesSheet, StatusSheet } from "../manage/EntitySheets";
 import { PolicyAddSheet, PolicyChangeSheet } from "../manage/PolicySheet";
+import { ExportEntitiesSheet, ImportEntitiesSheet } from "../manage/XmlSheets";
 import { RuleRemoveSheet, RuleSaveSheet } from "../manage/RuleSheet";
 
 /** Renders the sheet of one operation. */
@@ -47,6 +48,10 @@ export function OperationHost({ seed }: { seed: OperationSeed }) {
       return <CopySheet target={seed.target} rename={seed.op === "entity-rename"} />;
     case "entity-delete":
       return <DeleteEntitiesSheet entities={seed.entities} />;
+    case "entities-export":
+      return <ExportEntitiesSheet entities={seed.entities} />;
+    case "entities-import":
+      return <ImportEntitiesSheet />;
     case "rule-save":
       return <RuleSaveSheet entity={seed.entity} rule={seed.rule} />;
     case "rule-remove":
