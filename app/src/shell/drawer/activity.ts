@@ -1,3 +1,4 @@
+import { listenerStore } from "../listener/listenerStore";
 import { useSyncExternalStore } from "react";
 import {
   onActivity, onActivityRecord, onConfirm, onJob, type ActivityEntry, type ActivityRecord, type ActivityError, type ConfirmRequest, type ExportFormat, type FilterSpec, type ItemOutcome, type JobEvent,
@@ -197,7 +198,10 @@ export const useRecords = () => useSyncExternalStore(recordStore.subscribe, reco
 export async function startEventCapture(): Promise<() => void> {
   const results = await Promise.allSettled([
     onActivity((e) => activityStore.add(e)),
-    onJob((e) => jobStore.apply(e)),
+    onJob((e) => {
+      jobStore.apply(e);
+      listenerStore.apply(e);
+    }),
     onConfirm((c) => jobStore.confirm(c)),
     onActivityRecord((r) => recordStore.merge([r])),
   ]);

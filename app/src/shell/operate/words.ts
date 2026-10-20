@@ -37,6 +37,9 @@ export function confirmLabel(verb: string, target: string, step: number): string
     case "defer":
     case "dead-letter":
       return `${verb[0].toUpperCase()}${verb.slice(1)} in ${target}`;
+    case "listen-complete":
+    case "listen-delete":
+      return `Start listening to ${target}`;
     case "set-session-state":
       return `Replace state in ${target}`;
     case "clear-session-state":

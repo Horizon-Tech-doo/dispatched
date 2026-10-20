@@ -1,3 +1,4 @@
+import { ListenerGuard } from "./listener/ListenerGuard";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Panel, PanelGroup, ResizeHandle, type ImperativePanelHandle } from "@/ui";
 import { useShell } from "./context";
@@ -94,6 +95,7 @@ export function Shell({ tree, workspace, drawer }: { tree?: ReactNode; workspace
       <StatusBar />
       <JobAnnouncer />
       <JobRefresh />
+      <ListenerGuard />
       <SheetHost />
       <Hotkeys />
       <CommandPalette />
