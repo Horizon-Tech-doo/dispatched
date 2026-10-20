@@ -37,8 +37,20 @@ const VERB: Record<string, string> = {
   resubmit: "Resubmitted", purge: "Removed",
 };
 
+const ENTITY_VERB: Partial<Record<JobKind, string>> = {
+  "create-entities": "Created", "update-entities": "Updated", "delete-entities": "Deleted", duplicate: "Duplicated", rename: "Renamed", "import-entities": "Imported",
+};
+
 /** As core `JobReport::summary_line`. */
 function summaryLine(kind: JobKind, entity: string, target: string | null, items: ItemView[], cancelled: boolean): string {
+  const ev = ENTITY_VERB[kind];
+  if (ev) {
+    const ok = items.filter((i) => i.outcome === "succeeded").length;
+    const noun = (n: number) => (n === 1 ? "entity" : "entities");
+    const skipped = items.filter((i) => i.outcome === "skipped").length;
+    const failed = items.filter((i) => i.outcome === "failed");
+    return `${ev} ${ok === items.length ? `${ok} ${noun(ok)}` : `${ok} of ${items.length} ${noun(items.length)}`}${cancelled ? " (cancelled)" : ""}${skipped ? `; ${skipped} skipped` : ""}${failed.length ? `; ${failed.length} failed (${failed.slice(0, 5).map((i) => `${i.entity}: ${i.reason}`).join(", ")})` : ""}`;
+  }
   const verb = VERB[kind] ?? "Done";
   const place = target ? `from ${entity} to ${target}` : kind === "send" || kind === "import" ? `to ${entity}` : `from ${entity}`;
   const n = (o: ItemOutcome) => items.filter((i) => i.outcome === o).length;
@@ -64,8 +76,6 @@ function reportOf(kind: JobKind, entity: string, target: string | null, items: I
   };
 }
 
-/** One request a job confirms: the core's sentence and the entity the typed name must equal. */
-interface Ask { verb: string; target: string; summary: string; count: number | null; reversible: boolean }
 
 /** A job's work, given the confirmations passed: the items in order, notes, and received messages. */
 interface Work {
@@ -98,6 +108,8 @@ function seedLog(): ActivityRecord[] {
     rec(4, "mcp", "finished", "succeeded", "move", "returns-intake", "Moved 2 messages from returns-intake to returns-intake", 2),
   ];
 }
+
+export type Ask = { verb: string; target: string; summary: string; count: number | null; reversible: boolean };
 
 export function createOperateMock(h: OperateHost) {
   let seq = 0;
@@ -210,6 +222,49 @@ export function createOperateMock(h: OperateHost) {
         note: s.notes[0] ?? null,
       });
       finish(null, done, w.notes ?? [], opId);
+    })();
+    return { id };
+  }
+
+  /**
+   * A listener: confirmed like any job (watch asks nothing), then a received message every `every` ms until it is
+   * cancelled, which is its normal end (no error). A closed connection ends it `stopped`.
+   */
+  function startStream(profileId: unknown, o: { title: string; entity: string; asks: Ask[]; every: number; next: (n: number) => ReceivedView }): JobStarted {
+    const p = h.connectedTo(profileId);
+    const prod = production(p);
+    const id = next("job");
+    const run: Running = { cancelled: false, stopped: false };
+    running.set(id, run);
+    void (async () => {
+      await wait(0);
+      job({ type: "started", id, kind: "listen", title: o.title, total: null, file_name: null });
+      for (let i = 0; i < (prod ? o.asks.length : Math.min(1, o.asks.length)); i++) {
+        const ok = run.cancelled || run.stopped ? false : await ask(id, o.asks[i], prod, i + 1);
+        if (!ok) {
+          running.delete(id);
+          const error = run.stopped ? { kind: "stopped", message: "Stopped: the connection closed." } : run.cancelled ? { kind: "cancelled", message: "Cancelled." } : { kind: "denied", message: "denied: not confirmed" };
+          job({ type: "finished", id, error, report: null, summary: null, output: null, written: null, missing: null, file_name: null });
+          return;
+        }
+      }
+      const opId = o.asks.length ? next("op") : null;
+      const base = { origin: "gui" as const, profile: p.name, entity: o.entity, action: o.asks[0]?.verb ?? "listen", kind: "mutating", count: null, note: null };
+      if (opId) record({ ...base, op_id: opId, phase: "started", outcome: "pending", succeeded: null, failed: null, skipped: null, summary: o.asks[0].summary, error: null });
+      let n = 0;
+      while (!run.cancelled && !run.stopped) {
+        await wait(o.every);
+        if (run.cancelled || run.stopped) break;
+        job({ type: "received", id, message: o.next(++n) });
+      }
+      running.delete(id);
+      const removed = o.asks.length ? n : 0;
+      const note = `${thousands(n)} received, ${thousands(removed)} removed`;
+      const s = { ...reportOf("listen", o.entity, null, [], [note], false, opId), summary_line: `Listened to ${o.entity}: ${note}` };
+      reports.set(id, { summary: s, items: [] });
+      if (opId) record({ ...base, op_id: opId, phase: "finished", outcome: "succeeded", succeeded: removed, failed: 0, skipped: 0, summary: s.summary_line, error: null, note });
+      const error = run.stopped ? { kind: "stopped", message: "Stopped: the connection closed." } : null;
+      job({ type: "finished", id, error, report: s, summary: s.summary_line, output: null, written: null, missing: null, file_name: null });
     })();
     return { id };
   }
@@ -510,7 +565,11 @@ export function createOperateMock(h: OperateHost) {
         return h.kindOf(args.entity as string);
       case "pick_open_paths": {
         const purpose = args.purpose as OpenPurpose;
-        const names = purpose === "body" ? ["order-1001.json", "order-1002.json"] : purpose === "template" ? ["order-template.json"] : ["orders-dead-letter-20261016-0941.json"];
+        const names =
+          purpose === "body" ? ["order-1001.json", "order-1002.json"]
+          : purpose === "template" ? ["order-template.json"]
+          : purpose === "entities" ? [h.scenario === "import-broken" ? "broken-entities.xml" : "logistics-entities.xml"]
+          : ["orders-dead-letter-20261016-0941.json"];
         const pick = next("open");
         picks.set(pick, names);
         return { pick, names } satisfies OpenedFiles;
@@ -567,6 +626,12 @@ export function createOperateMock(h: OperateHost) {
 
   return {
     handle,
+    /** The names of the files open pick `pick` stands for, if it is one. */
+    opened: (pick: string) => picks.get(pick) ?? null,
+    /** Starts a confirmed job (for the manage mock). */
+    start,
+    startStream,
+    item,
     /** As `Jobs::cancel` for an operate job: a waiting confirmation is answered "no". */
     cancel(id: string): boolean {
       const r = running.get(id);

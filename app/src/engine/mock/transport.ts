@@ -3,11 +3,12 @@ import { suggestedFileName } from "../exportName";
 import type {
   AccountView, ActivityEntry, ActivityError, BoundSignIn, ConnectionReport, ConnectionView, DashboardRow, DashboardView, EntityCounts, EntityDetails,
   EntityKindName, EntityListing, EntityRef, ExportRequest, FilterIssue, FilterSpec, JobEvent, JobStarted, MessageDetail, PeekPageView, PeekRequest, PeekView,
-  PickedPath, Profile, ProfileDraft, QueueInfo, RuleInfo, SessionListing, SessionSummary, SignedOut, SignInView, StoredProfile, StoredSignIn, TopicInfo,
+  PickedPath, Profile, ProfileDraft, QueueInfo, RuleInfo, SessionListing, SubscriptionInfo, SessionSummary, SignedOut, SignInView, StoredProfile, StoredSignIn, TopicInfo,
 } from "../types";
 import { setUpdater } from "../updater";
 import * as fx from "./fixtures";
 import { accepts, summarize, textOf, without, type MockMessage } from "./messages";
+import { createManageMock } from "./manage";
 import { createOperateMock, UNHANDLED } from "./operate";
 
 export type Scenario =
@@ -27,6 +28,8 @@ export type Scenario =
   | "sessions-empty" | "sessions-capped" | "sessions-cut"
   // Every peek page is refused: the identity lacks Listen.
   | "peek-error"
+  // The entities file chosen for an import can't be read (a value the parser refuses).
+  | "import-broken"
   // A peek's first page arrives; the next one never does (screenshots of a view still reading).
   | "peek-slow"
   // Every message read for the detail pane has gone since the grid read it (received, expired or moved).
@@ -259,7 +262,7 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
     if (!active || active.id !== profileId) throw new EngineError("not_connected", "Choose a connection first.");
     return active;
   };
-  const listedQueues = (): QueueInfo[] =>
+  const baseQueues = (): QueueInfo[] =>
     scenario === "many"
       ? fx.manyQueues
       : scenario === "many-messages"
@@ -269,11 +272,30 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
           : scenario === "counts-unknown"
             ? fx.queues.map((q) => ({ ...q, counts: null }))
             : fx.queues;
-  const listedTopics = (): TopicInfo[] => (scenario === "many-topics" ? fx.manyTopics : fx.topics);
+  const baseTopics = (): TopicInfo[] => (scenario === "many-topics" ? fx.manyTopics : fx.topics);
+
+  /** What manage operations changed in the namespace: entities created and deleted (by id), and rules. */
+  const ns = { queues: [] as QueueInfo[], topics: [] as TopicInfo[], subs: {} as Record<string, SubscriptionInfo[]>, gone: new Set<string>(), rules: new Map<string, RuleInfo[]>() };
+  const topicOfId = (id: string) => (id.includes("/subscriptions/") ? id.split("/subscriptions/")[0] : null);
+  const isGone = (id: string) => ns.gone.has(id) || (topicOfId(id) !== null && ns.gone.has(topicOfId(id)!));
+  const listedQueues = (): QueueInfo[] => [...baseQueues(), ...ns.queues].filter((q) => !isGone(q.name));
+  const listedTopics = (): TopicInfo[] =>
+    [...baseTopics(), ...ns.topics].filter((t) => !isGone(t.name)).map((t) => ({ ...t, subscription_count: subsOf(t.name).length }));
+  const subsOf = (topic: string): SubscriptionInfo[] =>
+    [...(fx.subscriptions[topic] ?? []), ...(ns.subs[topic] ?? [])].filter((x) => !isGone(`${topic}/subscriptions/${x.name}`));
 
   /** Messages operations took away (`entity|sequence`); the fixtures themselves are shared and never change. */
   const removed = new Set<string>();
   const present = (entity: string) => fx.messagesOf(entity, scenario).filter((m) => !removed.has(`${entity}|${m.sequence_number}`));
+  const operateKind = (entity: string): EntityKindName | null =>
+    listedQueues().some((q) => q.name === entity)
+      ? "queue"
+      : listedTopics().some((t) => t.name === entity)
+        ? "topic"
+        : (() => {
+            const [topic, sub] = entity.split("/subscriptions/");
+            return sub !== undefined && subsOf(topic).some((x) => x.name === sub) ? "subscription" : null;
+          })();
   const operate = createOperateMock({
     scenario,
     tick: delayMs ? 90 : 0,
@@ -282,24 +304,44 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
     messagesOf: present,
     remove: (entity, sequences) => sequences.forEach((n) => removed.add(`${entity}|${n}`)),
     matches: (m, f) => matches(m, f),
-    kindOf: (entity) =>
-      listedQueues().some((q) => q.name === entity)
-        ? "queue"
-        : listedTopics().some((t) => t.name === entity)
-          ? "topic"
-          : (() => {
-              const [topic, sub] = entity.split("/subscriptions/");
-              return sub !== undefined && fx.subscriptions[topic]?.some((x) => x.name === sub) ? "subscription" : null;
-            })(),
-    countsOf: (entity) => {
+    kindOf: (entity) => operateKind(entity),
+    countsOf: (entity) => countsOfEntity(entity),
+  });
+  function countsOfEntity(entity: string) {
       const [topic, sub] = entity.split("/subscriptions/");
-      const c = sub === undefined ? listedQueues().find((q) => q.name === entity)?.counts : fx.subscriptions[topic]?.find((x) => x.name === sub)?.counts;
+      const c = sub === undefined ? listedQueues().find((q) => q.name === entity)?.counts : subsOf(topic).find((x) => x.name === sub)?.counts;
       if (!c) return null;
       // What is still there after operations took messages away.
       const gone = (k: MockMessage["sub"]) => fx.messagesOf(entity, scenario).filter((m) => m.sub === k && removed.has(`${entity}|${m.sequence_number}`)).length;
       return { active: Math.max(0, c.active - gone("main")), dead_letter: Math.max(0, c.dead_letter - gone("dlq")), transfer_dead_letter: Math.max(0, c.transfer_dead_letter - gone("tdlq")) };
+  }
+
+  const manage = createManageMock(
+    {
+      connectedTo: (profileId) => connectedTo(profileId),
+      kindOf: (entity) => (isGone(entity) ? null : operateKind(entity)),
+      add: (kind, entity) => {
+        ns.gone.delete(entity);
+        if (kind === "queue") ns.queues.push({ name: entity, status: "Active", counts: fx.counts(0, 0), size_in_bytes: 0, requires_session: false, max_delivery_count: 10, lock_duration: "PT1M", forward_to: null });
+        else if (kind === "topic") ns.topics.push({ name: entity, status: "Active", size_in_bytes: 0, subscription_count: 0 });
+        else {
+          const [topic, name] = entity.split("/subscriptions/");
+          (ns.subs[topic] ??= []).push({ topic, name, status: "Active", counts: fx.counts(0, 0), requires_session: false, max_delivery_count: 10, forward_to: null });
+        }
+      },
+      remove: (entity) => void ns.gone.add(entity),
+      count: (entity) => countsOfEntity(entity)?.active ?? null,
+      rules: (entity) =>
+        structuredClone(ns.rules.get(entity) ?? fx.rules[entity] ?? [{ name: "$Default", filter: { kind: "true" as const }, action: null, created_at: null }]),
+      setRules: (entity, rules) => void ns.rules.set(entity, rules),
+      openedFile: (pick) => {
+        const names = operate.opened(pick);
+        return names ? (names[0].startsWith("broken") ? "broken" : "<Entities />") : null;
+      },
     },
-  });
+    operate,
+    () => (delayMs ? 600 : 25),
+  );
 
   /** Export jobs: running ones (with their cancel), the files finished ones wrote, and the save dialog's picks. */
   interface Job { timer?: ReturnType<typeof setTimeout>; cancelling: boolean; finish: (error: ActivityError | null) => void }
@@ -547,7 +589,7 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
       case "list_subscriptions": {
         if (!active || active.id !== args.profileId) throw new EngineError("not_connected", "Choose a connection first.");
         // Read on every expand and polled by a topic's Overview: as Rust, only a failure is logged.
-        return quietly(`Listing subscriptions of ${args.topic} failed`, started, () => fx.subscriptions[args.topic as string] ?? []);
+        return quietly(`Listing subscriptions of ${args.topic} failed`, started, () => subsOf(args.topic as string));
       }
       case "peek_page": {
         // As `browse::prepare`: the entity and the filter are checked before anything else, and not logged.
@@ -618,7 +660,7 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
               ? listedQueues().find((x) => x.name === id)
               : kind === "topic"
                 ? listedTopics().find((x) => x.name === id)
-                : fx.subscriptions[topic ?? ""]?.find((x) => x.name === subName);
+                : subsOf(topic ?? "").find((x) => x.name === subName);
           if (!info) throw new EngineError("not_found", `not found: ${kind} \`${id}\``);
           const c: EntityCounts | null = "counts" in info ? info.counts : null;
           return {
@@ -641,7 +683,8 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
           `Listing the rules of ${id} failed`,
           started,
           () => {
-            if (!fx.subscriptions[topic]?.some((x) => x.name === sub) && !FORBIDDEN_KNOWN.some((k) => k.entity === topic && k.subscription === sub))
+            if (ns.rules.has(id)) return structuredClone(ns.rules.get(id)!);
+            if (!subsOf(topic).some((x) => x.name === sub) && !FORBIDDEN_KNOWN.some((k) => k.entity === topic && k.subscription === sub))
               throw new EngineError("not_found", `not found: subscription \`${id}\``);
             const defaultOnly: RuleInfo[] = [{ name: "$Default", filter: { kind: "sql", expression: "1=1" }, action: null, created_at: null }];
             return structuredClone(fx.rules[id] ?? defaultOnly);
@@ -708,7 +751,7 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
           const rows: DashboardRow[] = [
             ...listedQueues().map((q) => ({ kind: "queue" as const, id: q.name, name: q.name, topic: null, status: q.status, counts: q.counts })),
             ...listedTopics().flatMap((t) =>
-              (fx.subscriptions[t.name] ?? []).map((s) => ({
+              subsOf(t.name).map((s) => ({
                 kind: "subscription" as const, id: `${s.topic}/subscriptions/${s.name}`, name: s.name, topic: s.topic, status: s.status, counts: s.counts,
               })),
             ),
@@ -914,8 +957,10 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
         return null;
       default: {
         const r = operate.handle(cmd, args);
-        if (r === UNHANDLED) throw new EngineError("unknown", `mock: unknown command ${cmd}`);
-        return r;
+        if (r !== UNHANDLED) return r;
+        const m = manage.handle(cmd, args);
+        if (m === UNHANDLED) throw new EngineError("unknown", `mock: unknown command ${cmd}`);
+        return m;
       }
     }
   }

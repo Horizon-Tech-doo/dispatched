@@ -29,7 +29,14 @@ export function nextStep(kind: string): string {
 
 /** The right a job kind needs when the engine does not name it. */
 export const rightFor = (kind: JobKind | "count"): Right =>
-  kind === "send" || kind === "import" ? "Send" : kind === "purge" || kind === "session-state" ? "Manage" : "Listen";
+  kind === "send" || kind === "import"
+    ? "Send"
+    : kind === "purge" || kind === "session-state" || MANAGE.has(kind)
+      ? "Manage"
+      : "Listen";
+
+/** Job kinds that change entities: they need Manage. */
+const MANAGE = new Set<JobKind | "count">(["create-entities", "update-entities", "delete-entities", "duplicate", "rename", "import-entities"]);
 
 /** Cause and next step for an operate failure: a missing right in the connection's own sign-in terms, else the kind's step. */
 export function adviceFor(kind: string, message: string, fallback: Right, auth: AuthKind): string {

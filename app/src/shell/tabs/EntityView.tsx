@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { Button, CountBadge, EmptyState, SkeletonRows, Tabs, TabsContent, TabsList, TabsTrigger } from "@/ui";
 import { useShell } from "../context";
+import { ListenerView } from "../listener/ListenerView";
 import { MessagesView } from "../messages/MessagesView";
 import { OverviewView } from "../overview/OverviewView";
 import { RulesView } from "../rules/RulesView";
@@ -11,7 +12,7 @@ import { countPlaceholderCh, countsKey, recallCounts, rememberCounts, splitSubsc
 const KIND_LINE = { queue: "Queue", topic: "Topic", subscription: "Subscription" } as const;
 
 /** One sub-tab's content. Message views load on their own; only the entity's own facts wait for its info. */
-function SubTabBody({ tab, def, info }: { tab: EntityTab; def: SubTabDef; info: EntityInfo }) {
+function SubTabBody({ tab, def, info, active }: { tab: EntityTab; def: SubTabDef; info: EntityInfo; active: boolean }) {
   const view = viewOf(def.id);
   if (view) return <MessagesView tab={tab} view={view} counts={info.counts} requiresSession={info.facts.includes("sessions")} />;
   if (def.id === "overview") return <OverviewView tab={tab} />;
@@ -19,8 +20,9 @@ function SubTabBody({ tab, def, info }: { tab: EntityTab; def: SubTabDef; info: 
   // Whether the entity uses sessions comes with its listing: wait for it rather than list sessions of an entity without.
   if (def.id === "sessions")
     return info.status === "loading" ? <SkeletonRows rows={6} /> : <SessionsView tab={tab} requiresSession={info.status === "found" ? info.facts.includes("sessions") : null} />;
-  if (def.id === "listener")
-    return <EmptyState title="Listener isn't available yet" body="Live receive, with auto-complete and message rates, comes with the operate features." />;
+  // Shown afresh on every visit, so its mode starts at Watch again (a removing mode is never remembered); a running
+  // listener is found again through its tab.
+  if (def.id === "listener") return <ListenerView key={active ? "shown" : "hidden"} tab={tab} requiresSession={info.facts.includes("sessions")} />;
   return info.status === "loading" ? <SkeletonRows rows={6} /> : <EmptyState title={`${def.label} isn't available yet`} body={def.description} />;
 }
 
@@ -78,8 +80,8 @@ export function EntityView({ tab }: { tab: EntityTab }) {
           })}
         </TabsList>
         {defs.map((d) => (
-          <TabsContent key={d.id} value={d.id} className={viewOf(d.id) || ["overview", "sessions", "rules"].includes(d.id) ? "overflow-hidden" : "overflow-y-auto"}>
-            <SubTabBody tab={tab} def={d} info={info} />
+          <TabsContent key={d.id} value={d.id} className={viewOf(d.id) || ["overview", "sessions", "rules", "listener"].includes(d.id) ? "overflow-hidden" : "overflow-y-auto"}>
+            <SubTabBody tab={tab} def={d} info={info} active={d.id === active} />
           </TabsContent>
         ))}
       </Tabs>

@@ -42,6 +42,81 @@ pub enum Done {
     Plain(String),
 }
 
+/// A listener that removes messages stops itself at this many held messages…
+pub const HELD_MAX_MESSAGES: usize = 10_000;
+/// …or at this many bytes of held bodies.
+pub const HELD_MAX_BYTES: u64 = 256 * 1024 * 1024;
+
+/// The messages a removing listener took, in arrival order: the report keeps them, and
+/// "Send again" reads them. Past either cap the listener is stopped, never a message dropped.
+pub struct Held {
+    inner: Mutex<(Vec<PeekedMessage>, u64)>,
+    max_messages: usize,
+    max_bytes: u64,
+}
+
+impl Default for Held {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Held {
+    pub fn new() -> Self {
+        Self::with_caps(HELD_MAX_MESSAGES, HELD_MAX_BYTES)
+    }
+
+    pub fn with_caps(max_messages: usize, max_bytes: u64) -> Self {
+        Self {
+            inner: Mutex::default(),
+            max_messages,
+            max_bytes,
+        }
+    }
+
+    /// Keep `m`; the note to stop with when this one reached a cap.
+    fn push(&self, m: PeekedMessage, bytes: u64) -> Option<String> {
+        let mut g = self.inner.lock().unwrap();
+        let was_full = g.0.len() >= self.max_messages || g.1 >= self.max_bytes;
+        g.0.push(m);
+        g.1 = g.1.saturating_add(bytes);
+        if was_full {
+            return None;
+        }
+        if g.0.len() >= self.max_messages {
+            Some(format!(
+                "Stopped at {} held messages: save the report, then start again.",
+                dispatched_core::safety::count_text(self.max_messages as u64)
+            ))
+        } else if g.1 >= self.max_bytes {
+            Some(format!(
+                "Stopped at {} MiB of held messages: save the report, then start again.",
+                self.max_bytes / (1024 * 1024)
+            ))
+        } else {
+            None
+        }
+    }
+
+    /// The held messages, taken out.
+    pub fn take(&self) -> Vec<PeekedMessage> {
+        std::mem::take(&mut self.inner.lock().unwrap().0)
+    }
+
+    /// The held message with sequence number `seq`.
+    pub fn find(&self, seq: i64) -> Option<PeekedMessage> {
+        self.inner
+            .lock()
+            .unwrap()
+            .0
+            .iter()
+            .find(|m| m.sequence_number == seq)
+            .cloned()
+    }
+}
+
+type StopFn = Box<dyn Fn(String) + Send + Sync>;
+
 /// Forwards core job events to the webview as desktop job events, keeping the items so a job
 /// that ends in an error still has a report of what it did.
 pub struct ProgressBridge {
@@ -49,6 +124,8 @@ pub struct ProgressBridge {
     events: Arc<dyn Events>,
     items: Mutex<Vec<ItemResult>>,
     notes: Mutex<Vec<String>>,
+    /// A removing listener's held messages, and how to stop it at a cap.
+    held: Mutex<Option<(Arc<Held>, StopFn)>>,
 }
 
 impl ProgressBridge {
@@ -58,7 +135,24 @@ impl ProgressBridge {
             events,
             items: Mutex::default(),
             notes: Mutex::default(),
+            held: Mutex::default(),
         }
+    }
+
+    /// The job id.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Hold every received message in `held`; at a cap, note why and call `stop`.
+    pub fn hold(&self, held: Arc<Held>, stop: StopFn) {
+        *self.held.lock().unwrap() = Some((held, stop));
+    }
+
+    /// The messages this bridge holds, if it holds them.
+    #[cfg(test)]
+    pub fn held(&self) -> Option<Arc<Held>> {
+        self.held.lock().unwrap().as_ref().map(|(h, _)| h.clone())
     }
 
     /// The report of a job that ended early: what reached the bridge.
@@ -110,10 +204,31 @@ impl Progress for ProgressBridge {
                     item: Box::new(ItemView::from(i)),
                 }
             }
-            CoreEvent::Received(m) => JobEvent::Received {
-                id,
-                message: Box::new(MessageSummary::from(&**m).into()),
-            },
+            CoreEvent::Received(m) => {
+                let summary = MessageSummary::from(&**m);
+                let bytes = summary.body_size as u64;
+                let out = JobEvent::Received {
+                    id: id.clone(),
+                    message: Box::new(summary.into()),
+                };
+                let stop = {
+                    let g = self.held.lock().unwrap();
+                    g.as_ref().and_then(|(h, _)| h.push((**m).clone(), bytes))
+                };
+                if let Some(note) = stop {
+                    self.events.job(out);
+                    self.notes.lock().unwrap().push(note.clone());
+                    self.events.job(JobEvent::Note {
+                        id,
+                        text: note.clone(),
+                    });
+                    if let Some((_, f)) = self.held.lock().unwrap().as_ref() {
+                        f(note);
+                    }
+                    return;
+                }
+                out
+            }
             CoreEvent::Note(text) => {
                 self.notes.lock().unwrap().push(text.clone());
                 JobEvent::Note {
@@ -200,7 +315,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn finish(
+pub(crate) fn finish(
     jobs: &Jobs,
     ev: &dyn Events,
     id: &str,
@@ -227,10 +342,17 @@ fn finish(
         Ok(Done::Report(report, messages)) => {
             jobs.finish(id, None);
             let line = report.summary_line();
-            // A cancelled run ends with a report, not an error: say how it ended all the same.
-            let error = (report.cancelled && cancel.is_cancelled()).then(|| ActivityError {
+            // A cancelled run ends with a report, not an error: say how it ended all the same. A
+            // listener's normal end is the user's stop, so it is cancelled without being an error
+            // unless it stopped itself or its connection closed.
+            let listener = kind == JobTag::Core(JobKind::Listen);
+            let stopped = cancel.is_cancelled()
+                && (report.cancelled
+                    || jobs.stop_reason(id).is_some()
+                    || (listener && jobs.stopped_by_close(id)));
+            let error = stopped.then(|| ActivityError {
                 kind: stop_kind(jobs, id).into(),
-                message: stop_message(jobs, id).into(),
+                message: stop_message(jobs, id),
             });
             let stored = Arc::new(StoredReport { report, messages });
             jobs.set_report(id, stored.clone());
@@ -273,20 +395,23 @@ fn finish(
     }
 }
 
-/// How a job that was asked to stop ended: by the user, or because its connection closed.
+/// How a job that was asked to stop ended: by the user, by itself (a reason), or because its
+/// connection closed.
 fn stop_kind(jobs: &Jobs, id: &str) -> &'static str {
-    if jobs.stopped_by_close(id) {
+    if jobs.stopped_by_close(id) || jobs.stop_reason(id).is_some() {
         "stopped"
     } else {
         "cancelled"
     }
 }
 
-fn stop_message(jobs: &Jobs, id: &str) -> &'static str {
-    if jobs.stopped_by_close(id) {
-        "Stopped: the connection closed."
+fn stop_message(jobs: &Jobs, id: &str) -> String {
+    if let Some(r) = jobs.stop_reason(id) {
+        r
+    } else if jobs.stopped_by_close(id) {
+        "Stopped: the connection closed.".into()
     } else {
-        "Cancelled."
+        "Cancelled.".into()
     }
 }
 
@@ -296,7 +421,7 @@ fn opened_files(jobs: &Jobs, pick: &str) -> Result<Vec<PathBuf>, CommandError> {
         .ok_or_else(|| CommandError::new("invalid", "Choose the file again."))
 }
 
-fn report(r: dispatched_core::Result<JobReport>) -> dispatched_core::Result<Done> {
+pub(crate) fn report(r: dispatched_core::Result<JobReport>) -> dispatched_core::Result<Done> {
     r.map(|r| Done::Report(r, Vec::new()))
 }
 
@@ -767,6 +892,21 @@ pub fn save_report(
     stored
         .report
         .write_with_messages(&path, format, true, &stored.messages)?;
+    // A listener's held messages (up to 256 MiB each) are on disk now: they leave memory, so restarting a listener
+    // after its report was saved does not pile them up.
+    if stored.report.kind == JobKind::Listen && !stored.messages.is_empty() {
+        let mut report = stored.report.clone();
+        report
+            .notes
+            .push("The removed messages were saved to the report file and released.".into());
+        jobs.set_report(
+            id,
+            Arc::new(StoredReport {
+                report,
+                messages: Vec::new(),
+            }),
+        );
+    }
     Ok(path.display().to_string())
 }
 

@@ -1,6 +1,7 @@
+import { useQuery } from "@tanstack/react-query";
 import { Columns3, Copy, SendHorizontal, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { useMessageDetail, type MessageDetail, type PeekView } from "@/engine";
+import { commands, useMessageDetail, type MessageDetail, type PeekView } from "@/engine";
 import {
   BodyState, Button, CodeView, EmptyState, HexView, Hint, IconButton, Segmented, SkeletonRows, Tabs, TabsContent, TabsList, TabsTrigger,
   formatBody, formatBytes,
@@ -243,6 +244,8 @@ export function DetailPane(p: {
   onPeekAgain?(): void;
   /** Clone & resend: the composer, seeded from this message. */
   onClone?(d: MessageDetail): void;
+  /** Read the message from this job's held messages (a listener that removed it), not from the entity. */
+  jobId?: string | null;
 }) {
   // Holding an arrow key walks the grid faster than messages can be read: the pane waits for the focus to rest.
   const [debounced, setDebounced] = useState(p.sequence);
@@ -251,7 +254,14 @@ export function DetailPane(p: {
     return () => clearTimeout(t);
   }, [p.sequence]);
   const settled = debounced === p.sequence;
-  const q = useMessageDetail(p.profileId, p.entity, p.view, debounced, p.sessionId ?? null);
+  const fromEntity = useMessageDetail(p.profileId, p.entity, p.view, p.jobId ? null : debounced, p.sessionId ?? null);
+  const fromJob = useQuery({
+    queryKey: ["job-message", p.jobId, debounced],
+    queryFn: () => commands.jobMessage(p.jobId!, String(debounced)),
+    enabled: !!p.jobId && debounced !== null,
+    staleTime: Infinity,
+  });
+  const q = p.jobId ? fromJob : fromEntity;
   const d = settled ? q.data : undefined;
   const label = VIEW_LABEL[p.view];
   const [tab, setTab] = useState("body");

@@ -1,7 +1,7 @@
-import { CircleAlert } from "lucide-react";
+import { CircleAlert, MoreHorizontal } from "lucide-react";
 import { Fragment, type ReactNode } from "react";
 import { useRules, type RuleFilter, type RuleInfo } from "@/engine";
-import { Button, EmptyState, RuleGlyph, SkeletonRows } from "@/ui";
+import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger, EmptyState, IconButton, RuleGlyph, SkeletonRows } from "@/ui";
 import { accessAdvice, isForbidden, rightsOf, useAuthKind } from "../access";
 import { useShell } from "../context";
 import type { EntityTab } from "../state";
@@ -29,6 +29,7 @@ const matchesNothing = (f: Correlation) => correlationFields(f).length === 0 && 
 
 export function ruleKind(f: RuleFilter): string {
   if (f.kind === "unknown") return "Unknown filter";
+  if (f.kind === "true") return "Matches every message (default rule)";
   if (f.kind === "correlation") return matchesNothing(f) ? "Matches no message" : "Correlation filter";
   if (norm(f.expression) === "1=1") return "Matches every message";
   if (norm(f.expression) === "1=0") return "Matches no message";
@@ -96,13 +97,31 @@ function Body({ f, action }: { f: RuleFilter; action: string | null }) {
   );
 }
 
-function Rule({ r }: { r: RuleInfo }) {
+/** The SQL a rule's filter amounts to, for copying; null for a correlation or unknown filter. */
+const filterText = (f: RuleFilter) => (f.kind === "sql" ? f.expression : f.kind === "true" ? "1=1" : null);
+
+function Rule({ r, entity, last }: { r: RuleInfo; entity: string; last: boolean }) {
+  const { openSheet, copyText } = useShell();
+  const sql = filterText(r.filter);
   return (
     <li aria-label={r.name} className="flex flex-col gap-1.5 border-b border-line px-3.5 py-2.5">
       <div className="flex items-baseline gap-2">
         <RuleGlyph aria-hidden="true" className="size-3.5 self-center text-icon" />
         <span className="text-12 font-semibold">{r.name}</span>
         <span className="text-11 text-muted">{ruleKind(r.filter)}</span>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <IconButton label={`Actions for rule ${r.name}`} className="ml-auto self-center">
+              <MoreHorizontal aria-hidden="true" />
+            </IconButton>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem onSelect={() => openSheet({ kind: "operation", op: "rule-save", entity, rule: r })}>Edit…</DropdownMenuItem>
+            {sql !== null && <DropdownMenuItem onSelect={() => void copyText(sql, `Copied the filter of ${r.name}`)}>Copy filter</DropdownMenuItem>}
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => openSheet({ kind: "operation", op: "rule-remove", entity, name: r.name, last })}>Remove…</DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
       <Body f={r.filter} action={r.action} />
     </li>
@@ -132,15 +151,21 @@ export function RulesView({ tab }: { tab: EntityTab }) {
       />
     );
   }
-  if (q.data.length === 0) return <EmptyState title="No rules" body="A subscription without rules receives no messages." />;
+  const add = <Button onClick={() => openSheet({ kind: "operation", op: "rule-save", entity: tab.id, rule: null })}>Add rule…</Button>;
+  if (q.data.length === 0) return <EmptyState title="No rules" body="A subscription without rules receives no messages." action={add} />;
   return (
-    <div className="h-full overflow-y-auto" data-shot-scroller>
-      <ul aria-label="Rules" className="m-0 list-none p-0">
-        {q.data.map((r) => (
-          <Rule key={r.name} r={r} />
-        ))}
-      </ul>
-      <p className="m-0 px-3.5 py-2 text-11 text-muted">Rules are read-only here.</p>
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex h-9 shrink-0 items-center gap-2 border-b border-line px-3.5">
+        {add}
+        <span className="text-11 text-muted">A message reaches this subscription when any rule's filter matches it.</span>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto" data-shot-scroller>
+        <ul aria-label="Rules" className="m-0 list-none p-0">
+          {q.data.map((r) => (
+            <Rule key={r.name} r={r} entity={tab.id} last={q.data.length === 1} />
+          ))}
+        </ul>
+      </div>
     </div>
   );
 }

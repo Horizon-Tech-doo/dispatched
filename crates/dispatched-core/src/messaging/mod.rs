@@ -38,7 +38,7 @@ pub(crate) use message::{simple_to_prop, test_message};
 pub use outgoing::{
     BodySource, CloneOptions, Cloned, Edits, MessageIdSource, OutgoingBody, OutgoingMessage,
 };
-pub use props::{PropType, TypedValue, parse_duration, parse_prop_arg, parse_when};
+pub use props::{PropType, TypedValue, duration_text, parse_duration, parse_prop_arg, parse_when};
 pub use receiver::{
     LockToken, ReceiveMode, ReceivedMessage, ReceiverSpec, SessionChoice, Settlement,
     lock_token_from_tag,

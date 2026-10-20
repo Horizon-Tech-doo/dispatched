@@ -1,3 +1,4 @@
+import { PoliciesSection } from "../manage/PoliciesSection";
 import { Check, Copy, KeyRound } from "lucide-react";
 import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useEntityDetails, useProfiles, useSubscriptionsFor, type EntityCounts, type EntityDetails, type SubscriptionInfo } from "@/engine";
@@ -201,7 +202,7 @@ function SubscriptionsTable({ topic, profileId }: { topic: string; profileId: st
   );
 }
 
-function PropertiesSection({ d, hasCounts, fresh, maxMb }: { d: EntityDetails; hasCounts: boolean; fresh: boolean; maxMb: number | null }) {
+function PropertiesSection({ d, hasCounts, fresh, maxMb, onEdit, onStatus }: { d: EntityDetails; hasCounts: boolean; fresh: boolean; maxMb: number | null; onEdit?: () => void; onStatus?: () => void }) {
   const [state, flash] = useFlash();
   const copyJson = () => {
     if (!navigator.clipboard) return flash("failed");
@@ -219,6 +220,16 @@ function PropertiesSection({ d, hasCounts, fresh, maxMb }: { d: EntityDetails; h
           <Copy aria-hidden="true" className="text-icon" />
           Copy JSON
         </Button>
+        {onStatus && (
+          <Button variant="quiet" size="sm" className="h-5 text-muted" onClick={onStatus}>
+            Change status…
+          </Button>
+        )}
+        {onEdit && (
+          <Button variant="quiet" size="sm" className="h-5 text-muted" onClick={onEdit}>
+            Edit settings…
+          </Button>
+        )}
       </div>
       {!fresh && <Problem className="mb-2" title="Couldn't refresh the details" body="Showing the last details read." />}
       {d.status && (
@@ -336,10 +347,18 @@ export function OverviewView({ tab }: { tab: EntityTab }) {
           {kind !== "topic" && <Address label="Dead-letter URL" copyLabel="Copy dead-letter URL" value={dlq} said={`Copied the dead-letter URL for ${displayName(tab.id)}`} />}
           <ConnectionStringCopy entity={tab.id} eligible={eligible} entra={entra} />
         </section>
+        {kind !== "subscription" && <PoliciesSection kind={kind} entity={tab.id} />}
       </div>
       <div className="flex min-w-[320px] max-w-[680px] flex-1 flex-col">
         {isTopic && <SubscriptionsTable topic={tab.id} profileId={conn.profileId} />}
-        <PropertiesSection d={d} hasCounts={c !== null} fresh={!q.isError || showCounts} maxMb={maxMb} />
+        <PropertiesSection
+          d={d}
+          hasCounts={c !== null}
+          fresh={!q.isError || showCounts}
+          maxMb={maxMb}
+          onEdit={conn.profileId ? () => openSheet({ kind: "operation", op: "entity-edit", entityKind: kind, entity: tab.id }) : undefined}
+          onStatus={conn.profileId ? () => openSheet({ kind: "operation", op: "entity-status", target: { kind, entity: tab.id } }) : undefined}
+        />
       </div>
     </div>
   );

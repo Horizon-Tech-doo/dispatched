@@ -6,6 +6,8 @@ import type { Job } from "../drawer/activity";
 export const PAST: Record<JobKind, string> = {
   export: "written", send: "sent", import: "imported", "cancel-scheduled": "unscheduled", receive: "received", "settle-deferred": "settled",
   delete: "deleted", move: "moved", resubmit: "resubmitted", purge: "removed", "session-state": "changed",
+  "create-entities": "created", "update-entities": "updated", "delete-entities": "deleted", duplicate: "duplicated", rename: "renamed",
+  "import-entities": "imported", listen: "received",
 };
 
 /** The confirm button: the core's verb, naming the entity this confirmation is about (`Delete from orders`, then for a
@@ -35,6 +37,9 @@ export function confirmLabel(verb: string, target: string, step: number): string
     case "defer":
     case "dead-letter":
       return `${verb[0].toUpperCase()}${verb.slice(1)} in ${target}`;
+    case "listen-complete":
+    case "listen-delete":
+      return `Start listening to ${target}`;
     case "set-session-state":
       return `Replace state in ${target}`;
     case "clear-session-state":
@@ -101,6 +106,8 @@ export function failedTitle(kind: JobKind): string {
   const name: Record<JobKind, string> = {
     export: "Export", send: "Send", import: "Import", "cancel-scheduled": "Unschedule", receive: "Receive", "settle-deferred": "Settle",
     delete: "Delete", move: "Move", resubmit: "Resubmit", purge: "Purge", "session-state": "Session state change",
+    "create-entities": "Create", "update-entities": "Change", "delete-entities": "Delete", duplicate: "Duplicate", rename: "Rename",
+    "import-entities": "Import", listen: "Listener",
   };
   return `${name[kind]} failed`;
 }

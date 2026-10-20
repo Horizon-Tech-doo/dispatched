@@ -89,10 +89,10 @@ Run the gate's steps 1 to 12 by hand with the CLI on a Standard and on a Premium
 
 ## Follow-ups
 
-- M3b: the desktop screens for every manage operation, the listener UI (rolling grid, rate chart, save or resubmit from it), the forwarding-target picker, and `RuleFilter::True` in `RulesView.tsx` (it renders `$Default` as an unknown kind today).
+- ~~M3b: the desktop screens for every manage operation, the listener UI (rolling grid, rate chart, save or resubmit from it), the forwarding-target picker, and `RuleFilter::True` in `RulesView.tsx`.~~ Done in M3b (`docs/live-verification-m3b.md`).
 - Final review: `ops/receive.rs`'s cancel path takes buffered messages back before the close, which resets the shortfall to 0, so a failed close could under-report its "may have been removed" note (the listener avoids this; see §16 Decision 21).
 - A SqlFilter's `Parameters` and `CompatibilityLevel` are not written back, so a rule update drops a parametrised filter's parameters.
 - Entities that forward to a renamed entity are not updated; the rename could list them.
 - The listener does not reconnect; a long-running listen ends on a dropped connection.
-- Single-subscription GET is now in core (`get_subscription`); the desktop can use it in M3b.
+- ~~Single-subscription GET is now in core (`get_subscription`); the desktop can use it in M3b.~~ Used by the M3b edit form.
 - MCP tools for manage and listen: M4.

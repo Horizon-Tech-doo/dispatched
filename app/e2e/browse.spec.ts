@@ -211,13 +211,15 @@ test("sessions: the Peek messages button peeks the selected session", async ({ p
   await expect(page.getByRole("button", { name: "Remove session RMA-1004" })).toBeVisible();
 });
 
-test("rules are read-only", async ({ page }) => {
+test("rules: listed with their filters, and added, edited and removed through sheets", async ({ page }) => {
   await open(page, "default", TRACKING, "subscription", "rules");
   const rule = page.getByRole("listitem", { name: "eu-only" });
   await expect(rule).toContainText("SET priority = 'high'");
   await expect(page.getByRole("listitem", { name: "priority" })).toContainText("batch-7");
-  await expect(page.getByText("Rules are read-only here.")).toBeVisible();
-  await expect(page.getByRole("button", { name: /Edit|Delete|Add rule|Remove/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Add rule…" })).toBeVisible();
+  await rule.getByRole("button", { name: "Actions for rule eu-only" }).click();
+  await page.getByRole("menuitem", { name: "Edit…" }).click();
+  await expect(page.getByRole("dialog", { name: "Edit rule eu-only" }).getByRole("textbox", { name: "SQL filter" })).toHaveValue(/region = 'eu'/);
 });
 
 test("overview: counts, copying addresses, and a connection string that is never shown", async ({ page, browserName }) => {

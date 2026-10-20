@@ -261,6 +261,10 @@ enum Effect {
         subscription: EntityRef,
         rule: String,
     },
+    UpdateRule {
+        subscription: EntityRef,
+        rule: String,
+    },
     AddPolicy {
         entity: EntityRef,
         name: String,
@@ -624,6 +628,17 @@ impl Operation {
         )
     }
 
+    /// Replace the filter and action of rule `rule` of a subscription.
+    pub fn update_rule(subscription: &EntityRef, rule: &str) -> Self {
+        Self::entity_change(
+            subscription,
+            Effect::UpdateRule {
+                subscription: subscription.clone(),
+                rule: rule.to_string(),
+            },
+        )
+    }
+
     /// Remove rule `rule` from a subscription.
     pub fn remove_rule(subscription: &EntityRef, rule: &str) -> Self {
         Self::entity_change(
@@ -742,6 +757,7 @@ impl Operation {
             Effect::Rename { .. } => "rename",
             Effect::AddRule { .. } => "add-rule",
             Effect::RemoveRule { .. } => "remove-rule",
+            Effect::UpdateRule { .. } => "update-rule",
             Effect::AddPolicy { .. } => "add-policy",
             Effect::RemovePolicy { .. } => "remove-policy",
             Effect::RegenerateKey { .. } => "regenerate-key",
@@ -911,6 +927,9 @@ impl Operation {
             Effect::RemoveRule { subscription, rule } => {
                 format!("Remove rule {rule} from {} on {on}", subscription.path())
             }
+            Effect::UpdateRule { subscription, rule } => {
+                format!("Update rule {rule} of {} on {on}", subscription.path())
+            }
             Effect::AddPolicy {
                 entity,
                 name,
@@ -978,9 +997,9 @@ impl Operation {
             | Effect::AddPolicy { entity, .. }
             | Effect::RemovePolicy { entity, .. }
             | Effect::RegenerateKey { entity, .. } => Some(vec![entity]),
-            Effect::AddRule { subscription, .. } | Effect::RemoveRule { subscription, .. } => {
-                Some(vec![subscription])
-            }
+            Effect::AddRule { subscription, .. }
+            | Effect::RemoveRule { subscription, .. }
+            | Effect::UpdateRule { subscription, .. } => Some(vec![subscription]),
             Effect::DeleteEntities { targets } => Some(targets.iter().map(|t| &t.entity).collect()),
             Effect::Duplicate { to, .. } => Some(vec![to]),
             Effect::Rename { from, to } => Some(vec![from, to]),
@@ -1688,6 +1707,11 @@ mod tests {
             (
                 Operation::remove_rule(&sub, "eu"),
                 "Remove rule eu from events/Subscriptions/billing on dev",
+                vec!["events/Subscriptions/billing"],
+            ),
+            (
+                Operation::update_rule(&sub, "eu"),
+                "Update rule eu of events/Subscriptions/billing on dev",
                 vec!["events/Subscriptions/billing"],
             ),
             (

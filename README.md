@@ -127,6 +127,17 @@ Operating on messages works as in the CLI, through the same safety gate and the 
 - Every change is confirmed in the sheet that started it, with the exact effect. On a production profile, you type each entity's name, including a move's target. The Delete key opens a confirmation and never deletes directly. Receive-and-delete is never pre-selected.
 - Each operation runs as a job in the Jobs drawer, with progress, cancel and a per-message report you can save. The Activity tab shows the shared `activity.db`, including changes made by the CLI, and refreshes the views those changes touched.
 
+Managing entities works as in the CLI, through the same gate and activity log. Each change is confirmed in its sheet, and on production you type every entity's name:
+
+- **Create** a queue, topic or subscription (from the palette, the tree's menu, or a topic's tab), with every setting the service has. A subscription can start with a SQL or correlation rule instead of the default one. Durations are typed as `45s`, `5m`, `1h30m` or `14d`, with **Never** where the service allows it. Forwarding targets are picked from the namespace.
+- **Edit settings** from the Overview or the palette. Only the settings you change are sent, and they are applied to the entity as it is when the change runs, so changes someone else made meanwhile are kept. Settings fixed at creation are shown read-only.
+- **Change status**, **Duplicate** (settings, not messages), **Rename** (refused while the entity holds messages; the open tab follows the new name) and **Delete**, one entity or the Dashboard's selection.
+- **Rules** on a subscription's Rules tab: add, edit (filter and action) and remove. A correlation filter that would match no message is pointed out before anything is sent.
+- **Shared access policies** on a queue's or topic's Overview: add with rights, remove, regenerate a key, and copy a key or connection string. Keys go straight to the clipboard from the engine and are never shown.
+- **ServiceBusExplorer XML**: export the namespace or chosen entities (keys only on request, owner-only file), and import a file after a preview of what it holds, optionally replacing existing entities.
+
+The **Listener** tab streams new messages of a queue or subscription: **Watch** shows them and leaves them, while **Receive and complete** and **Receive and delete** remove them (confirmed first) and keep every removed message for the report and for **Send again**. It shows a rolling grid of the newest 1,000 messages and messages and bytes per second over the last minute. It runs until you stop it or close the tab. A removing listener stops itself at 10,000 held messages or 256 MiB, so nothing it removed is lost.
+
 ## Develop
 
 - Clone `horizon-azure-kit` next to this repo (shared Entra / keychain / ARM code).

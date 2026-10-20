@@ -17,6 +17,10 @@ struct Entry {
     stopped_by_close: bool,
     /// An operate job's report, once it finished.
     report: Option<std::sync::Arc<crate::ops::operate::StoredReport>>,
+    /// Why the job stopped itself (a listener at its held cap), said when it finishes.
+    stop_reason: Option<String>,
+    /// The messages a running listener holds, for `job_message`.
+    held: Option<std::sync::Arc<crate::ops::operate::Held>>,
 }
 
 #[derive(Default)]
@@ -35,6 +39,16 @@ pub struct Jobs {
     /// Files the native open dialog returned, by one-time pick id: bodies, templates and import
     /// files are read only from these, never from a path the webview names.
     opened: Mutex<HashMap<String, (Vec<PathBuf>, Instant)>>,
+    /// Incumbent files read for an import, by preview id, with the profile they were read for
+    /// and when. Each imports once.
+    previews: Mutex<HashMap<String, PlannedImport>>,
+}
+
+/// An incumbent file read for an import, waiting for its confirmation.
+pub struct PlannedImport {
+    pub profile_id: String,
+    pub items: Vec<dispatched_core::mgmt::incumbent::ImportEntity>,
+    pub at: Instant,
 }
 
 /// Purge plans waiting to run.
@@ -160,6 +174,42 @@ impl Jobs {
         n
     }
 
+    /// Stop job `id` for `reason` (said when it finishes, as `stopped`).
+    pub fn stop_with(&self, id: &str, reason: &str) {
+        if let Some(e) = self.inner.lock().unwrap().get_mut(id) {
+            e.stop_reason = Some(reason.to_string());
+            if let Some(t) = &e.cancel {
+                t.cancel();
+            }
+        }
+        self.confirms.cancel_job(id);
+    }
+
+    /// Why job `id` stopped itself, if it did.
+    pub fn stop_reason(&self, id: &str) -> Option<String> {
+        self.inner
+            .lock()
+            .unwrap()
+            .get(id)
+            .and_then(|e| e.stop_reason.clone())
+    }
+
+    /// Keep the messages a running listener holds.
+    pub fn set_held(&self, id: &str, held: std::sync::Arc<crate::ops::operate::Held>) {
+        if let Some(e) = self.inner.lock().unwrap().get_mut(id) {
+            e.held = Some(held);
+        }
+    }
+
+    /// The messages a listener holds while it runs.
+    pub fn held(&self, id: &str) -> Option<std::sync::Arc<crate::ops::operate::Held>> {
+        self.inner
+            .lock()
+            .unwrap()
+            .get(id)
+            .and_then(|e| e.held.clone())
+    }
+
     /// Whether job `id` was stopped by its connection closing.
     pub fn stopped_by_close(&self, id: &str) -> bool {
         self.inner
@@ -198,6 +248,7 @@ impl Jobs {
         if let Some(e) = self.inner.lock().unwrap().get_mut(id) {
             e.cancel = None;
             e.output = output;
+            e.held = None;
         }
     }
 
@@ -236,6 +287,32 @@ impl Jobs {
     /// The plans of `id`, once, if still fresh.
     pub fn take_plan(&self, id: &str) -> Option<PlannedPurge> {
         let p = self.plans.lock().unwrap().remove(id)?;
+        (p.at.elapsed() <= PLAN_TTL).then_some(p)
+    }
+
+    /// Remember an import file's entities until it runs. Returns the preview id.
+    pub fn preview(
+        &self,
+        profile_id: &str,
+        items: Vec<dispatched_core::mgmt::incumbent::ImportEntity>,
+    ) -> String {
+        let id = format!("import-{}", uuid::Uuid::new_v4().simple());
+        let mut all = self.previews.lock().unwrap();
+        all.retain(|_, p| p.at.elapsed() <= PLAN_TTL);
+        all.insert(
+            id.clone(),
+            PlannedImport {
+                profile_id: profile_id.to_string(),
+                items,
+                at: Instant::now(),
+            },
+        );
+        id
+    }
+
+    /// The entities of preview `id`, once, if still fresh.
+    pub fn take_preview(&self, id: &str) -> Option<PlannedImport> {
+        let p = self.previews.lock().unwrap().remove(id)?;
         (p.at.elapsed() <= PLAN_TTL).then_some(p)
     }
 

@@ -61,6 +61,8 @@ interface ShellContextValue {
   copyConnectionString: (entity: string, opts?: { inline?: boolean }) => Promise<CopyResult>;
   notice: Notice;
   dismissNotice: () => void;
+  /** Says `n` in the status bar (what an action came to). */
+  say: (n: Exclude<Notice, null>) => void;
 }
 
 const ShellContext = createContext<ShellContextValue | null>(null);
@@ -166,7 +168,7 @@ export function ShellProvider({ children }: { children: ReactNode }) {
   return (
     <ShellContext.Provider
       value={{
-        prefs, setPrefs, conn, shell, dispatch, shellLoaded, shellProfileId, live, sheet,
+        prefs, setPrefs, conn, shell, dispatch, shellLoaded, shellProfileId, live, sheet, say: setNotice,
         // While an update installs, its sheet stays put: other sheets would hide the progress.
         openSheet: (s) => { if (!installStore.busy() || s.kind === "update") setSheet(s); },
         closeSheet: () => setSheet(null),

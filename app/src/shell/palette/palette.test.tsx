@@ -37,8 +37,8 @@ describe("buildCommands", () => {
     expect(c.openSheet).toHaveBeenCalledWith({ kind: "operation", op: "purge", entities: ["invoice-generate"] });
   });
 
-  it("a topic offers only sending and importing", () => {
-    const labels = buildCommands({ ...ctx(), activeTab: { id: "shipment-events", kind: "topic" } }).filter((x) => x.group === "This entity").map((x) => x.label);
+  it("a topic offers only sending and importing among message operations", () => {
+    const labels = buildCommands({ ...ctx(), activeTab: { id: "shipment-events", kind: "topic" } }).filter((x) => x.group === "This entity" && x.id.startsWith("op:")).map((x) => x.label);
     expect(labels.filter((l) => l.endsWith("…"))).toEqual(["Send messages to shipment-events…", "Import messages into shipment-events…"]);
   });
 

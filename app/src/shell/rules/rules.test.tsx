@@ -4,7 +4,7 @@ import { renderShell } from "../test-utils";
 import { ruleKind } from "./RulesView";
 
 describe("rules", () => {
-  it("shows SQL, default and correlation rules read-only", async () => {
+  it("shows SQL, default and correlation rules", async () => {
     renderShell("default", {
       last_profile: "p-logistics",
       "shell:p-logistics": { tabs: [{ id: "shipment-events/subscriptions/tracking-sync", kind: "subscription", subTab: "rules" }], activeTab: "shipment-events/subscriptions/tracking-sync", expanded: [], selected: null, layout: { treeSize: 18, drawerOpen: false, drawerSize: 18, drawerTab: "activity" } },
@@ -22,8 +22,6 @@ describe("rules", () => {
     expect(within(prio).getByText("tier")).toBeInTheDocument();
     expect(within(eu).getByText("Filter")).toBeInTheDocument();
     expect(within(eu).getByText("Action")).toBeInTheDocument();
-    expect(screen.getByText("Rules are read-only here.")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Edit|Delete|Add rule/ })).toBeNull();
   });
 
   it("flags a correlation filter that sets nothing and an unknown filter", async () => {

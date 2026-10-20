@@ -11,7 +11,7 @@ use serde::Serialize;
 pub const MAX_POLICIES: usize = 12;
 
 /// Which key of a policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum KeySlot {
     /// The primary key.

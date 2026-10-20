@@ -565,3 +565,37 @@ Decided while planning and building M3a, entity management and the listener in t
 
 27. The emulator gate `emulator_m3a` (in CI, with the other core gates) creates its own `m3a-{run}-…` entities and deletes them through a guard on every path. Where the emulator cannot do something it prints a `GATE-NOTE` and skips that assertion only: it drops `UserMetadata` and entity SAS policies, caps `DefaultMessageTimeToLive` at one hour, and answers 400 to a DELETE of a missing entity. Listing rules answers 500 only for the subscriptions of `Config.json`; for subscriptions created over the management API it works, so the gate checks the rule list and exports a topic.
 28. Parked: the desktop screens, the listener UI and the forwarding-target picker (M3b); `RuleFilter::True` in `RulesView.tsx` (M3b); MCP tools for manage and listen (M4); listener reconnect (v1.x).
+
+## 17. M3b decisions (2026-10-20)
+
+Decided while planning and building M3b, the desktop half of M3 (`docs/superpowers/plans/2026-10-20-m3b-desktop-manage.md`). The emulator results are in `docs/live-verification-m3b.md`.
+
+### Settings and the core
+
+1. "Only these settings change" lives in core as `SettingsChange`: every settable property as an option, with the rules for which kind has which setting, which are fixed at creation, and how a duplicate-detection window behaves on create and on update. The CLI's flags and the desktop's form both build one. The CLI keeps its flag-worded refusals by mapping fields to flags.
+2. `Operator::update_settings(entity, change)` reads the description inside the gate, after the confirmation, and applies only the given settings. A desktop edit therefore keeps what someone else changed meanwhile in the other settings. The CLI keeps its read-then-update path.
+3. `Operator::update_rule` replaces a rule's filter and action, read-modify-write, so the values of unchanged correlation properties keep their types (§16 Decision 5). New correlation properties are strings: the desktop has no type column, since the core's model holds values as text.
+4. Durations cross IPC as text: `duration_text` writes the shortest form `parse_duration` reads back (`1m30s`, `1d1h1m1s`; fractions of a second as `1.5s`; `max` for `TimeSpan.MaxValue`), and the form takes the same syntax with `max` / `never`.
+
+### Desktop manage
+
+5. Every manage change is an `op_*` job on M2b's `start_op`, so confirmations, items, reports and activity entries are the M2b ones. The commands are `op_entity_create`, `op_entity_update`, `op_entity_delete`, `op_entity_status`, `op_entity_copy` (duplicate, or with `rename`), `op_rule_save` (add, or with `update`), `op_rule_remove`, `op_policy_change` (add, remove, renew) and `op_entities_import`. Reads are `entity_settings`, `entity_policies`, and the local checks `check_settings` and `check_rule`.
+6. The edit form sends only the settings whose value differs from what it opened with. A cleared forwarding target or metadata is sent as `""`, which clears it. Status has its own sheet and is never part of an edit.
+7. Policy keys never cross IPC: `copy_policy_secret` reads the policy and Rust writes the key or connection string to the clipboard, as `copy_entity_connection_string` does. The policy views hold names and rights only.
+8. The XML export is a read (not gated, not logged): it writes through the Rust save dialog's pick, owner-only with keys. The import reads the file the Rust open dialog returned and refuses it whole before any confirmation. Its parsed entities wait under a preview id that runs once, on the same profile, within 10 minutes, like purge plans.
+9. A rename's tab follows the new name: the rename sheet registers the job, and when it succeeds the tab is retargeted, keeping its sub-tab. A deleted entity's tab shows the "wasn't found" state.
+10. A manage job's report lists entities, not messages: an Entity column and the core's entity summary ("Deleted 2 entities").
+
+### Desktop listener
+
+11. `op_listen` runs the core listener as a job. Each message arrives as a `received` event. The Listener tab keeps the newest 1,000 in its grid, and per-second counts of messages and bytes for the last minute.
+12. A removing listener (complete, delete) holds every message it removed, for the report, "Save report" and "Send again". At 10,000 held messages or 256 MiB it stops itself, with a note saying so, rather than drop one (`Jobs::stop_with`). Once its report is saved, the held messages leave memory (the report notes it), so a listener restarted after "save the report, then start again" does not pile them up; an unsaved report keeps them until the app quits. Watch holds nothing.
+13. A listener's normal end is the user's Stop: it finishes without an error. A self-stop at the cap, or a closed connection, ends it `stopped`.
+14. The listener belongs to its tab. Leaving the sub-tab keeps it running, and coming back finds it again, with the sub-queue and mode it was started with. A listener whose start returns after its tab went away is cancelled at once. Closing the tab stops it. The form starts at Watch on every visit: a removing mode is never remembered (§5).
+15. `job_message` reads a message from a job's held messages, by sequence number as text. The detail pane uses it for removed messages, and "Send again" seeds the composer's copy flow from it.
+
+### Process and scope
+
+16. The desktop gate `emulator_m3b` (in CI after `emulator_m2b`) runs the app's own manage and listener paths on a production-marked emulator profile. It covers create, update, status, duplicate, rename, a topic and subscription with rule add/update/remove, a policy add, export, bulk delete and import, and a watch and a complete listener with `job_message`, plus the activity entries of every gated step. Its entities are `m3b-{run}-…`, deleted by a guard on every path.
+17. The screen review of M3b was done against §6 from screenshots of the mock build in both themes, not with the impeccable skill, which was not available in the session. M4's impeccable audit of every screen covers it.
+18. Parked: typed correlation property values in the desktop; a Dashboard "Export selected"; listener reconnect (v1.x); MCP tools for manage and listen (M4).

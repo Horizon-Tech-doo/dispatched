@@ -77,6 +77,33 @@ export function operateCommands(
   ];
 }
 
+/** Creating entities, and changing the one a tab shows: "New queue…", "Edit settings of orders…". */
+export function manageCommands(
+  tab: { id: string; kind: EntityKind } | null,
+  c: Pick<PaletteContext, "openSheet">,
+): (Omit<PaletteCommand, "group"> & { group: "App" | "This entity" })[] {
+  const out: (Omit<PaletteCommand, "group"> & { group: "App" | "This entity" })[] = [
+    { id: "manage:new-queue", group: "App", label: "New queue…", keywords: ["create", "add"], glyph: "queue", run: () => c.openSheet({ kind: "operation", op: "entity-create", entityKind: "queue", topic: null }) },
+    { id: "manage:new-topic", group: "App", label: "New topic…", keywords: ["create", "add"], glyph: "topic", run: () => c.openSheet({ kind: "operation", op: "entity-create", entityKind: "topic", topic: null }) },
+    { id: "manage:export", group: "App", label: "Export entities (ServiceBusExplorer XML)…", keywords: ["xml", "backup", "migrate", "servicebusexplorer"], run: () => c.openSheet({ kind: "operation", op: "entities-export", entities: [] }) },
+    { id: "manage:import", group: "App", label: "Import entities from XML…", keywords: ["xml", "restore", "migrate", "servicebusexplorer"], run: () => c.openSheet({ kind: "operation", op: "entities-import" }) },
+  ];
+  if (!tab) return out;
+  const name = displayName(tab.id);
+  out.push({ id: "manage:export-one", group: "This entity", label: `Export ${name} as XML…`, keywords: ["xml", "backup", "servicebusexplorer"], run: () => c.openSheet({ kind: "operation", op: "entities-export", entities: [{ kind: tab.kind, entity: tab.id }] }) });
+  if (tab.kind === "topic")
+    out.push({ id: "manage:new-subscription", group: "This entity", label: `New subscription on ${name}…`, keywords: ["create", "add"], glyph: "subscription", run: () => c.openSheet({ kind: "operation", op: "entity-create", entityKind: "subscription", topic: tab.id }) });
+  out.push({ id: "manage:edit", group: "This entity", label: `Edit settings of ${name}…`, keywords: ["properties", "lock", "ttl", "forward", "configure"], run: () => c.openSheet({ kind: "operation", op: "entity-edit", entityKind: tab.kind, entity: tab.id }) });
+  const target = { kind: tab.kind, entity: tab.id };
+  out.push({ id: "manage:status", group: "This entity", label: `Change status of ${name}…`, keywords: ["disable", "enable", "active"], run: () => c.openSheet({ kind: "operation", op: "entity-status", target }) });
+  if (tab.kind !== "topic")
+    out.push({ id: "manage:duplicate", group: "This entity", label: `Duplicate ${name}…`, keywords: ["copy", "clone"], run: () => c.openSheet({ kind: "operation", op: "entity-duplicate", target }) });
+  if (tab.kind !== "subscription")
+    out.push({ id: "manage:rename", group: "This entity", label: `Rename ${name}…`, keywords: ["move"], run: () => c.openSheet({ kind: "operation", op: "entity-rename", target }) });
+  out.push({ id: "manage:delete", group: "This entity", label: `Delete ${name}…`, keywords: ["remove", "drop"], run: () => c.openSheet({ kind: "operation", op: "entity-delete", entities: [target] }) });
+  return out;
+}
+
 /** Whether an entity uses sessions, from what is loaded; null when not known. */
 export function requiresSession(c: Pick<PaletteContext, "listing" | "subs">, id: string): boolean | null {
   const q = c.listing?.queues.find((x) => x.name === id);
@@ -132,6 +159,7 @@ export function buildCommands(c: PaletteContext): PaletteCommand[] {
     if (!c.entra) out.push({ id: "entity:string", group: "This entity", label: `Copy connection string of ${displayName(tab.id)}`, keywords: ["key", "secret"], run: () => c.copyConnectionString(tab.id) });
     for (const o of operateCommands(tab, { ...c, sessions: requiresSession(c, tab.id) })) out.push({ ...o, group: "This entity" });
   }
+  if (c.activeProfileId !== null) for (const m of manageCommands(tab && c.activeProfileId !== null ? tab : null, c)) out.push(m);
   if (c.activeProfileId !== null)
     out.push({ id: "app:activity", group: "App", label: "Show activity", keywords: ["log", "audit", "history", "cli"], run: () => (c.showActivity ?? c.toggleDrawer)() });
   return out;
