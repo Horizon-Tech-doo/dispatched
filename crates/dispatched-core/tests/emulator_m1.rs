@@ -14,6 +14,12 @@ use std::time::Duration;
 
 const EMULATOR: &str = "Endpoint=sb://localhost;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;";
 
+/// The namespace the gate runs on: the emulator, or `DISPATCHED_GATE_CONNECTION_STRING` (a cloud
+/// test namespace; the string comes only from the environment and is never printed).
+fn gate_cs() -> String {
+    std::env::var("DISPATCHED_GATE_CONNECTION_STRING").unwrap_or_else(|_| EMULATOR.to_string())
+}
+
 fn enabled() -> bool {
     std::env::var("DISPATCHED_EMULATOR").as_deref() == Ok("1")
 }
@@ -42,7 +48,7 @@ async fn m1a_views_filters_export_counts() {
         return;
     }
     let ns =
-        Namespace::from_connection_string(&ConnectionString::parse(EMULATOR).unwrap()).unwrap();
+        Namespace::from_connection_string(&ConnectionString::parse(&gate_cs()).unwrap()).unwrap();
     let run = uuid::Uuid::new_v4().simple().to_string();
     let explorer = Explorer::new(ns.clone()).unwrap();
 
@@ -99,7 +105,9 @@ async fn m1a_views_filters_export_counts() {
 
     // Counts: exact deltas. Deferred messages count as active (Service Bus rule).
     let after = counts_of(&explorer).await;
-    assert!(after.approximate);
+    // The emulator has no management counts, so they are counted by peeking; a cloud namespace
+    // reports them exactly.
+    assert_eq!(after.approximate, gate_cs() == EMULATOR, "{after:?}");
     assert_eq!(
         after.active - before.active,
         4,

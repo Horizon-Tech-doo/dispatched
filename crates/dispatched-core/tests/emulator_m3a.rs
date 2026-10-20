@@ -28,6 +28,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const EMULATOR: &str = "Endpoint=sb://localhost;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;";
+
+/// The namespace the gate runs on: the emulator, or `DISPATCHED_GATE_CONNECTION_STRING` (a cloud
+/// test namespace; the string comes only from the environment and is never printed).
+fn gate_cs() -> String {
+    std::env::var("DISPATCHED_GATE_CONNECTION_STRING").unwrap_or_else(|_| EMULATOR.to_string())
+}
 const IDLE: Duration = Duration::from_secs(1);
 
 fn enabled() -> bool {
@@ -179,15 +185,29 @@ async fn send_n(conn: &mut ServiceBusConnection, queue: &str, run: &str, tag: &s
 }
 
 async fn peek_all(explorer: &Explorer, queue: &str) -> Vec<dispatched_core::PeekedMessage> {
-    explorer
-        .peek(
-            &EntityPath::queue(queue),
-            PeekView::Active,
-            &PeekOptions::new(1_000).scan_limit(10_000),
-        )
-        .await
-        .unwrap()
-        .messages
+    // A queue just created over the management API takes a few seconds to appear on the AMQP
+    // side of a cloud namespace (the emulator has it at once): wait up to 30 s for it.
+    let mut tries = 0;
+    loop {
+        match explorer
+            .peek(
+                &EntityPath::queue(queue),
+                PeekView::Active,
+                &PeekOptions::new(1_000).scan_limit(10_000),
+            )
+            .await
+        {
+            Ok(p) => return p.messages,
+            Err(dispatched_core::Error::NotFound(_)) if tries < 30 => {
+                if tries == 0 {
+                    eprintln!("GATE-NOTE: {queue} is not on the AMQP side yet; waiting");
+                }
+                tries += 1;
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+            Err(e) => panic!("peek {queue}: {e:?}"),
+        }
+    }
 }
 
 /// Peek `queue` until it shows `want` messages or 10 s pass.
@@ -253,7 +273,7 @@ async fn m3a_manage() {
         return;
     }
     let ns =
-        Namespace::from_connection_string(&ConnectionString::parse(EMULATOR).unwrap()).unwrap();
+        Namespace::from_connection_string(&ConnectionString::parse(&gate_cs()).unwrap()).unwrap();
     let run = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
     eprintln!("m3a_manage run {run}");
     let cleanup = Cleanup {

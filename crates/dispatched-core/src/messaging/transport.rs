@@ -92,6 +92,7 @@ pub(crate) async fn open_connection(
     ns: &Namespace,
     container_id: String,
 ) -> Result<ConnectionHandle<()>> {
+    crate::tls::ensure_crypto_provider();
     let builder = Connection::builder()
         .container_id(container_id)
         .hostname(Some(ns.host()))

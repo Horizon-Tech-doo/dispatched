@@ -22,6 +22,7 @@ pub mod ops;
 pub mod paths;
 pub mod profiles;
 pub mod safety;
+pub mod tls;
 pub mod tokens;
 
 pub use activity::{

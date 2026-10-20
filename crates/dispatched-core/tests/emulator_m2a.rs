@@ -28,6 +28,12 @@ use std::time::Duration;
 
 const EMULATOR: &str = "Endpoint=sb://localhost;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;";
 
+/// The namespace the gate runs on: the emulator, or `DISPATCHED_GATE_CONNECTION_STRING` (a cloud
+/// test namespace; the string comes only from the environment and is never printed).
+fn gate_cs() -> String {
+    std::env::var("DISPATCHED_GATE_CONNECTION_STRING").unwrap_or_else(|_| EMULATOR.to_string())
+}
+
 fn enabled() -> bool {
     std::env::var("DISPATCHED_EMULATOR").as_deref() == Ok("1")
 }
@@ -40,7 +46,7 @@ async fn m2a_link_semantics() {
         return;
     }
     let ns =
-        Namespace::from_connection_string(&ConnectionString::parse(EMULATOR).unwrap()).unwrap();
+        Namespace::from_connection_string(&ConnectionString::parse(&gate_cs()).unwrap()).unwrap();
     let mut conn = ServiceBusConnection::open(&ns).await.unwrap();
     let p = testing::probe_m2a_link_semantics(&mut conn, "m1a-browse")
         .await
@@ -277,7 +283,7 @@ async fn m2a_operate() {
         return;
     }
     let ns =
-        Namespace::from_connection_string(&ConnectionString::parse(EMULATOR).unwrap()).unwrap();
+        Namespace::from_connection_string(&ConnectionString::parse(&gate_cs()).unwrap()).unwrap();
     let run = uuid::Uuid::new_v4().simple().to_string();
     eprintln!("m2a_operate run {run}");
     let explorer = Arc::new(Explorer::new(ns.clone()).unwrap());

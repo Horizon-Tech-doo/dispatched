@@ -20,6 +20,12 @@ use std::time::Duration;
 
 const EMULATOR: &str = "Endpoint=sb://localhost;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;";
 
+/// The namespace the gate runs on: the emulator, or `DISPATCHED_GATE_CONNECTION_STRING` (a cloud
+/// test namespace; the string comes only from the environment and is never printed).
+fn gate_cs() -> String {
+    std::env::var("DISPATCHED_GATE_CONNECTION_STRING").unwrap_or_else(|_| EMULATOR.to_string())
+}
+
 fn enabled() -> bool {
     std::env::var("DISPATCHED_EMULATOR").as_deref() == Ok("1")
 }
@@ -119,7 +125,7 @@ async fn emulator_m2b() {
     let dyn_ev: Arc<dyn Events> = ev.clone();
     let p = s
         .store
-        .add_connection_string("emulator-prod", EMULATOR, s.secrets.as_ref(), true)
+        .add_connection_string("emulator-prod", &gate_cs(), s.secrets.as_ref(), true)
         .unwrap();
     crate::ops::connection::connect(&s, &*ev, &p.id)
         .await

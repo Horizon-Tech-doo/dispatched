@@ -85,6 +85,7 @@ impl ManagementClient {
         tokens: Arc<dyn TokenSource>,
         proxy: Option<reqwest::Proxy>,
     ) -> Result<Self> {
+        crate::tls::ensure_crypto_provider();
         let mut builder = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT);
