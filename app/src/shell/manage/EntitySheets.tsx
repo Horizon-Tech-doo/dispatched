@@ -49,12 +49,14 @@ export function StatusSheet({ target }: { target: EntityRefForm }) {
         <SkeletonRows rows={2} />
       ) : (
         <Group label="Status">
+          <div>
           <Segmented<EntityStatus>
             label="Status"
             value={chosen ?? ("" as EntityStatus)}
             onChange={setStatus}
             options={STATUSES[target.kind].map((s) => ({ value: s, label: STATUS[s].label }))}
           />
+          </div>
           <p className="m-0 text-12 text-muted">{chosen ? STATUS[chosen].meaning : "The current status couldn't be read."}</p>
         </Group>
       )}

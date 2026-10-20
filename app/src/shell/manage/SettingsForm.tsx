@@ -102,8 +102,8 @@ function SettingField({
           <Input
             {...ids}
             mono
-            className="w-32"
-            placeholder="e.g. 45s, 5m, 1h30m, 14d"
+            className="w-40"
+            placeholder="45s, 5m, 1h30m, 14d"
             disabled={never}
             value={never || typeof value !== "string" ? "" : value}
             onChange={(e) => onChange(e.target.value || null)}

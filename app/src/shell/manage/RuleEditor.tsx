@@ -71,11 +71,14 @@ export function RuleEditor({
     setFilter(drafts.current[kind] ?? (kind === "true" ? { kind } : kind === "sql" ? { kind, expression: "" } : emptyCorrelation()));
   };
   const f = value.filter;
-  const filterIssue = issueOf(issues, "filter");
+  // A field that is still empty says nothing yet (the primary waits for it); a filter that matches nothing (#794) is
+  // said at once, since choosing it is the trap.
+  const shown = issues.filter((i) => !(i.field === "name" && !value.name.trim()) && !(i.field === "filter" && f.kind === "sql" && !f.expression.trim()));
+  const filterIssue = issueOf(shown, "filter");
   return (
     <div className="flex flex-col gap-3">
       {showName && (
-        <Field label={nameLabel} error={issueOf(issues, "name") && sentence(issueOf(issues, "name")!)} hint={nameReadOnly ? "A rule's name can't change. Add a new rule instead." : undefined}>
+        <Field label={nameLabel} error={issueOf(shown, "name") && sentence(issueOf(shown, "name")!)} hint={nameReadOnly ? "A rule's name can't change. Add a new rule instead." : undefined}>
           {(ids) => <Input {...ids} mono readOnly={nameReadOnly} value={value.name} onChange={(e) => onChange({ ...value, name: e.target.value })} />}
         </Field>
       )}
@@ -83,6 +86,7 @@ export function RuleEditor({
         <span className="text-12 font-semibold text-muted" id="rule-filter-label">
           Filter
         </span>
+        <div>
         <Segmented<Kind>
           label="Filter"
           value={f.kind}
@@ -93,6 +97,7 @@ export function RuleEditor({
             { value: "correlation", label: "Correlation" },
           ]}
         />
+        </div>
         {f.kind === "true" && <p className="m-0 text-12 text-muted">Every message reaches the subscription, as with the default rule.</p>}
         {f.kind === "sql" && (
           <Field label="SQL filter" hideLabel hint="For example: region = 'eu' AND sys.Label LIKE 'order%'">

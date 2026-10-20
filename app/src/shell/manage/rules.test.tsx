@@ -33,6 +33,14 @@ describe("rule editing", () => {
     expect(call.rule).toMatchObject({ name: "eu", filter: { kind: "correlation", subject: "order", properties: [{ name: "region", value: "eu" }] } });
   });
 
+  it("a pristine rule form shows no error, only a disabled Add rule", async () => {
+    open({ op: "rule-save", entity: SUB, rule: null });
+    const sheet = await screen.findByRole("dialog", { name: "Add rule" });
+    await new Promise((r) => setTimeout(r, 400));
+    expect(within(sheet).queryByText(/needs a name|needs an expression/)).toBeNull();
+    expect(within(sheet).getByRole("button", { name: "Add rule" })).toBeDisabled();
+  });
+
   it("empty_correlation_shows_794_and_blocks", async () => {
     open({ op: "rule-save", entity: SUB, rule: null });
     const sheet = await screen.findByRole("dialog", { name: "Add rule" });

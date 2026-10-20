@@ -128,6 +128,7 @@ export function ListenerView({ tab, requiresSession }: { tab: EntityTab; require
           {op.failure && <Problem role="alert" title="Couldn't start the listener" body="Nothing was received." detail={op.failure.message} />}
           <div className="flex flex-col gap-1.5">
             <span className="text-12 font-semibold text-muted">Mode</span>
+            <div>
             <Segmented<ListenMode>
               label="Mode"
               value={mode}
@@ -138,10 +139,12 @@ export function ListenerView({ tab, requiresSession }: { tab: EntityTab; require
                 { value: "delete", label: "Receive and delete" },
               ]}
             />
+              </div>
             <p className="m-0 text-12 text-muted">{MODE_HINT[mode]}</p>
           </div>
           <div className="flex flex-col gap-1.5">
             <span className="text-12 font-semibold text-muted">From</span>
+            <div>
             <Segmented<SubQueue>
               label="Sub-queue"
               value={subQueue}
@@ -152,10 +155,12 @@ export function ListenerView({ tab, requiresSession }: { tab: EntityTab; require
                 { value: "transfer-dead-letter", label: "Transfer DLQ" },
               ]}
             />
+              </div>
           </div>
           {requiresSession && (
             <div className="flex flex-col gap-1.5">
               <span className="text-12 font-semibold text-muted">Sessions</span>
+              <div>
               <Segmented<"each" | "id">
                 label="Sessions"
                 value={sessions}
@@ -165,6 +170,7 @@ export function ListenerView({ tab, requiresSession }: { tab: EntityTab; require
                   { value: "id", label: "One session" },
                 ]}
               />
+                </div>
               {sessions === "id" && (
                 <Field label="Session ID" inline={96}>
                   {(ids) => <Input {...ids} mono value={session} onChange={(e) => setSession(e.target.value)} />}
