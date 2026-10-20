@@ -228,6 +228,18 @@ export function DashboardView() {
               {sel.ids.size > 0 ? `Purge ${formatNumber(sel.ids.size)} selected…` : "Purge…"}
             </Button>
           )}
+          {!limited && (
+            <Button
+              variant="quiet"
+              className="min-w-[148px] tabular-nums"
+              disabled={sel.ids.size === 0}
+              onClick={() =>
+                openSheet({ kind: "operation", op: "entity-delete", entities: rows.filter((r) => sel.ids.has(r.id)).map((r) => ({ kind: r.kind, entity: r.id })) })
+              }
+            >
+              {sel.ids.size > 0 ? `Delete ${formatNumber(sel.ids.size)} selected…` : "Delete…"}
+            </Button>
+          )}
           <Hint label={TSV_HINT}>
             <Button variant="quiet" className="min-w-[124px]" disabled={rows.length === 0} onClick={doCopy}>
               {copy === "copied" ? <Check aria-hidden="true" className="text-icon" /> : <ClipboardCopy aria-hidden="true" className="text-icon" />}

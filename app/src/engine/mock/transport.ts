@@ -303,15 +303,16 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
     remove: (entity, sequences) => sequences.forEach((n) => removed.add(`${entity}|${n}`)),
     matches: (m, f) => matches(m, f),
     kindOf: (entity) => operateKind(entity),
-    countsOf: (entity) => {
+    countsOf: (entity) => countsOfEntity(entity),
+  });
+  function countsOfEntity(entity: string) {
       const [topic, sub] = entity.split("/subscriptions/");
       const c = sub === undefined ? listedQueues().find((q) => q.name === entity)?.counts : subsOf(topic).find((x) => x.name === sub)?.counts;
       if (!c) return null;
       // What is still there after operations took messages away.
       const gone = (k: MockMessage["sub"]) => fx.messagesOf(entity, scenario).filter((m) => m.sub === k && removed.has(`${entity}|${m.sequence_number}`)).length;
       return { active: Math.max(0, c.active - gone("main")), dead_letter: Math.max(0, c.dead_letter - gone("dlq")), transfer_dead_letter: Math.max(0, c.transfer_dead_letter - gone("tdlq")) };
-    },
-  });
+  }
 
   const manage = createManageMock(
     {
@@ -327,6 +328,7 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
         }
       },
       remove: (entity) => void ns.gone.add(entity),
+      count: (entity) => countsOfEntity(entity)?.active ?? null,
       rules: (entity) =>
         structuredClone(ns.rules.get(entity) ?? fx.rules[entity] ?? [{ name: "$Default", filter: { kind: "true" as const }, action: null, created_at: null }]),
       setRules: (entity, rules) => void ns.rules.set(entity, rules),

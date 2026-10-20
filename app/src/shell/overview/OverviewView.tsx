@@ -202,7 +202,7 @@ function SubscriptionsTable({ topic, profileId }: { topic: string; profileId: st
   );
 }
 
-function PropertiesSection({ d, hasCounts, fresh, maxMb, onEdit }: { d: EntityDetails; hasCounts: boolean; fresh: boolean; maxMb: number | null; onEdit?: () => void }) {
+function PropertiesSection({ d, hasCounts, fresh, maxMb, onEdit, onStatus }: { d: EntityDetails; hasCounts: boolean; fresh: boolean; maxMb: number | null; onEdit?: () => void; onStatus?: () => void }) {
   const [state, flash] = useFlash();
   const copyJson = () => {
     if (!navigator.clipboard) return flash("failed");
@@ -220,6 +220,11 @@ function PropertiesSection({ d, hasCounts, fresh, maxMb, onEdit }: { d: EntityDe
           <Copy aria-hidden="true" className="text-icon" />
           Copy JSON
         </Button>
+        {onStatus && (
+          <Button variant="quiet" size="sm" className="h-5 text-muted" onClick={onStatus}>
+            Change status…
+          </Button>
+        )}
         {onEdit && (
           <Button variant="quiet" size="sm" className="h-5 text-muted" onClick={onEdit}>
             Edit settings…
@@ -352,6 +357,7 @@ export function OverviewView({ tab }: { tab: EntityTab }) {
           fresh={!q.isError || showCounts}
           maxMb={maxMb}
           onEdit={conn.profileId ? () => openSheet({ kind: "operation", op: "entity-edit", entityKind: kind, entity: tab.id }) : undefined}
+          onStatus={conn.profileId ? () => openSheet({ kind: "operation", op: "entity-status", target: { kind, entity: tab.id } }) : undefined}
         />
       </div>
     </div>

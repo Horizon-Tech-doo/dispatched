@@ -37,8 +37,20 @@ const VERB: Record<string, string> = {
   resubmit: "Resubmitted", purge: "Removed",
 };
 
+const ENTITY_VERB: Partial<Record<JobKind, string>> = {
+  "create-entities": "Created", "update-entities": "Updated", "delete-entities": "Deleted", duplicate: "Duplicated", rename: "Renamed", "import-entities": "Imported",
+};
+
 /** As core `JobReport::summary_line`. */
 function summaryLine(kind: JobKind, entity: string, target: string | null, items: ItemView[], cancelled: boolean): string {
+  const ev = ENTITY_VERB[kind];
+  if (ev) {
+    const ok = items.filter((i) => i.outcome === "succeeded").length;
+    const noun = (n: number) => (n === 1 ? "entity" : "entities");
+    const skipped = items.filter((i) => i.outcome === "skipped").length;
+    const failed = items.filter((i) => i.outcome === "failed");
+    return `${ev} ${ok === items.length ? `${ok} ${noun(ok)}` : `${ok} of ${items.length} ${noun(items.length)}`}${cancelled ? " (cancelled)" : ""}${skipped ? `; ${skipped} skipped` : ""}${failed.length ? `; ${failed.length} failed (${failed.slice(0, 5).map((i) => `${i.entity}: ${i.reason}`).join(", ")})` : ""}`;
+  }
   const verb = VERB[kind] ?? "Done";
   const place = target ? `from ${entity} to ${target}` : kind === "send" || kind === "import" ? `to ${entity}` : `from ${entity}`;
   const n = (o: ItemOutcome) => items.filter((i) => i.outcome === o).length;

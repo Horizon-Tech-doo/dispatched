@@ -19,6 +19,9 @@ const col = createColumnHelper<Row>();
 
 /** A finished job's report: the core's summary line, its notes, and every item with its outcome, filtered to the
  *  failures or to everything not done. "Save report…" writes it to a file through the save dialog. */
+/** Job kinds whose items are entities. */
+const ENTITY_JOBS = new Set<string>(["create-entities", "update-entities", "delete-entities", "duplicate", "rename", "import-entities"]);
+
 export function ReportView({ job }: { job: Job }) {
   const { prefs } = useShell();
   const r = job.report;
@@ -37,6 +40,8 @@ export function ReportView({ job }: { job: Job }) {
     [page.data, filter],
   );
   const moves = r !== null && ["send", "import", "move", "resubmit"].includes(job.kind);
+  // A manage job's items are entities, not messages.
+  const entities = ENTITY_JOBS.has(job.kind);
   const columns = useMemo(
     () => [
       col.accessor("outcome", {
@@ -49,11 +54,13 @@ export function ReportView({ job }: { job: Job }) {
           </span>
         ),
       }),
-      col.accessor((i) => i.sequence_number ?? i.message_id ?? "", { id: "seq", header: "Seq", meta: { width: "minmax(72px, 112px)", mono: true } }),
+      entities
+        ? col.accessor((i) => i.entity, { id: "entity", header: "Entity", meta: { width: "minmax(120px, 220px)", mono: true } })
+        : col.accessor((i) => i.sequence_number ?? i.message_id ?? "", { id: "seq", header: "Seq", meta: { width: "minmax(72px, 112px)", mono: true } }),
       col.accessor((i) => i.reason ?? "", { id: "reason", header: "Reason", meta: { width: "minmax(120px, 1fr)" } }),
       ...(moves ? [col.accessor((i) => i.new_sequence_number ?? "", { id: "new", header: "New seq", meta: { width: "minmax(72px, 112px)", mono: true } })] : []),
     ],
-    [moves],
+    [moves, entities],
   );
 
   if (!r) return job.summary ? <p className="m-0 text-12 text-fg">{job.summary}</p> : null;

@@ -91,6 +91,13 @@ export function manageCommands(
   if (tab.kind === "topic")
     out.push({ id: "manage:new-subscription", group: "This entity", label: `New subscription on ${name}…`, keywords: ["create", "add"], glyph: "subscription", run: () => c.openSheet({ kind: "operation", op: "entity-create", entityKind: "subscription", topic: tab.id }) });
   out.push({ id: "manage:edit", group: "This entity", label: `Edit settings of ${name}…`, keywords: ["properties", "lock", "ttl", "forward", "configure"], run: () => c.openSheet({ kind: "operation", op: "entity-edit", entityKind: tab.kind, entity: tab.id }) });
+  const target = { kind: tab.kind, entity: tab.id };
+  out.push({ id: "manage:status", group: "This entity", label: `Change status of ${name}…`, keywords: ["disable", "enable", "active"], run: () => c.openSheet({ kind: "operation", op: "entity-status", target }) });
+  if (tab.kind !== "topic")
+    out.push({ id: "manage:duplicate", group: "This entity", label: `Duplicate ${name}…`, keywords: ["copy", "clone"], run: () => c.openSheet({ kind: "operation", op: "entity-duplicate", target }) });
+  if (tab.kind !== "subscription")
+    out.push({ id: "manage:rename", group: "This entity", label: `Rename ${name}…`, keywords: ["move"], run: () => c.openSheet({ kind: "operation", op: "entity-rename", target }) });
+  out.push({ id: "manage:delete", group: "This entity", label: `Delete ${name}…`, keywords: ["remove", "drop"], run: () => c.openSheet({ kind: "operation", op: "entity-delete", entities: [target] }) });
   return out;
 }
 

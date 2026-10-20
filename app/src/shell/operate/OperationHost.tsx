@@ -9,6 +9,7 @@ import { ResubmitSheet } from "./ResubmitSheet";
 import { CancelScheduledSheet, SettleDeferredSheet } from "./ScheduledSheets";
 import type { OperationSeed } from "./seed";
 import { EntityCreateSheet, EntityEditSheet } from "../manage/EntitySheet";
+import { CopySheet, DeleteEntitiesSheet, StatusSheet } from "../manage/EntitySheets";
 import { PolicyAddSheet, PolicyChangeSheet } from "../manage/PolicySheet";
 import { RuleRemoveSheet, RuleSaveSheet } from "../manage/RuleSheet";
 
@@ -39,6 +40,13 @@ export function OperationHost({ seed }: { seed: OperationSeed }) {
       return <EntityCreateSheet kind={seed.entityKind} topic={seed.topic} />;
     case "entity-edit":
       return <EntityEditSheet kind={seed.entityKind} entity={seed.entity} />;
+    case "entity-status":
+      return <StatusSheet target={seed.target} />;
+    case "entity-duplicate":
+    case "entity-rename":
+      return <CopySheet target={seed.target} rename={seed.op === "entity-rename"} />;
+    case "entity-delete":
+      return <DeleteEntitiesSheet entities={seed.entities} />;
     case "rule-save":
       return <RuleSaveSheet entity={seed.entity} rule={seed.rule} />;
     case "rule-remove":

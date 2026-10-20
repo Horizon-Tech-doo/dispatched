@@ -1,4 +1,4 @@
-import type { EntityKindName, FilterSpec, MessageDetail, PeekView, PolicyChange, RuleInfo, Settlement, SubQueue } from "@/engine";
+import type { EntityKindName, EntityRefForm, FilterSpec, MessageDetail, PeekView, PolicyChange, RuleInfo, Settlement, SubQueue } from "@/engine";
 
 /** What an operation sheet opens on. Sequence numbers are the grid's numbers; they become strings at the engine call. */
 export type OperationSeed =
@@ -15,6 +15,9 @@ export type OperationSeed =
   /** A new queue or topic, or (with `topic`) a new subscription on that topic. */
   | { op: "entity-create"; entityKind: EntityKindName; topic: string | null }
   | { op: "entity-edit"; entityKind: EntityKindName; entity: string }
+  | { op: "entity-status" | "entity-duplicate" | "entity-rename"; target: EntityRefForm }
+  /** Delete entities with everything they hold (the Dashboard's selection, or one from the tree). */
+  | { op: "entity-delete"; entities: EntityRefForm[] }
   /** Add a rule to a subscription, or (with `rule`) edit that rule. */
   | { op: "rule-save"; entity: string; rule: RuleInfo | null }
   /** Remove a rule; `last` when it is the subscription's only rule. */

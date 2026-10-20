@@ -16,6 +16,8 @@ export interface NamespaceHost {
   remove(entity: string): void;
   rules(entity: string): RuleInfo[];
   setRules(entity: string, rules: RuleInfo[]): void;
+  /** The active messages an entity holds, or null when not known. */
+  count(entity: string): number | null;
   /** Takes the next file the open dialog "returns" for an import (its XML text). */
   openedFile(pick: string): string | null;
 }
@@ -196,6 +198,11 @@ export function createManageMock(h: NamespaceHost, op: Operate, tick: () => numb
         must(t.entity);
         if (rename && t.kind === "subscription") throw new EngineError("invalid", "rename works on queues and topics; duplicate the subscription, then delete it");
         if (!rename && t.kind === "topic") throw new EngineError("invalid", "duplicate works on queues and subscriptions; create the topic and its subscriptions instead");
+        const held = rename ? h.count(t.entity) : 0;
+        if (held) {
+          const n = `about ${held.toLocaleString("en-US")} ${held === 1 ? "message" : "messages"}`;
+          throw new EngineError("conflict", `conflict: ${pathOf(t.entity)} holds ${n}; ${n} would be lost; move them first`);
+        }
         const to = t.kind === "subscription" ? `${t.entity.split("/subscriptions/")[0]}/subscriptions/${newName}` : newName;
         if (h.kindOf(to)) throw new EngineError("conflict", `${pathOf(to)} already exists`);
         const at = name(args.profileId);

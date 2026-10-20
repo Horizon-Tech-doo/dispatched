@@ -49,12 +49,14 @@ describe("manage mock", () => {
 
   it("a rename lists the new name and asks for both", async () => {
     const t = await connected();
-    const { id } = await commands.opEntityCopy("p-logistics", { kind: "queue", entity: "label-print" }, "label-print-2", true);
+    const { id } = await commands.opEntityCopy("p-logistics", { kind: "topic", entity: "archive-events" }, "archive-2", true);
     await t.finished(id);
-    expect(t.confirms.map((c) => c.target)).toEqual(["label-print", "label-print-2"]);
-    const names = (await commands.listEntities("p-logistics")).queues.map((q) => q.name);
-    expect(names).toContain("label-print-2");
-    expect(names).not.toContain("label-print");
+    expect(t.confirms.map((c) => c.target)).toEqual(["archive-events", "archive-2"]);
+    const names = (await commands.listEntities("p-logistics")).topics.map((q) => q.name);
+    expect(names).toContain("archive-2");
+    expect(names).not.toContain("archive-events");
+    // A queue that holds messages is not renamed: they would be lost.
+    await expect(commands.opEntityCopy("p-logistics", { kind: "queue", entity: "label-print" }, "label-print-2", true)).rejects.toMatchObject({ kind: "conflict" });
     t.off();
   });
 
