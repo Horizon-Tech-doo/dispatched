@@ -160,6 +160,8 @@ export function parseProfileShell(v: unknown): ProfileShell {
 export type ShellAction =
   | { type: "open"; tab: { id: string; kind: TabKind; subTab?: SubTabId } }
   | { type: "close"; id: string }
+  /** The entity of tab `from` is now called `to` (a rename): the tab follows it. */
+  | { type: "retarget"; from: string; to: string }
   | { type: "activate"; id: string }
   | { type: "activateIndex"; index: number }
   | { type: "subTab"; id: string; subTab: SubTabId }
@@ -185,6 +187,13 @@ export function shellReducer(s: ProfileShell, a: ShellAction): ProfileShell {
       const tabs = s.tabs.filter((t) => t.id !== a.id);
       const activeTab = s.activeTab !== a.id ? s.activeTab : (tabs[i]?.id ?? tabs[i - 1]?.id ?? null);
       return { ...s, tabs, activeTab };
+    }
+    case "retarget": {
+      if (!s.tabs.some((t) => t.id === a.from) || a.from === a.to) return s;
+      const activeTab = s.activeTab === a.from ? a.to : s.activeTab;
+      // Already open under the new name: the old tab goes.
+      if (s.tabs.some((t) => t.id === a.to)) return { ...s, tabs: s.tabs.filter((t) => t.id !== a.from), activeTab };
+      return { ...s, tabs: s.tabs.map((t) => (t.id === a.from ? { ...t, id: a.to } : t)), activeTab };
     }
     case "activate":
       return s.tabs.some((t) => t.id === a.id) ? { ...s, activeTab: a.id } : s;

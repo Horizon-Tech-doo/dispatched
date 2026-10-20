@@ -187,3 +187,19 @@ describe("sub-tab descriptions", () => {
     expect(sessions.description).toBe("Sessions and their message counts, for session-enabled entities.");
   });
 });
+
+describe("tabs follow manage changes", () => {
+  it("rename_moves_the_open_tab: retarget keeps the sub-tab and the active tab", async () => {
+    const { emptyShell, shellReducer } = await import("../state");
+    let s = shellReducer(emptyShell, { type: "open", tab: { id: "orders", kind: "queue", subTab: "dead-letter" } });
+    s = shellReducer(s, { type: "open", tab: { id: "label-print", kind: "queue" } });
+    s = shellReducer(s, { type: "activate", id: "orders" });
+    s = shellReducer(s, { type: "retarget", from: "orders", to: "orders2" });
+    expect(s.tabs.map((t) => t.id)).toEqual(["orders2", "label-print"]);
+    expect(s.tabs[0].subTab).toBe("dead-letter");
+    expect(s.activeTab).toBe("orders2");
+    // A retarget to a name that is already open closes the old tab instead of doubling it.
+    s = shellReducer(s, { type: "retarget", from: "orders2", to: "label-print" });
+    expect(s.tabs.map((t) => t.id)).toEqual(["label-print"]);
+  });
+});

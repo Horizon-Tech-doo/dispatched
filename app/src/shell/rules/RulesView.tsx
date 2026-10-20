@@ -29,6 +29,7 @@ const matchesNothing = (f: Correlation) => correlationFields(f).length === 0 && 
 
 export function ruleKind(f: RuleFilter): string {
   if (f.kind === "unknown") return "Unknown filter";
+  if (f.kind === "true") return "Matches every message (default rule)";
   if (f.kind === "correlation") return matchesNothing(f) ? "Matches no message" : "Correlation filter";
   if (norm(f.expression) === "1=1") return "Matches every message";
   if (norm(f.expression) === "1=0") return "Matches no message";

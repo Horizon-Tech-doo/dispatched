@@ -6,6 +6,8 @@ import type {
   AccountView, AppInfo, ConnectionReport, ConnectionView, DashboardView, DiscoveryView, EntityDetails, EntityKindName, EntityListing, ExportFormat,
   ExportRequest, FilterIssue, FilterSpec, JobStarted, MessageDetail, PeekPageView, PeekRequest, PeekView, PickedPath, Profile, ProfileDraft, RuleInfo,
   SessionListing, SignedOut, SignInView, StoredSignIn, SubscriptionInfo, TenantView,
+  EntityRefForm, EntityStatus, ExportedEntities, FieldIssue, ImportPreview, KeySlot, ListenForm, PolicyChange, PolicySecret, PolicyView, RuleForm,
+  SettingsChange, SettingsView,
 } from "./types";
 
 export const appInfo = () => call<AppInfo>("app_info");
@@ -116,3 +118,44 @@ export const activitySince = (afterId: number | null) => call<ActivityRecord[]>(
 export const pickActivityExportPath = (format: ExportFormat) => call<PickedPath | null>("pick_activity_export_path", { format });
 /** Writes the matching entries; returns how many. */
 export const activityExport = (query: ActivityQuery, pick: string, format: ExportFormat) => call<number>("activity_export", { query, pick, format });
+
+// ---- M3b manage: reads, checks, and `op*` jobs (the job id comes back at once; confirmations and the report are events) ----
+
+/** The entity's settings, read fresh, for its edit form. */
+export const entitySettings = (profileId: string, kind: EntityKindName, entity: string) => call<SettingsView>("entity_settings", { profileId, kind, entity });
+/** Names and rights; the keys never leave the engine. Subscriptions have none (`invalid`). */
+export const entityPolicies = (profileId: string, kind: EntityKindName, entity: string) => call<PolicyView[]>("entity_policies", { profileId, kind, entity });
+/** Problems with a settings form, one per field; local. */
+export const checkSettings = (kind: EntityKindName, form: SettingsChange, create: boolean) => call<FieldIssue[]>("check_settings", { kind, form, create });
+/** Problems with a rule (`name`, `filter`); local. */
+export const checkRule = (rule: RuleForm) => call<FieldIssue[]>("check_rule", { rule });
+/** Rust writes the key or connection string to the clipboard; nothing comes back. */
+export const copyPolicySecret = (profileId: string, kind: EntityKindName, entity: string, policy: string, slot: KeySlot, what: PolicySecret) =>
+  call<void>("copy_policy_secret", { profileId, kind, entity, policy, slot, what });
+export const opEntityCreate = (profileId: string, kind: EntityKindName, entity: string, settings: SettingsChange, rule: RuleForm | null) =>
+  call<JobStarted>("op_entity_create", { profileId, kind, entity, settings, rule });
+/** Only `changes` are applied, to the entity as it is when the job runs. */
+export const opEntityUpdate = (profileId: string, kind: EntityKindName, entity: string, changes: SettingsChange) =>
+  call<JobStarted>("op_entity_update", { profileId, kind, entity, changes });
+export const opEntityDelete = (profileId: string, entities: EntityRefForm[]) => call<JobStarted>("op_entity_delete", { profileId, entities });
+export const opEntityStatus = (profileId: string, target: EntityRefForm, status: EntityStatus) => call<JobStarted>("op_entity_status", { profileId, target, status });
+/** Duplicate, or with `rename` rename (create the copy, then delete the original). */
+export const opEntityCopy = (profileId: string, target: EntityRefForm, newName: string, rename: boolean) =>
+  call<JobStarted>("op_entity_copy", { profileId, target, newName, rename });
+/** Add a rule, or with `update` replace an existing one's filter and action. */
+export const opRuleSave = (profileId: string, entity: string, rule: RuleForm, update: boolean) => call<JobStarted>("op_rule_save", { profileId, entity, rule, update });
+export const opRuleRemove = (profileId: string, entity: string, name: string) => call<JobStarted>("op_rule_remove", { profileId, entity, name });
+export const opPolicyChange = (profileId: string, target: EntityRefForm, name: string, change: PolicyChange) =>
+  call<JobStarted>("op_policy_change", { profileId, target, name, change });
+export const pickEntitiesExportPath = (namespace: string) =>
+  call<PickedPath | null>("pick_entities_export_path", { namespace, localOffsetMinutes: localOffsetMinutes() });
+/** Writes the ServiceBusExplorer XML of `entities` (none: the whole namespace). A read: nothing is confirmed. */
+export const entitiesExport = (profileId: string, entities: EntityRefForm[], includeKeys: boolean, pick: string) =>
+  call<ExportedEntities>("entities_export", { profileId, entities, includeKeys, pick });
+/** Reads and checks the file picked with purpose `entities`; nothing changes yet. */
+export const entitiesImportPreview = (profileId: string, pick: string) => call<ImportPreview>("entities_import_preview", { profileId, pick });
+export const opEntitiesImport = (profileId: string, previewId: string, overwrite: boolean) => call<JobStarted>("op_entities_import", { profileId, previewId, overwrite });
+/** Starts a listener; it runs until `jobCancel`. Each message arrives as a `received` job event. */
+export const opListen = (profileId: string, form: ListenForm) => call<JobStarted>("op_listen", { profileId, form });
+/** A message a listener or receive job took, by sequence number (text); null when it holds none. */
+export const jobMessage = (id: string, sequence: string) => call<MessageDetail | null>("job_message", { id, sequence });

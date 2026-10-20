@@ -151,7 +151,8 @@ export interface ActivityEntry { at: string; action: string; duration_ms: number
 
 /** What a job does: an export, a core operate kind, or a session-state change. */
 export type JobKind =
-  | "export" | "send" | "import" | "cancel-scheduled" | "receive" | "settle-deferred" | "delete" | "move" | "resubmit" | "purge" | "session-state";
+  | "export" | "send" | "import" | "cancel-scheduled" | "receive" | "settle-deferred" | "delete" | "move" | "resubmit" | "purge" | "session-state"
+  | "create-entities" | "update-entities" | "delete-entities" | "duplicate" | "rename" | "import-entities" | "listen";
 
 export type ItemOutcome = "succeeded" | "failed" | "skipped" | "missing" | "not-reached";
 /** One message's result in an operate job. Sequence numbers are strings: they can exceed 2^53. */
@@ -334,7 +335,7 @@ export interface DlqSummaryView { groups: ReasonGroup[]; scanned: number; trunca
 /** A session's state: base64 always, text when it is UTF-8. */
 export interface SessionStateView { base64: string; text: string | null; len: number }
 
-export type OpenPurpose = "body" | "template" | "import";
+export type OpenPurpose = "body" | "template" | "import" | "entities";
 /** Files the open dialog returned, kept in the engine under `pick`; `names` are for display. */
 export interface OpenedFiles { pick: string; names: string[] }
 
@@ -443,6 +444,8 @@ export interface EntityDetails {
 
 export interface CorrelationProperty { name: string; value: string }
 export type RuleFilter =
+  /** The default rule's filter: every message. */
+  | { kind: "true" }
   | { kind: "sql"; expression: string }
   | {
       kind: "correlation";
@@ -526,3 +529,80 @@ export interface StoredSignIn {
 }
 /** `closed_profile_id`: the active connection used the sign-in and was closed (its jobs cancelled). */
 export interface SignedOut { closed_profile_id: string | null }
+
+// ---- M3b manage and listen ----
+
+export type EntityStatus = "Active" | "Disabled" | "SendDisabled" | "ReceiveDisabled";
+
+/** The settings of an entity, by name. Durations are text (`45s`, `1h30m`, `max`); `""` clears a forwarding target or
+ *  the metadata. Only the settings given change. */
+export interface SettingsChange {
+  lock_duration?: string;
+  max_size_in_megabytes?: number;
+  requires_duplicate_detection?: boolean;
+  requires_session?: boolean;
+  default_message_time_to_live?: string;
+  dead_lettering_on_message_expiration?: boolean;
+  dead_lettering_on_filter_evaluation_exceptions?: boolean;
+  duplicate_detection_history_time_window?: string;
+  max_delivery_count?: number;
+  enable_batched_operations?: boolean;
+  status?: EntityStatus;
+  forward_to?: string;
+  forward_dead_lettered_messages_to?: string;
+  auto_delete_on_idle?: string;
+  enable_partitioning?: boolean;
+  enable_express?: boolean;
+  support_ordering?: boolean;
+  max_message_size_in_kilobytes?: number;
+  user_metadata?: string;
+}
+export type SettingName = keyof SettingsChange;
+/** An entity's settings for its edit form: every setting its kind has, `null` when not set. */
+export interface SettingsView {
+  kind: EntityKindName;
+  entity: string;
+  settings: { [K in SettingName]?: SettingsChange[K] | null };
+  /** Settings fixed when the entity was created. */
+  fixed: SettingName[];
+}
+export interface FieldIssue { field: string; message: string }
+export type RuleFilterForm =
+  | { kind: "true" }
+  | { kind: "sql"; expression: string }
+  | {
+      kind: "correlation";
+      correlation_id?: string | null;
+      message_id?: string | null;
+      to?: string | null;
+      reply_to?: string | null;
+      subject?: string | null;
+      session_id?: string | null;
+      reply_to_session_id?: string | null;
+      content_type?: string | null;
+      properties: { name: string; value: string }[];
+    };
+export interface RuleForm { name: string; filter: RuleFilterForm; action: string | null }
+export type AccessRight = "listen" | "send" | "manage";
+/** A shared access policy without its keys. */
+export interface PolicyView { key_name: string; rights: AccessRight[] }
+export type KeySlot = "primary" | "secondary";
+export type PolicySecret = "connection-string" | "key";
+export type PolicyChange = { type: "add"; rights: AccessRight[] } | { type: "remove" } | { type: "renew"; slot: KeySlot };
+/** An entity as the engine takes it: its kind and its id (`topic/subscriptions/name` for a subscription). */
+export interface EntityRefForm { kind: EntityKindName; entity: string }
+export interface ExportedEntities { count: number; file_name: string }
+export interface ImportPreviewRow { kind: EntityKindName; entity: string; rules: number; policies: number; keys: boolean }
+export interface ImportPreview { preview_id: string; entities: ImportPreviewRow[] }
+export type ListenMode = "watch" | "complete" | "delete";
+export type ListenSessions = { type: "none" } | { type: "id"; id: string } | { type: "each" };
+export interface ListenForm {
+  entity: string;
+  sub_queue: SubQueue;
+  mode: ListenMode;
+  sessions: ListenSessions;
+  /** Receivers at once, 1 to 8 (watch: 1). */
+  concurrency: number;
+  /** Credit per receiver in delete mode, 0 to 100. */
+  prefetch: number;
+}
