@@ -8,6 +8,7 @@ import { ReceiveSheet } from "./ReceiveSheet";
 import { ResubmitSheet } from "./ResubmitSheet";
 import { CancelScheduledSheet, SettleDeferredSheet } from "./ScheduledSheets";
 import type { OperationSeed } from "./seed";
+import { EntityCreateSheet, EntityEditSheet } from "../manage/EntitySheet";
 import { PolicyAddSheet, PolicyChangeSheet } from "../manage/PolicySheet";
 import { RuleRemoveSheet, RuleSaveSheet } from "../manage/RuleSheet";
 
@@ -34,6 +35,10 @@ export function OperationHost({ seed }: { seed: OperationSeed }) {
       return <PurgeSheet entities={seed.entities} />;
     case "session-state":
       return <SessionStateSheet entity={seed.entity} session={seed.session} />;
+    case "entity-create":
+      return <EntityCreateSheet kind={seed.entityKind} topic={seed.topic} />;
+    case "entity-edit":
+      return <EntityEditSheet kind={seed.entityKind} entity={seed.entity} />;
     case "rule-save":
       return <RuleSaveSheet entity={seed.entity} rule={seed.rule} />;
     case "rule-remove":

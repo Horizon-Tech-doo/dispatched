@@ -12,6 +12,9 @@ export type OperationSeed =
   | { op: "settle-deferred"; entity: string; subQueue: SubQueue; sequences: number[]; session: string | null; how?: Settlement["type"] }
   | { op: "purge"; entities: string[] }
   | { op: "session-state"; entity: string; session: string }
+  /** A new queue or topic, or (with `topic`) a new subscription on that topic. */
+  | { op: "entity-create"; entityKind: EntityKindName; topic: string | null }
+  | { op: "entity-edit"; entityKind: EntityKindName; entity: string }
   /** Add a rule to a subscription, or (with `rule`) edit that rule. */
   | { op: "rule-save"; entity: string; rule: RuleInfo | null }
   /** Remove a rule; `last` when it is the subscription's only rule. */

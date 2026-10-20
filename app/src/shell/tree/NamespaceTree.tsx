@@ -17,7 +17,7 @@ import { marksTier, type MarksTier } from "./marksLayout";
 import { accessAdvice, useAuthKind } from "../access";
 import { describeListError } from "./listError";
 import { buildNodes, type NsNode, type SubsState } from "./model";
-import { operateCommands, requiresSession } from "../palette/commands";
+import { manageCommands, operateCommands, requiresSession } from "../palette/commands";
 import type { EntityCounts } from "@/engine";
 
 const errorKind = (e: Error) => (e as { kind?: string }).kind ?? "";
@@ -402,6 +402,14 @@ export function NamespaceTree() {
                     </Fragment>
                   );
                 })}
+              {manageCommands(menuEntity ?? null, { openSheet })
+                .filter((c) => c.id !== "manage:edit" || menuEntity)
+                .map((c) => (
+                  <ContextMenuItem key={c.id} onSelect={c.run}>
+                    {c.label}
+                  </ContextMenuItem>
+                ))}
+              <ContextMenuSeparator />
               <ContextMenuItem onSelect={() => void entities.refetch()}>Refresh</ContextMenuItem>
             </ContextMenuContent>
           </ContextMenu>

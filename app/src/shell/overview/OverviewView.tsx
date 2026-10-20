@@ -202,7 +202,7 @@ function SubscriptionsTable({ topic, profileId }: { topic: string; profileId: st
   );
 }
 
-function PropertiesSection({ d, hasCounts, fresh, maxMb }: { d: EntityDetails; hasCounts: boolean; fresh: boolean; maxMb: number | null }) {
+function PropertiesSection({ d, hasCounts, fresh, maxMb, onEdit }: { d: EntityDetails; hasCounts: boolean; fresh: boolean; maxMb: number | null; onEdit?: () => void }) {
   const [state, flash] = useFlash();
   const copyJson = () => {
     if (!navigator.clipboard) return flash("failed");
@@ -220,6 +220,11 @@ function PropertiesSection({ d, hasCounts, fresh, maxMb }: { d: EntityDetails; h
           <Copy aria-hidden="true" className="text-icon" />
           Copy JSON
         </Button>
+        {onEdit && (
+          <Button variant="quiet" size="sm" className="h-5 text-muted" onClick={onEdit}>
+            Edit settings…
+          </Button>
+        )}
       </div>
       {!fresh && <Problem className="mb-2" title="Couldn't refresh the details" body="Showing the last details read." />}
       {d.status && (
@@ -341,7 +346,13 @@ export function OverviewView({ tab }: { tab: EntityTab }) {
       </div>
       <div className="flex min-w-[320px] max-w-[680px] flex-1 flex-col">
         {isTopic && <SubscriptionsTable topic={tab.id} profileId={conn.profileId} />}
-        <PropertiesSection d={d} hasCounts={c !== null} fresh={!q.isError || showCounts} maxMb={maxMb} />
+        <PropertiesSection
+          d={d}
+          hasCounts={c !== null}
+          fresh={!q.isError || showCounts}
+          maxMb={maxMb}
+          onEdit={conn.profileId ? () => openSheet({ kind: "operation", op: "entity-edit", entityKind: kind, entity: tab.id }) : undefined}
+        />
       </div>
     </div>
   );

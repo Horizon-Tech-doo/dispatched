@@ -51,12 +51,14 @@ export function RuleEditor({
   issues,
   nameReadOnly,
   showName = true,
+  nameLabel = "Name",
 }: {
   value: RuleForm;
   onChange(v: RuleForm): void;
   issues: FieldIssue[];
   nameReadOnly?: boolean;
   showName?: boolean;
+  nameLabel?: string;
 }) {
   // What each kind held when the user switched away from it.
   const drafts = useRef<Partial<Record<Kind, RuleFilterForm>>>({ [value.filter.kind]: value.filter });
@@ -73,7 +75,7 @@ export function RuleEditor({
   return (
     <div className="flex flex-col gap-3">
       {showName && (
-        <Field label="Name" error={issueOf(issues, "name") && sentence(issueOf(issues, "name")!)} hint={nameReadOnly ? "A rule's name can't change. Add a new rule instead." : undefined}>
+        <Field label={nameLabel} error={issueOf(issues, "name") && sentence(issueOf(issues, "name")!)} hint={nameReadOnly ? "A rule's name can't change. Add a new rule instead." : undefined}>
           {(ids) => <Input {...ids} mono readOnly={nameReadOnly} value={value.name} onChange={(e) => onChange({ ...value, name: e.target.value })} />}
         </Field>
       )}
