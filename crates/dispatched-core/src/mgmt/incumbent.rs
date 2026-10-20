@@ -298,15 +298,7 @@ fn leaf(name: &str, value: &str) -> String {
 
 /// The entity name of a forwarding target: `sb://ns/archive` becomes `archive`.
 fn bare(target: &Option<String>) -> Option<String> {
-    target.as_ref().map(|t| match url::Url::parse(t) {
-        Ok(u) if t.contains("://") => {
-            let path = u.path().trim_start_matches('/');
-            percent_encoding::percent_decode_str(path)
-                .decode_utf8_lossy()
-                .into_owned()
-        }
-        _ => t.clone(),
-    })
+    super::model::entity_name_of(target.clone())
 }
 
 fn write_policies(o: &mut Out, policies: &[AccessPolicy], include_keys: bool) {
