@@ -14,3 +14,83 @@ jobs:
       cargo-workspace: "."
       kit-ref: v0.2.1
     secrets: inherit
+
+  # The `dispatched` CLI, archived per platform and attached to the draft release the desktop job created.
+  cli:
+    needs: desktop
+    name: CLI ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: "macOS (universal)", os: macos-latest, targets: "aarch64-apple-darwin,x86_64-apple-darwin", archive: macos-universal, ext: zip }
+          - { label: "Linux (x86_64)", os: ubuntu-22.04, targets: x86_64-unknown-linux-gnu, archive: linux-x86_64, ext: tar.gz }
+          - { label: "Linux (aarch64)", os: ubuntu-22.04-arm, targets: aarch64-unknown-linux-gnu, archive: linux-aarch64, ext: tar.gz }
+          - { label: "Windows (x64)", os: windows-latest, targets: x86_64-pc-windows-msvc, archive: windows-x64, ext: zip }
+          - { label: "Windows (ARM64)", os: windows-latest, targets: aarch64-pc-windows-msvc, archive: windows-arm64, ext: zip }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: product
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: product }
+      - uses: actions/checkout@v4
+        with: { repository: Horizon-Tech-doo/horizon-azure-kit, ref: v0.2.1, path: horizon-azure-kit }
+      - if: startsWith(matrix.os, 'ubuntu')
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: "${{ matrix.targets }}" }
+      - uses: swatinem/rust-cache@v2
+        with: { workspaces: "product -> target", key: "cli-${{ matrix.label }}" }
+      - name: Version
+        run: echo "VERSION=$(node -p "require('./app/src-tauri/tauri.conf.json').version")" >> "$GITHUB_ENV"
+      - name: Build
+        run: |
+          mkdir -p out
+          IFS=, read -ra TARGETS <<< "${{ matrix.targets }}"
+          for t in "${TARGETS[@]}"; do cargo build --release --locked -p dispatched --target "$t"; done
+          if [ "${#TARGETS[@]}" -gt 1 ]; then
+            lipo -create -output out/dispatched $(for t in "${TARGETS[@]}"; do echo "target/$t/release/dispatched"; done)
+          elif [ "${{ runner.os }}" = Windows ]; then
+            cp "target/${TARGETS[0]}/release/dispatched.exe" out/
+          else
+            cp "target/${TARGETS[0]}/release/dispatched" out/
+          fi
+          cp LICENSE* out/ 2>/dev/null || true
+      - name: Sign and notarize (macOS)
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"; KEYCHAIN_PASSWORD="$(uuidgen)"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/cert.p12"
+          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" out/dispatched
+          ditto -c -k out "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+      - name: Archive
+        run: |
+          NAME="dispatched-cli_${VERSION}_${{ matrix.archive }}.${{ matrix.ext }}"
+          if [ "${{ matrix.ext }}" = zip ]; then
+            if [ "${{ runner.os }}" = Windows ]; then (cd out && 7z a -tzip "../$NAME" . >/dev/null); else ditto -c -k out "$NAME"; fi
+          else
+            tar -czf "$NAME" -C out .
+          fi
+          if command -v sha256sum >/dev/null; then sha256sum "$NAME" > "$NAME.sha256"; else shasum -a 256 "$NAME" > "$NAME.sha256"; fi
+          echo "ASSET=$NAME" >> "$GITHUB_ENV"
+      - name: Attach to the draft release
+        env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+        run: gh release upload "app-v${VERSION}" "$ASSET" "$ASSET.sha256" --clobber
