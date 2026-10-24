@@ -2,7 +2,6 @@
 //! inside the Mac App Store sandbox (running `/usr/bin/open` from there is not something to rely on);
 //! elsewhere through the platform's usual program.
 
-use std::path::Path;
 
 /// Open `url` (already checked to be `https`) in the default browser.
 pub fn open_url(url: &str) -> std::io::Result<()> {
@@ -26,7 +25,7 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
 
 /// Select `file` in Finder. Only macOS goes through here; the other platforms run their file manager.
 #[cfg(target_os = "macos")]
-pub fn reveal_file(file: &Path) {
+pub fn reveal_file(file: &std::path::Path) {
     use objc2_app_kit::NSWorkspace;
     use objc2_foundation::{NSArray, NSString, NSURL};
     let url = NSURL::fileURLWithPath(&NSString::from_str(&file.to_string_lossy()));
