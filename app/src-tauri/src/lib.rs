@@ -7,6 +7,7 @@ mod manage_commands;
 mod ops;
 mod safety;
 mod state;
+mod workspace;
 
 /// The macOS menu bar. Tauri's default one has File > Close Window on Cmd+W, which would close the
 /// window instead of letting the webview close the active tab, so the app builds its own without it.
@@ -71,8 +72,9 @@ pub fn run() {
     // Windows and Linux have no menu bar by default; only macOS gets one.
     #[cfg(target_os = "macos")]
     let builder = builder.menu(app_menu);
+    #[cfg(feature = "updater")]
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
     builder
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(state::AppState::open())

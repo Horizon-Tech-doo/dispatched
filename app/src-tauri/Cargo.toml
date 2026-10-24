@@ -38,10 +38,18 @@ tauri = { version = "~2.11", features = [] }
 # 2.8+ needs Rust 1.90.
 tauri-plugin-dialog = "~2.7"
 tauri-plugin-process = "~2.3"
-tauri-plugin-updater = "~2.12"
+# Off in the Mac App Store build, where the App Store delivers updates.
+tauri-plugin-updater = { version = "~2.12", optional = true }
 tokio = { version = "1", features = ["sync", "macros", "time", "rt"] }
 url = { workspace = true }
 uuid = { workspace = true }
+
+# Opening the browser and showing files through NSWorkspace, which works inside the Mac App Store sandbox
+# (the same versions Tauri already uses).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString", "NSURL"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSWorkspace"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
@@ -49,5 +57,7 @@ time = { workspace = true, features = ["macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 
 [features]
-default = ["custom-protocol"]
+default = ["custom-protocol", "updater"]
 custom-protocol = ["tauri/custom-protocol"]
+# The in-app updater (GitHub releases). The Mac App Store build turns it off.
+updater = ["dep:tauri-plugin-updater"]

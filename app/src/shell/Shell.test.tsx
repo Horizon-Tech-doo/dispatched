@@ -49,6 +49,7 @@ describe("Shell", () => {
     act(() =>
       client.setQueryData(keys.appInfo, {
         version: "0.0.1",
+        updates: true,
         startup_error: "Your saved connections could not be opened (disk I/O error). Changes made now will not be kept.",
       }),
     );

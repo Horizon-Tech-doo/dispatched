@@ -1,7 +1,7 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { setUpdater, type UpdateInfo } from "@/engine";
+import { keys, setUpdater, type UpdateInfo } from "@/engine";
 import { jobStore } from "../drawer/activity";
 import { started } from "../drawer/jobEvents";
 import { renderShell } from "../test-utils";
@@ -186,6 +186,24 @@ describe("update prompt", () => {
     expect(within(sheet).getByText("You have 0.0.1-mock.")).toBeInTheDocument();
     await user.click(within(sheet).getByRole("button", { name: "Install and restart" }));
     expect(install).toHaveBeenCalledOnce();
+  });
+
+  it("never checks in a build that doesn't update itself, and says where updates come from", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const check = vi.fn(async () => INFO);
+    setUpdater({ check, install: async () => {} });
+    const { client } = renderShell("default");
+    await waitFor(() => expect(client.getQueryData(keys.appInfo)).toBeDefined());
+    act(() => client.setQueryData(keys.appInfo, { version: "0.1.0", startup_error: null, updates: false }));
+    await act(() => vi.advanceTimersByTimeAsync(10_000));
+    expect(check).not.toHaveBeenCalled();
+    vi.useRealTimers();
+    const user = userEvent.setup();
+    await screen.findByRole("list", { name: "Saved connections" });
+    await user.keyboard("{Control>},{/Control}");
+    const sheet = await screen.findByRole("dialog", { name: "Settings" });
+    expect(within(sheet).getByText("Updates come from the App Store.")).toBeInTheDocument();
+    expect(within(sheet).queryByRole("button", { name: "Check for updates" })).not.toBeInTheDocument();
   });
 
   it("checks exactly once 3 s after start when no sheet is open", async () => {

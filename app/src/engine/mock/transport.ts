@@ -375,7 +375,7 @@ export function createMockTransport(scenario: Scenario, delayMs = 0, seed: Recor
     if (delayMs) await wait(delayMs);
     switch (cmd) {
       case "app_info":
-        return { version: "0.0.1-mock", startup_error: null };
+        return { version: "0.0.1-mock", startup_error: null, updates: true };
       case "settings_get":
         return settings.get(args.key as string) ?? null;
       case "settings_set":

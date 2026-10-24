@@ -15,6 +15,8 @@ use tauri::{AppHandle, State};
 pub struct AppInfo {
     version: String,
     startup_error: Option<String>,
+    /// Whether this build updates itself; the Mac App Store build leaves updates to the store.
+    updates: bool,
 }
 
 #[tauri::command]
@@ -22,6 +24,7 @@ pub fn app_info(app: AppHandle, state: State<'_, AppState>) -> AppInfo {
     AppInfo {
         version: app.package_info().version.to_string(),
         startup_error: state.startup_error.clone(),
+        updates: cfg!(feature = "updater"),
     }
 }
 

@@ -156,7 +156,7 @@ pub async fn sign_in(
                             });
                             // The same `https` check as `open_sign_in_page`: the library's URL is not trusted blindly.
                             if let Some(page) = browser_target(url) {
-                                let _ = open::that(page);
+                                let _ = crate::workspace::open_url(page.as_str());
                             }
                         })
                         .await
@@ -245,7 +245,7 @@ pub fn open_sign_in_page(state: &AppState) -> Result<(), CommandError> {
             "The sign-in page is not an https address, so it was not opened.",
         )
     })?;
-    open::that(url.as_str())
+    crate::workspace::open_url(url.as_str())
         .map_err(|e| CommandError::new("io", format!("Couldn't open the browser: {e}")))
 }
 

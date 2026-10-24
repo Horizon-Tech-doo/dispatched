@@ -22,7 +22,20 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data:; connect-src ipc: http://ipc.localhost"
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data:; connect-src ipc: http://ipc.localhost",
+      "capabilities": [
+        "default",
+        {
+          "identifier": "updater",
+          "description": "The in-app updater; the Mac App Store build leaves it out (tauri.appstore.conf.json).",
+          "windows": [
+            "main"
+          ],
+          "permissions": [
+            "updater:default"
+          ]
+        }
+      ]
     }
   },
   "bundle": {

@@ -339,7 +339,8 @@ export type OpenPurpose = "body" | "template" | "import" | "entities";
 /** Files the open dialog returned, kept in the engine under `pick`; `names` are for display. */
 export interface OpenedFiles { pick: string; names: string[] }
 
-export interface AppInfo { version: string; startup_error: string | null }
+/** `updates`: whether this build updates itself (false in the Mac App Store build). */
+export interface AppInfo { version: string; startup_error: string | null; updates: boolean }
 
 // M1c: browse, entity, dashboard, export and sign-ins.
 

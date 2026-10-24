@@ -174,7 +174,11 @@ export function SettingsSheet() {
         <Row label="Version">
           <div className="flex items-center gap-3">
             <span className="text-12 tabular-nums text-muted">{info?.version}</span>
-            <Button size="sm" onClick={() => openSheet({ kind: "update" })}>Check for updates</Button>
+            {info?.updates ? (
+              <Button size="sm" onClick={() => openSheet({ kind: "update" })}>Check for updates</Button>
+            ) : (
+              info && <span className="text-12 text-muted">Updates come from the App Store.</span>
+            )}
           </div>
         </Row>
         <Row label="Accounts" hint="Entra ID sign-ins on this computer, one per tenant you signed in to." stacked>
