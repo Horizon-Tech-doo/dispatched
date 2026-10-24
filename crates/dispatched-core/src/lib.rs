@@ -7,6 +7,7 @@
 
 pub mod activity;
 pub mod connstr;
+pub mod diagnose;
 pub mod diagnostics;
 pub mod discovery;
 pub mod error;
