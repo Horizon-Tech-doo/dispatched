@@ -120,13 +120,18 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          xcrun notarytool submit "$DMG" --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait --output-format json > "$RUNNER_TEMP/notary.json"
-          STATUS="$(node -p "require(process.argv[1]).status" "$RUNNER_TEMP/notary.json")"
-          ID="$(node -p "require(process.argv[1]).id" "$RUNNER_TEMP/notary.json")"
-          echo "notarization $ID: $STATUS"
+          # `submit --wait` exits non-zero on Invalid; keep going so the log is printed.
+          SUBMIT=0
+          xcrun notarytool submit "$DMG" --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait --output-format json > "$RUNNER_TEMP/notary.json" || SUBMIT=$?
+          cat "$RUNNER_TEMP/notary.json"
+          STATUS="$(node -p "try { require(process.argv[1]).status || '' } catch { '' }" "$RUNNER_TEMP/notary.json")"
+          ID="$(node -p "try { require(process.argv[1]).id || '' } catch { '' }" "$RUNNER_TEMP/notary.json")"
+          echo "notarization ${ID:-?}: ${STATUS:-no status} (submit exited $SUBMIT)"
           if [ "$STATUS" != "Accepted" ]; then
-            xcrun notarytool log "$ID" --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" || true
-            echo "::error::notarization of $DMG ended $STATUS"
+            if [ -n "$ID" ]; then
+              xcrun notarytool log "$ID" --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" || true
+            fi
+            echo "::error::notarization of $DMG ended ${STATUS:-without a status}"
             exit 1
           fi
           xcrun stapler staple "$DMG"
