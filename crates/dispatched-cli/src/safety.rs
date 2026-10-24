@@ -434,7 +434,10 @@ fn cli_gate_with(
         on_confirm: Box::new(move || arm(&token)),
         armed: std::sync::Once::new(),
     };
-    Ok((gate_with(ctx, resolved, Arc::new(policy))?, cancel))
+    Ok((
+        gate_with(ctx, &resolved.profile, Origin::Cli, Arc::new(policy))?,
+        cancel,
+    ))
 }
 
 /// The activity log for the gate, saying on stderr when it could not record how an operation
@@ -461,8 +464,19 @@ impl Audit for WarningAudit {
     }
 }
 
-/// A gate over `policy`, the activity log and origin `cli`.
-fn gate_with(ctx: &Ctx, resolved: &Resolved, policy: Arc<dyn Policy>) -> anyhow::Result<Gate> {
+/// The gate for one MCP tool call: `policy` asks through that call's client, the activity log
+/// records it as `mcp`. `profile` comes from the server's resolution, never from the agent.
+pub fn mcp_gate(ctx: &Ctx, profile: &ProfileRef, policy: Arc<dyn Policy>) -> anyhow::Result<Gate> {
+    gate_with(ctx, profile, Origin::Mcp, policy)
+}
+
+/// A gate over `policy`, the activity log and `origin`.
+fn gate_with(
+    ctx: &Ctx,
+    profile: &ProfileRef,
+    origin: Origin,
+    policy: Arc<dyn Policy>,
+) -> anyhow::Result<Gate> {
     let audit: Arc<dyn Audit> = Arc::new(WarningAudit {
         inner: ctx.activity()?.clone(),
         warn: Box::new(|line| eprintln!("{line}")),
@@ -471,8 +485,8 @@ fn gate_with(ctx: &Ctx, resolved: &Resolved, policy: Arc<dyn Policy>) -> anyhow:
         policy,
         audit,
         Actor {
-            origin: Origin::Cli,
-            profile: resolved.profile.clone(),
+            origin,
+            profile: profile.clone(),
         },
     ))
 }

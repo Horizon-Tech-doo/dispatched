@@ -31,8 +31,10 @@ open = "5"
 percent-encoding = "2"
 quick-xml = "0.36"
 regex = "1"
+schemars = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }
 rustls = { version = "0.23.45", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
+rmcp = { version = "=3.5.1", default-features = false, features = ["server", "macros", "schemars", "transport-io", "elicitation"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "charset", "system-proxy", "json", "form", "query"] }
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }

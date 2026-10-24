@@ -158,7 +158,7 @@ pub fn details_table(d: &EntityDetails) -> String {
 
 /// An entity's details: a subscription path is a subscription; any other is a queue, else a
 /// topic (only a missing queue falls through; other errors are reported as they are).
-async fn details_of<F, Fut>(
+pub(crate) async fn details_of<F, Fut>(
     path: &EntityPath,
     mut fetch: F,
 ) -> dispatched_core::Result<EntityDetails>

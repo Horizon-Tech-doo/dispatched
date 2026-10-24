@@ -21,6 +21,8 @@ base64 = { workspace = true }
 clap = { workspace = true }
 dirs = { workspace = true }
 open = { workspace = true }
+rmcp = { workspace = true }
+schemars = { workspace = true }
 secrecy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -32,5 +34,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 libc = "0.2"
 
 [dev-dependencies]
+# The client side of rmcp, for the in-process end-to-end tests of `dispatched mcp`.
+rmcp = { workspace = true, features = ["client", "transport-async-rw"] }
 tempfile = "3"
 time = { workspace = true, features = ["macros"] }

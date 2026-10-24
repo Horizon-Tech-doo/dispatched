@@ -421,7 +421,7 @@ pub async fn scheduled(
 
 /// The queue or topic of `scheduled cancel`: scheduled messages live there, not on a
 /// subscription.
-fn scheduled_target(name: &str) -> anyhow::Result<EntityPath> {
+pub(crate) fn scheduled_target(name: &str) -> anyhow::Result<EntityPath> {
     let path = EntityPath::parse(name)?;
     if path.subscription.is_some() {
         anyhow::bail!(

@@ -676,13 +676,13 @@ pub async fn resubmit(
 }
 
 /// Whether `plan` has nothing to remove: an exact count of 0 and no capped deferred count.
-fn nothing_to_purge(plan: &PurgePlan) -> bool {
+pub(crate) fn nothing_to_purge(plan: &PurgePlan) -> bool {
     plan.total == CountEstimate::Exact(0) && !plan.deferred_truncated
 }
 
 /// The reasons of the purge items a confirmation denied (one item per denied entity; core
 /// records a denial as a skipped item without a sequence number, its reason the denial).
-fn denied_reasons(report: &JobReport) -> Vec<&str> {
+pub(crate) fn denied_reasons(report: &JobReport) -> Vec<&str> {
     report
         .items
         .iter()
