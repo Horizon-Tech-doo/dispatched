@@ -11,6 +11,7 @@ use dispatched_core::{
 };
 use horizon_azure_kit::safety::CancellationToken;
 use serde::{Deserialize, Serialize};
+#[cfg(any(not(target_os = "macos"), test))]
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -491,6 +492,7 @@ pub fn start(
 /// line, so the quoted path must reach it as typed (see `reveal`), not re-escaped by the runtime.
 /// The path is shown the way Explorer reads it: backslashes, and no verbatim (`\\?\`) prefix, which
 /// Explorer doesn't understand (the save dialog returns plain paths; this guards against any other).
+#[cfg(any(not(target_os = "macos"), test))]
 pub fn explorer_select_arg(file: &Path) -> OsString {
     let mut arg = OsString::from("/select,\"");
     match file.to_str() {
@@ -518,11 +520,11 @@ pub fn explorer_path(windir: Option<OsString>) -> PathBuf {
     }
 }
 
-/// The program and arguments that show `file` in the platform's file manager: selected in
-/// Finder (`open -R`) or Explorer (`/select,`); elsewhere its folder is opened.
+/// The program and arguments that show `file` in the file manager, off macOS (which selects it in
+/// Finder through `NSWorkspace`): selected in Explorer (`/select,`); elsewhere its folder is opened.
+#[cfg(any(not(target_os = "macos"), test))]
 pub fn reveal_command(file: &Path, os: &str) -> (&'static str, Vec<OsString>) {
     match os {
-        "macos" => ("open", vec!["-R".into(), file.into()]),
         "windows" => ("explorer.exe", vec![explorer_select_arg(file)]),
         _ => (
             "xdg-open",
@@ -543,7 +545,7 @@ fn reveal_process(_program: &str, args: Vec<OsString>) -> std::process::Command 
     cmd
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn reveal_process(program: &str, args: Vec<OsString>) -> std::process::Command {
     let mut cmd = std::process::Command::new(program);
     cmd.args(args);
@@ -561,8 +563,20 @@ pub fn reveal(jobs: &Jobs, id: &str) -> Result<(), CommandError> {
             "The exported file is no longer there. It was moved or deleted.",
         ));
     }
+    #[cfg(target_os = "macos")]
+    {
+        crate::workspace::reveal_file(&file);
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    reveal_with_program(&file)
+}
+
+/// [`reveal`] by running the platform's file manager.
+#[cfg(not(target_os = "macos"))]
+fn reveal_with_program(file: &Path) -> Result<(), CommandError> {
     let os = std::env::consts::OS;
-    let (program, args) = reveal_command(&file, os);
+    let (program, args) = reveal_command(file, os);
     let status = reveal_process(program, args)
         .status()
         .map_err(|e| CommandError::new("io", format!("Couldn't show the file: {e}")))?;
@@ -1074,8 +1088,6 @@ mod tests {
     #[test]
     fn reveal_selects_the_file_on_each_platform() {
         let f = Path::new("/data/exports/out.json");
-        let (prog, args) = reveal_command(f, "macos");
-        assert_eq!((prog, args), ("open", vec![OsString::from("-R"), f.into()]));
         let (prog, args) = reveal_command(f, "windows");
         assert_eq!(
             (prog, args),
