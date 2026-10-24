@@ -22,7 +22,7 @@ pub struct DiagnoseArgs {
     pub subscription: String,
 }
 
-/// Names cannot be empty or hold a path separator.
+/// Subscription names cannot be empty or hold a path separator.
 fn name_arg(value: &str, what: &str) -> Result<String, rmcp::ErrorData> {
     let v = value.trim();
     if v.is_empty() || v.contains('/') {
@@ -31,6 +31,17 @@ fn name_arg(value: &str, what: &str) -> Result<String, rmcp::ErrorData> {
         )));
     }
     Ok(v.to_string())
+}
+
+/// A topic name: it may contain `/`, as queue and topic names do wherever the tools take an
+/// entity (`EntityPath::parse`), but is not a subscription path.
+fn topic_arg(value: &str) -> Result<String, rmcp::ErrorData> {
+    match EntityPath::parse(value) {
+        Ok(p) if p.subscription.is_none() => Ok(p.entity),
+        _ => Err(super::invalid(format!(
+            "topic `{value}`: give the topic name (it may contain `/`, not `/subscriptions/`)"
+        ))),
+    }
 }
 
 #[tool_router(router = diagnose_router, vis = "pub(crate)")]
@@ -44,7 +55,7 @@ impl Server {
         annotations(read_only_hint = true)
     )]
     async fn diagnose_subscription(&self, Parameters(a): Parameters<DiagnoseArgs>) -> ToolResult {
-        let topic = name_arg(&a.topic, "topic")?;
+        let topic = topic_arg(&a.topic)?;
         let subscription = name_arg(&a.subscription, "subscription")?;
         reply(
             async {
@@ -115,8 +126,13 @@ mod tests {
 
     #[test]
     fn names_are_bare() {
-        assert_eq!(name_arg(" events ", "topic").unwrap(), "events");
-        assert!(name_arg("", "topic").is_err());
-        assert!(name_arg("events/subscriptions/x", "topic").is_err());
+        assert_eq!(name_arg(" all ", "subscription").unwrap(), "all");
+        assert_eq!(topic_arg(" events ").unwrap(), "events");
+        assert!(name_arg("", "subscription").is_err());
+        // Topic names may contain `/`, as everywhere else; subscription names may not.
+        assert_eq!(topic_arg("orders/eu").unwrap(), "orders/eu");
+        assert!(topic_arg("orders//eu").is_err());
+        assert!(topic_arg("events/Subscriptions/x").is_err());
+        assert!(name_arg("a/b", "subscription").is_err());
     }
 }

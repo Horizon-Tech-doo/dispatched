@@ -682,3 +682,97 @@ async fn mcp_emulator() {
     server.close().await;
     eprintln!("mcp_emulator: all steps passed");
 }
+
+#[tokio::test]
+async fn unknown_argument_keys_are_refused_with_the_closest_name() {
+    let ctx = Ctx::for_test_with_profiles(&[]);
+    let (_server, client) = connect(
+        ctx,
+        EMULATOR,
+        false,
+        TestClient::new(true, Mode::Accept(String::new())),
+    )
+    .await;
+    for (tool, a, unknown, suggested) in [
+        // `session_id` is not `session`: dropping it would delete across every session.
+        (
+            "delete_messages",
+            json!({"entity": "orders", "session_id": "A", "filter": "user.k = 1", "max": 1000}),
+            "session_id",
+            Some("session"),
+        ),
+        (
+            "peek_messages",
+            json!({"entity": "orders", "topp": 5}),
+            "topp",
+            Some("top"),
+        ),
+        (
+            "list_profiles",
+            json!({"connection_string": "x"}),
+            "connection_string",
+            None,
+        ),
+        (
+            "diagnose_subscription",
+            json!({"topic": "t", "subscription": "s", "zzz": 1}),
+            "zzz",
+            None,
+        ),
+    ] {
+        match call(&client, tool, a.clone()).await {
+            Err(ServiceError::McpError(e)) => {
+                assert_eq!(e.code, rmcp::model::ErrorCode::INVALID_PARAMS, "{tool}");
+                let m = e.message.to_string();
+                assert!(m.contains(&format!("`{unknown}`")), "{tool}: {m}");
+                // Flattened fields (filters, the selection) are known keys.
+                assert!(
+                    !m.contains("`filter`") && !m.contains("`max`"),
+                    "{tool}: {m}"
+                );
+                if let Some(s) = suggested {
+                    assert!(m.contains(&format!("did you mean `{s}`")), "{tool}: {m}");
+                }
+            }
+            other => panic!("{tool} {a}: expected invalid params, got {other:?}"),
+        }
+    }
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_deleted_or_moved_profile_is_not_reached_through_the_cache() {
+    let ctx = Ctx::for_test_with_profiles(&[
+        ("prod", "prod.servicebus.windows.net", true),
+        ("dev", "dev.servicebus.windows.net", false),
+    ])
+    .signed_in_for_test();
+    // Without forms every change is refused at the gate, so no broker is needed.
+    let tc = TestClient::new(false, Mode::Decline);
+    let (server, client) = connect(ctx, EMULATOR, false, tc).await;
+    let send = |profile: &'static str| json!({"entity": "orders", "body": "x", "profile": profile});
+    let r = call(&client, "send_message", send("prod")).await.unwrap();
+    assert!(is_error(&r, NO_FORMS), "{}", text(&r));
+
+    // Deleted: refused, not served from the cache.
+    let store = server.ctx().store().unwrap();
+    assert!(store.delete("prod", server.ctx().secrets.as_ref()).unwrap());
+    let r = call(&client, "send_message", send("prod")).await.unwrap();
+    assert!(is_error(&r, "no profile named `prod`"), "{}", text(&r));
+
+    // Pointed at another namespace: refused once, then resolved afresh.
+    let r = call(&client, "send_message", send("dev")).await.unwrap();
+    assert!(is_error(&r, NO_FORMS), "{}", text(&r));
+    let mut dev = store.get("dev").unwrap().unwrap();
+    dev.host = "other.servicebus.windows.net".into();
+    store.update(&dev).unwrap();
+    let r = call(&client, "send_message", send("dev")).await.unwrap();
+    assert!(
+        is_error(&r, "now points at other.servicebus.windows.net"),
+        "{}",
+        text(&r)
+    );
+    let r = call(&client, "send_message", send("dev")).await.unwrap();
+    assert!(is_error(&r, NO_FORMS), "{}", text(&r));
+    client.cancel().await.unwrap();
+}

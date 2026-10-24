@@ -53,20 +53,49 @@ pub(crate) struct Target {
     pub name: String,
     /// The namespace host.
     pub host: String,
-    /// Resolved from a saved profile.
-    pub from_profile: bool,
+    /// The saved profile's host when resolved from one, to notice a profile that was changed
+    /// to point elsewhere.
+    pub profile_host: Option<String>,
 }
 
 impl Target {
-    fn new(explorer: Explorer, name: String, from_profile: bool) -> Self {
+    fn new(explorer: Explorer, name: String, profile_host: Option<String>) -> Self {
         let host = explorer.namespace().host().to_string();
         Self {
             explorer: Arc::new(explorer),
             name,
             host,
-            from_profile,
+            profile_host,
         }
     }
+
+    /// Whether it was resolved from a saved profile.
+    pub fn is_saved_profile(&self) -> bool {
+        self.profile_host.is_some()
+    }
+}
+
+/// The host saved on profile `name`.
+fn saved_host(ctx: &Ctx, name: &str) -> anyhow::Result<String> {
+    Ok(ctx
+        .store()?
+        .get(name)?
+        .with_context(|| format!("no profile named `{name}`; see list_profiles"))?
+        .host)
+}
+
+/// Refuse a target whose profile was deleted or renamed, or now points at another namespace.
+fn still_saved(ctx: &Ctx, name: &str, host: &str) -> anyhow::Result<()> {
+    let Some(p) = ctx.store()?.get(name)? else {
+        anyhow::bail!("no profile named `{name}` any more; see list_profiles");
+    };
+    if !p.host.eq_ignore_ascii_case(host) {
+        anyhow::bail!(
+            "profile `{name}` now points at {}; call again to use it",
+            p.host
+        );
+    }
+    Ok(())
 }
 
 struct Inner {
@@ -92,11 +121,16 @@ impl Server {
         let from_profile = sel.connection_string.is_none() && sel.namespace.is_none();
         let default = resolve_selected(&ctx, sel)
             .and_then(|r| {
+                let profile_host = if from_profile {
+                    Some(saved_host(&ctx, &r.profile.name)?)
+                } else {
+                    None
+                };
                 let explorer = Explorer::new(r.namespace)?;
                 Ok(Arc::new(Target::new(
                     explorer,
                     r.profile.name,
-                    from_profile,
+                    profile_host,
                 )))
             })
             .map_err(|e| error_text(&e));
@@ -119,16 +153,34 @@ impl Server {
     }
 
     /// The target of a call: the saved profile `profile`, or the server's default. A profile is
-    /// resolved on first use and kept, with its connection, for the server's life.
+    /// resolved on first use and kept, with its connection, while it stays saved as it was:
+    /// every call reads it again, and a deleted, renamed or re-pointed profile is refused and
+    /// forgotten, so the next call resolves it afresh.
     pub(crate) fn target(&self, profile: Option<&str>) -> anyhow::Result<Arc<Target>> {
         let Some(name) = profile.map(str::trim).filter(|p| !p.is_empty()) else {
-            return self.inner.default.clone().map_err(|e| {
+            let t = self.inner.default.clone().map_err(|e| {
                 anyhow::anyhow!("{e}; pass `profile` with a saved profile name (see list_profiles)")
-            });
+            })?;
+            if let Some(host) = &t.profile_host {
+                still_saved(self.ctx(), &t.name, host).map_err(|e| {
+                    anyhow::anyhow!("{e:#}; restart the server to change its default")
+                })?;
+            }
+            return Ok(t);
         };
         let key = name.to_lowercase();
-        if let Some(t) = self.lock_profiles().get(&key) {
-            return Ok(t.clone());
+        let cached = self.lock_profiles().get(&key).cloned();
+        if let Some(t) = cached {
+            let host = t.profile_host.as_deref().unwrap_or(&t.host);
+            return match still_saved(self.ctx(), name, host) {
+                Ok(()) => Ok(t),
+                Err(e) => {
+                    if let Some(gone) = self.lock_profiles().remove(&key) {
+                        tokio::spawn(async move { gone.explorer.close().await });
+                    }
+                    Err(e)
+                }
+            };
         }
         let sel = Selection {
             connection_string: None,
@@ -136,8 +188,13 @@ impl Server {
             profile: Some(name),
         };
         let resolved = resolve_selected(self.ctx(), &sel)?;
+        let profile_host = saved_host(self.ctx(), &resolved.profile.name)?;
         let explorer = Explorer::new(resolved.namespace)?;
-        let target = Arc::new(Target::new(explorer, resolved.profile.name, true));
+        let target = Arc::new(Target::new(
+            explorer,
+            resolved.profile.name,
+            Some(profile_host),
+        ));
         // A concurrent first use keeps the first one.
         Ok(self.lock_profiles().entry(key).or_insert(target).clone())
     }
@@ -158,7 +215,7 @@ impl Server {
             Ok(self.ctx().store()?.list()?.iter().any(|p| {
                 p.production
                     && (p.host.eq_ignore_ascii_case(&target.host)
-                        || (target.from_profile && p.name.eq_ignore_ascii_case(&target.name)))
+                        || (target.is_saved_profile() && p.name.eq_ignore_ascii_case(&target.name)))
             }))
         };
         let production = check().with_context(|| {
@@ -185,6 +242,91 @@ impl Server {
     }
 }
 
+/// The edit distance between two names (for "did you mean").
+fn distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let here = row[j + 1];
+            row[j + 1] = (prev + usize::from(ca != *cb))
+                .min(row[j] + 1)
+                .min(here + 1);
+            prev = here;
+        }
+    }
+    row[b.len()]
+}
+
+/// The valid name `unknown` most likely meant: the longest one it contains or is part of, else
+/// the nearest within a third of its length (at least 2) edits.
+fn closest<'a>(unknown: &str, valid: &[&'a str]) -> Option<&'a str> {
+    let u = unknown.to_ascii_lowercase();
+    if let Some(v) = valid
+        .iter()
+        .copied()
+        .filter(|v| u.contains(v) || v.contains(u.as_str()))
+        .max_by_key(|v| v.len())
+    {
+        return Some(v);
+    }
+    let limit = (u.chars().count() / 3).max(2);
+    valid
+        .iter()
+        .copied()
+        .map(|v| (distance(&u, v), v))
+        .filter(|(d, _)| *d <= limit)
+        .min()
+        .map(|(_, v)| v)
+}
+
+/// Refuse argument keys the tool's input schema does not name. Serde ignores unknown keys and
+/// rmcp does not validate against the schema, so a `session_id` meant as `session` would
+/// otherwise widen a delete to every session.
+fn check_argument_keys(
+    tool: &rmcp::model::Tool,
+    arguments: Option<&rmcp::model::JsonObject>,
+) -> Result<(), ErrorData> {
+    let Some(arguments) = arguments else {
+        return Ok(());
+    };
+    let mut valid: Vec<&str> = tool
+        .input_schema
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .map(|p| p.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    valid.sort_unstable();
+    let mut unknown: Vec<&str> = arguments
+        .keys()
+        .map(String::as_str)
+        .filter(|k| !valid.contains(k))
+        .collect();
+    unknown.sort_unstable();
+    let Some(first) = unknown.first() else {
+        return Ok(());
+    };
+    let named: Vec<String> = unknown.iter().map(|k| format!("`{k}`")).collect();
+    let mut message = format!(
+        "{} does not take {} {}",
+        tool.name,
+        if unknown.len() == 1 {
+            "the argument"
+        } else {
+            "the arguments"
+        },
+        named.join(", ")
+    );
+    match closest(first, &valid) {
+        Some(v) => message.push_str(&format!("; did you mean `{v}`?")),
+        None if valid.is_empty() => message.push_str("; it takes no arguments"),
+        None => message.push_str(&format!("; it takes {}", valid.join(", "))),
+    }
+    Err(invalid(message))
+}
+
 #[tool_handler(
     router = self.tool_router,
     name = "dispatched",
@@ -195,7 +337,19 @@ impl Server {
         `topic/subscriptions/subscription`. Pass `profile` to use another saved profile than the \
         server's default (see list_profiles)."
 )]
-impl ServerHandler for Server {}
+impl ServerHandler for Server {
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::CallToolResponse, ErrorData> {
+        if let Some(tool) = self.tool_router.get(&request.name) {
+            check_argument_keys(tool, request.arguments.as_ref())?;
+        }
+        let call = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        self.tool_router.call(call).await
+    }
+}
 
 /// `dispatched mcp`: serve on stdin and stdout until the client disconnects.
 pub async fn serve(ctx: Ctx, sel: &OwnedSelection, read_only: bool) -> anyhow::Result<()> {
