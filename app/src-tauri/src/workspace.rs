@@ -2,7 +2,6 @@
 //! inside the Mac App Store sandbox (running `/usr/bin/open` from there is not something to rely on);
 //! elsewhere through the platform's usual program.
 
-
 /// Open `url` (already checked to be `https`) in the default browser.
 pub fn open_url(url: &str) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
