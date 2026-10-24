@@ -2,7 +2,7 @@
 
 **A fast, cross-platform explorer for Azure Service Bus. Built for humans and agents.**
 
-Dispatched is an open-source alternative to [ServiceBusExplorer](https://github.com/paolosalvatori/ServiceBusExplorer) that runs on Windows, macOS and Linux, signs in with Microsoft Entra ID, works with the Service Bus Emulator, and (soon) exposes an MCP server so agents can inspect and operate your messaging safely.
+Dispatched is an open-source alternative to [ServiceBusExplorer](https://github.com/paolosalvatori/ServiceBusExplorer) that runs on Windows, macOS and Linux, signs in with Microsoft Entra ID, works with the Service Bus Emulator, and exposes an MCP server so agents can inspect and operate your messaging safely.
 
 > **Status:** M2a, operate core and CLI. The CLI can now send, receive, settle, delete, move, resubmit, purge and manage sessions, with confirmations and an activity log. The desktop app is still read-only (M1c browse); its operate screens are M2b. Not ready for production use.
 > Auto-update: release builds are signed and publish an updater manifest (the in-app update prompt arrives with the M1 shell).
@@ -137,6 +137,16 @@ Managing entities works as in the CLI, through the same gate and activity log. E
 - **ServiceBusExplorer XML**: export the namespace or chosen entities (keys only on request, owner-only file), and import a file after a preview of what it holds, optionally replacing existing entities.
 
 The **Listener** tab streams new messages of a queue or subscription: **Watch** shows them and leaves them, while **Receive and complete** and **Receive and delete** remove them (confirmed first) and keep every removed message for the report and for **Send again**. It shows a rolling grid of the newest 1,000 messages and messages and bytes per second over the last minute. It runs until you stop it or close the tab. A removing listener stops itself at 10,000 held messages or 256 MiB, so nothing it removed is lost.
+
+## Agents (MCP)
+
+`dispatched mcp` serves the Model Context Protocol over stdio, so an agent can list entities, peek and search messages, summarize dead-letter queues and diagnose why a subscription gets no messages, and, after you confirm in your MCP client, send, move, resubmit, delete and purge messages or create, change and delete entities. On production profiles you type the entity name; a client that cannot show confirmation forms gets every change refused; `--read-only` leaves the write tools out. Every change is in the activity log as `mcp`.
+
+```bash
+claude mcp add dispatched -- dispatched mcp --profile <name>
+```
+
+See [docs/mcp.md](docs/mcp.md) for the tools, the safety model and config for other clients.
 
 ## Develop
 

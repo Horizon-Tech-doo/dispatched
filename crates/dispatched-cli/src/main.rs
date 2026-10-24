@@ -3,6 +3,7 @@
 mod commands;
 mod context;
 mod jobs;
+mod mcp;
 mod output;
 mod resolve;
 mod safety;
@@ -178,6 +179,13 @@ enum Command {
         #[command(subcommand)]
         cmd: commands::repair::DlqCmd,
     },
+    /// Serve the Model Context Protocol on stdin and stdout, for agents (see docs/mcp.md).
+    /// The namespace is the usual selection; tools can name another saved profile.
+    Mcp {
+        /// Leave every tool that changes the broker out of the tool list.
+        #[arg(long)]
+        read_only: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -250,7 +258,9 @@ fn mutates(command: &Command) -> bool {
         | Command::Delete(_)
         | Command::Move(_)
         | Command::Resubmit(_)
-        | Command::Purge(_) => true,
+        | Command::Purge(_)
+        // The server's changes must survive a client that stops reading.
+        | Command::Mcp { .. } => true,
         Command::Deferred { cmd } => !matches!(cmd, commands::receive::DeferredCmd::Ls(_)),
         Command::Dlq { cmd } => !matches!(cmd, commands::repair::DlqCmd::Summary(_)),
         Command::Rule { cmd } => !matches!(cmd, RuleCmd::Ls { .. }),
@@ -357,6 +367,14 @@ async fn run(cli: Cli) -> Result<JobExit, (anyhow::Error, Hints)> {
     // Opens nothing: the profile store, activity log and keychain are touched
     // only by commands and selections that need them.
     let ctx = Ctx::open();
+    if let Command::Mcp { read_only } = cli.command {
+        // The server owns the context for its whole life.
+        let sel = resolve::select(&flags, &env);
+        return mcp::serve(ctx, &sel, read_only)
+            .await
+            .map(|()| JobExit::Ok)
+            .map_err(|e| (e, hints));
+    }
     run_command(&ctx, cli).await.map_err(|e| (e, hints))
 }
 
@@ -479,6 +497,8 @@ async fn run_command(ctx: &Ctx, cli: Cli) -> anyhow::Result<JobExit> {
         }
         Command::Purge(args) => return commands::repair::purge(ctx, &sel, &args, format).await,
         Command::Dlq { cmd } => return commands::repair::dlq(ctx, &sel, &cmd, format).await,
+        // Served from `run`, which hands the server the context.
+        Command::Mcp { .. } => anyhow::bail!("`dispatched mcp` runs as its own process"),
     };
     done.map(|()| JobExit::Ok)
 }

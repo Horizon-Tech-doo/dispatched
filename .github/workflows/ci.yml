@@ -97,6 +97,12 @@ jobs:
             echo "::error::The desktop emulator gate (emulator_m2b) did not run to the end."
             exit 1
           fi
+          # The MCP server end to end (M4a): an rmcp client answers its confirmation forms.
+          DISPATCHED_EMULATOR=1 cargo test --locked -p dispatched --bin dispatched mcp_emulator -- --nocapture 2>&1 | tee emulator-mcp.log
+          if grep -q 'skipped:' emulator-mcp.log || ! grep -q 'mcp_emulator: all steps passed' emulator-mcp.log; then
+            echo "::error::The MCP gate (mcp_emulator) did not run to the end."
+            exit 1
+          fi
           # The desktop manage and listener gate (M3b).
           DISPATCHED_EMULATOR=1 cargo test --locked -p dispatched-app --lib emulator_m3b -- --nocapture 2>&1 | tee emulator-app-m3b.log
           if grep -q 'skipped:' emulator-app-m3b.log || ! grep -q 'emulator_m3b: all steps passed' emulator-app-m3b.log; then
