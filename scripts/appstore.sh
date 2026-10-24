@@ -36,10 +36,11 @@ cd "$APP_DIR"
 APPLE_SIGNING_IDENTITY="$APP_IDENTITY" npx tauri build \
   --bundles app \
   --target universal-apple-darwin \
-  --no-default-features --features custom-protocol \
-  --config "$CONFIG"
+  --features custom-protocol \
+  --config "$CONFIG" \
+  -- --no-default-features
 
-APP="$ROOT/target/universal-apple-darwin/release/bundle/macos/Dispatched.app"
+APP="${CARGO_TARGET_DIR:-$ROOT/target}/universal-apple-darwin/release/bundle/macos/Dispatched.app"
 PKG="$OUT/Dispatched_${VERSION}_${BUILD}.pkg"
 
 # Tauri signs the app with the store entitlements; refuse to package an app without the sandbox.
