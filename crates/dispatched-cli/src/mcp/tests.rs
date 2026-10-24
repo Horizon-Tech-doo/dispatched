@@ -2,7 +2,7 @@
 //! answers elicitations as the test says. The hermetic tests stop at the gate (a denial needs
 //! no broker); `mcp_emulator` runs reads and changes against the emulator, or the cloud
 //! namespace of `DISPATCHED_GATE_CONNECTION_STRING`.
-//! Run: `testing/emulator/emulator.sh up && DISPATCHED_EMULATOR=1 cargo test -p dispatched mcp:: -- --nocapture`
+//! Run: `testing/emulator/emulator.sh up && DISPATCHED_EMULATOR=1 cargo test -p dispatched mcp_emulator -- --nocapture`
 
 use super::Server;
 use super::policy::NO_FORMS;
@@ -680,4 +680,5 @@ async fn mcp_emulator() {
     assert_eq!(ok_json(&r)["succeeded"], 1);
     client.cancel().await.unwrap();
     server.close().await;
+    eprintln!("mcp_emulator: all steps passed");
 }
