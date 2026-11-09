@@ -84,20 +84,6 @@ jobs:
             throw 'the app is not running 30 seconds after launch'
           }
           Write-Host 'the app is running'
-      - name: Windows App Certification Kit
-        continue-on-error: true
-        timeout-minutes: 25
-        run: |
-          $Kit = "${env:ProgramFiles(x86)}\Windows Kits\10\App Certification Kit\appcert.exe"
-          if (-not (Test-Path $Kit)) { throw "no certification kit at $Kit" }
-          Get-Process Dispatched -ErrorAction SilentlyContinue | Stop-Process -Force
-          $Report = "$PWD\msstore\checks\certification.xml"
-          & $Kit reset
-          & $Kit test -packagefullname (Get-AppxPackage $env:PACKAGE_NAME).PackageFullName -reportoutputpath $Report
-          [xml]$Xml = Get-Content $Report
-          Write-Host "overall result: $($Xml.REPORT.OVERALL_RESULT)"
-          $Xml.SelectNodes('//TEST[RESULT="FAIL"]') | ForEach-Object { Write-Host "FAILED: $($_.NAME) - $($_.DESCRIPTION)" }
-          if ($Xml.REPORT.OVERALL_RESULT -ne 'PASS') { throw 'certification checks did not pass' }
       - uses: actions/upload-artifact@v4
         if: always()
         with:

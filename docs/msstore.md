@@ -21,8 +21,11 @@ values are case-sensitive and must match exactly.
 ## Build
 
 Run the **Microsoft Store** workflow from the Actions tab. It builds `Dispatched_<store version>.msixbundle`
-(artifact `microsoft-store-package`), installs a test copy on the Windows runner, launches it, and runs the Windows App
-Certification Kit (artifact `microsoft-store-checks`, with a screenshot and the report).
+(artifact `microsoft-store-package`), installs a test copy of the x64 package on the Windows runner, launches it, and
+saves a screenshot (artifact `microsoft-store-checks`). The ARM64 package is built but not launched.
+
+The Windows App Certification Kit is not part of the job: on GitHub's Windows Server runner it fails while writing its
+report and marks the tests failed with no reason. To run it, use Windows 10 or 11.
 
 On a Windows machine, `scripts/msstore.ps1` builds the same bundle into `msstore/`.
 
