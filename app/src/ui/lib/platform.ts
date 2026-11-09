@@ -23,3 +23,8 @@ export const isWindows = typeof navigator !== "undefined" && /Win/.test(navigato
 export function fileManagerName(mac: boolean = isMac, windows: boolean = isWindows): "Finder" | "Explorer" | "folder" {
   return mac ? "Finder" : windows ? "Explorer" : "folder";
 }
+
+/** The store that delivers updates to a build that doesn't update itself. */
+export function storeName(windows: boolean = isWindows): "Microsoft Store" | "App Store" {
+  return windows ? "Microsoft Store" : "App Store";
+}
