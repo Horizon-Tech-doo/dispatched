@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { useAppInfo, useProfiles, useSignIns, useSignOut } from "@/engine";
-import { Badge, Button, Problem, Segmented, Sheet } from "@/ui";
+import { Badge, Button, Problem, Segmented, Sheet, storeName } from "@/ui";
 import { useShell } from "../context";
 import type { AutoRefresh, PeekSize } from "../state";
 import { sentence } from "./profileErrors";
@@ -177,7 +177,7 @@ export function SettingsSheet() {
             {info?.updates ? (
               <Button size="sm" onClick={() => openSheet({ kind: "update" })}>Check for updates</Button>
             ) : (
-              info && <span className="text-12 text-muted">Updates come from the App Store.</span>
+              info && <span className="text-12 text-muted">Updates come from the {storeName()}.</span>
             )}
           </div>
         </Row>

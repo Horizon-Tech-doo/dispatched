@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { formatBytes, formatCount, formatDuration, formatNumber } from "./format";
-import { fileManagerName, shortcutLabel } from "./platform";
+import { fileManagerName, shortcutLabel, storeName } from "./platform";
 
 describe("format", () => {
   it("formats counts like the CLI", () => {
@@ -39,5 +39,12 @@ describe("fileManagerName", () => {
     expect(fileManagerName(true, false)).toBe("Finder");
     expect(fileManagerName(false, true)).toBe("Explorer");
     expect(fileManagerName(false, false)).toBe("folder");
+  });
+});
+
+describe("storeName", () => {
+  it("names the store that delivers updates", () => {
+    expect(storeName(true)).toBe("Microsoft Store");
+    expect(storeName(false)).toBe("App Store");
   });
 });

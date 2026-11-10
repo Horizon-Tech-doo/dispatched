@@ -1,0 +1,92 @@
+name: Microsoft Store
+# Builds the unsigned .msixbundle to upload in Partner Center, then installs the x64 package on the runner and
+# launches it. Run it by hand for a release; a push that changes the packaging runs it too.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/msstore.yml
+      - scripts/msstore.ps1
+      - app/src-tauri/msstore/**
+      - app/src-tauri/tauri.msstore.conf.json
+permissions:
+  contents: read
+env:
+  PACKAGE_NAME: HorizonTechd.o.o.DispatchedExplorer
+jobs:
+  package:
+    name: Build and check the package
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: product
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: product }
+      - uses: actions/checkout@v4
+        with: { repository: Horizon-Tech-doo/horizon-azure-kit, ref: v0.2.1, path: horizon-azure-kit }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: "x86_64-pc-windows-msvc,aarch64-pc-windows-msvc" }
+      - uses: swatinem/rust-cache@v2
+        with: { workspaces: "product -> target", key: msstore }
+      - uses: microsoft/setup-WinAppCli@v0.3.0
+        with: { version: v0.8.0 }
+      - name: Install frontend dependencies
+        working-directory: product/app
+        run: npm ci
+      - name: Build the bundle
+        run: scripts/msstore.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: microsoft-store-package
+          path: product/msstore/*.msixbundle
+          if-no-files-found: error
+
+      # A test copy of the x64 package, signed with a throwaway certificate so this runner will install it.
+      # The bundle above stays unsigned.
+      - name: Install a test copy
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item msstore/test -ItemType Directory | Out-Null
+          Copy-Item msstore/x64 msstore/test/app -Recurse
+          Copy-Item msstore/x64/Package.appxmanifest msstore/test/
+          Set-Location msstore/test
+          winapp cert generate --if-exists skip
+          if ($LASTEXITCODE -ne 0) { throw 'cert generate failed' }
+          winapp pack app --cert devcert.pfx --output test.msix
+          if ($LASTEXITCODE -ne 0) { throw 'pack failed' }
+          winapp cert install devcert.pfx
+          if ($LASTEXITCODE -ne 0) { throw 'cert install failed' }
+          Add-AppxPackage (Resolve-Path test.msix)
+          Get-AppxPackage $env:PACKAGE_NAME | Format-List Name, Version, Architecture, PackageFamilyName, PackageFullName
+      - name: Launch it
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item msstore/checks -ItemType Directory | Out-Null
+          $Package = Get-AppxPackage $env:PACKAGE_NAME
+          Start-Process "shell:AppsFolder\$($Package.PackageFamilyName)!App"
+          Start-Sleep -Seconds 30
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $Bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $Image = New-Object System.Drawing.Bitmap $Bounds.Width, $Bounds.Height
+          [System.Drawing.Graphics]::FromImage($Image).CopyFromScreen($Bounds.Location, [System.Drawing.Point]::Empty, $Bounds.Size)
+          $Image.Save("$PWD/msstore/checks/launched.png")
+          $Data = Join-Path $env:LOCALAPPDATA "Packages/$($Package.PackageFamilyName)"
+          Write-Host "app data under ${Data}:"
+          Get-ChildItem $Data -Recurse -Depth 4 -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch 'EBWebView' } | ForEach-Object FullName
+          Write-Host 'the shared %APPDATA%\dispatched folder exists:' (Test-Path (Join-Path $env:APPDATA 'dispatched'))
+          if (-not (Get-Process Dispatched -ErrorAction SilentlyContinue)) {
+            Get-WinEvent -LogName Application -MaxEvents 20 | Format-List TimeCreated, ProviderName, Message
+            throw 'the app is not running 30 seconds after launch'
+          }
+          Write-Host 'the app is running'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: microsoft-store-checks
+          path: product/msstore/checks
+          if-no-files-found: warn
